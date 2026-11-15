@@ -109,7 +109,15 @@ async def real_app_and_db() -> AsyncGenerator[dict, None]:
     dsn_plain = f"postgresql://test:test@{host}:{port}/test"
     dsn_asyncpg = f"postgresql+asyncpg://test:test@{host}:{port}/test"
 
-    minio = MinioContainer()
+    # MinIO registry availability (Nov 2026): ``minio/minio`` was deleted from
+    # Docker Hub (2026-09-11) and quay.io/minio/minio rejects anonymous pulls
+    # (401 UNAUTHORIZED on every tag since 2026-09-24) — CI cannot pull either.
+    # ``pgsty/silo`` is the community MinIO fork's pinned release: anonymously
+    # pullable, multi-arch (amd64+arm64), and verified green through this exact
+    # fixture path (wait strategy + get_config/get_client + bucket ops) with the
+    # SAME credentials (minioadmin/minioadmin) and command the wrapper always
+    # uses — no auth/config changes.
+    minio = MinioContainer(image="docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z")
     minio.start()
     minio_config = minio.get_config()
     minio_endpoint = minio_config["endpoint"]  # "host:port"
