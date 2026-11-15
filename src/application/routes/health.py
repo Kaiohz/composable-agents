@@ -10,7 +10,7 @@ class HealthResponse(BaseModel):
     status: str
 
 
-@router.get("/health", response_model=HealthResponse)
+@router.get("/health")
 async def health_check() -> HealthResponse:
     """Health check endpoint."""
     return HealthResponse(status="ok")

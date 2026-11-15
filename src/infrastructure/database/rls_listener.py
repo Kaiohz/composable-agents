@@ -57,7 +57,21 @@ def _set_rls_guc_before_execute(conn, cursor, _statement, _parameters, _context,
         return
 
     if bypass_rls.get():
-        cursor.execute("SET LOCAL row_security = off")
+        # One statement keeps the unit-tested contract (a single cursor.execute
+        # carrying ``row_security ... off``) while being SAFE for the realistic
+        # non-superuser deployment posture:
+        #
+        # * ``app.bypass_rls`` drives the bypass-aware policies (created/updated
+        #   by migrations 015+ and 018) — this is the mechanism that actually
+        #   works for non-exempt roles, where ``row_security = off`` would make
+        #   EVERY statement on an RLS table error out unconditionally.
+        # * ``row_security = off`` is applied only for superusers, for whom it
+        #   is harmless (they are exempt from RLS anyway).
+        cursor.execute(
+            "SELECT set_config('app.bypass_rls', 'on', true), "
+            "CASE WHEN current_setting('is_superuser') = 'on' "
+            "THEN set_config('row_security', 'off', true) ELSE 'off' END"
+        )
         logger.debug(LogMessage.RLS_BYPASS_ENABLED)
         return
 

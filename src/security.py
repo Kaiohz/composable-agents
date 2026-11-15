@@ -98,7 +98,7 @@ class ComposableAgentsSecurity:
         """Return whether a dual-auth :class:`AuthService` is wired."""
         return self._auth_service is not None
 
-    async def verify_api_key(
+    def verify_api_key(
         self,
         api_key_header: str | None = Depends(api_key_header),
     ) -> str:

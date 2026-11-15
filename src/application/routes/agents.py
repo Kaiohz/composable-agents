@@ -47,7 +47,7 @@ async def _read_yaml_upload(file: UploadFile) -> str:
         raise ConfigError(ErrorMessage.FILE_NOT_UTF8) from e
 
 
-@router.get("", response_model=list[AgentConfigMetadata])
+@router.get("")
 async def list_agents(
     use_case: Annotated[ListAgentConfigsUseCase, Depends(get_list_agent_configs_use_case)],
 ) -> list[AgentConfigMetadata]:
@@ -57,7 +57,7 @@ async def list_agents(
     return agents
 
 
-@router.get("/{agent_name}", response_model=AgentConfig)
+@router.get("/{agent_name}")
 async def get_agent(
     agent_name: str,
     use_case: Annotated[GetAgentConfigUseCase, Depends(get_get_agent_config_use_case)],
@@ -68,11 +68,11 @@ async def get_agent(
     return await use_case.execute(name=agent_name)
 
 
-@router.post("", response_model=AgentConfig, status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED)
 async def create_agent(
     use_case: Annotated[CreateAgentConfigUseCase, Depends(get_create_agent_config_use_case)],
-    agent_name: str = Form(...),
-    file: UploadFile = File(...),
+    agent_name: Annotated[str, Form(...)],
+    file: Annotated[UploadFile, File(...)],
 ) -> AgentConfig:
     """Create a new agent configuration from an uploaded YAML file."""
     _validate_agent_name(agent_name)
@@ -83,11 +83,11 @@ async def create_agent(
     return result
 
 
-@router.put("/{agent_name}", response_model=AgentConfig)
+@router.put("/{agent_name}")
 async def update_agent(
     agent_name: str,
     use_case: Annotated[UpdateAgentConfigUseCase, Depends(get_update_agent_config_use_case)],
-    file: UploadFile = File(...),
+    file: Annotated[UploadFile, File(...)],
 ) -> AgentConfig:
     """Update an existing agent configuration from an uploaded YAML file."""
     _validate_agent_name(agent_name)

@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 class GetCurrentUserUseCase:
     """Build a :class:`UserProfile` from the current :class:`AuthContext`."""
 
-    async def execute(self, ctx: AuthContext) -> UserProfile:
+    def execute(self, ctx: AuthContext) -> UserProfile:
         """Return the public profile of the authenticated user.
 
         Args:

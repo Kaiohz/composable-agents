@@ -33,11 +33,18 @@ class ErrorMessage(StrEnum):
         "Inline the prompt in system_prompt instead."
     )
 
+    # --- Traces (spec §5.4) ---
+    TRACE_CURSOR_INVALID = "Invalid pagination cursor"
+    TRACE_LIMIT_INVALID = "limit must be between 1 and 100"
+
     # --- Agent ---
     AGENT_NOT_FOUND = "Agent not found: {name}"
     AGENT_CONFIG_NOT_FOUND = "Agent config metadata not found: {name}"
     AGENT_CONFIG_NOT_FOUND_IN_STORE = "Agent config not found in store: {name}"
     AGENT_CONFIG_ALREADY_EXISTS = "Agent config already exists: {name}"
+    AGENT_CONFIG_REFERENCE_RACE = (
+        "A prompt or model referenced by agent config '{name}' is no longer available; the reference was not saved."
+    )
     AGENT_NO_FINAL_MESSAGES = "Graph completed but no messages were found in the final state."
     AGENT_EXECUTION_ERROR = "Agent execution error: {error}"
     AGENT_STREAMING_ERROR = "Streaming error: {error}"
@@ -95,12 +102,58 @@ class ErrorMessage(StrEnum):
     MCP_TOOL_LOAD_ERROR = "Failed to load MCP tools: {error}"
     MCP_TOOL_CALL_TIMEOUT = "MCP tool '{name}' timed out after {timeout}s"
 
-    # --- Prompt management ---
-    PROMPT_MANAGER_NOT_INITIALIZED = "Prompt manager client not initialized"
-    PROMPT_NOT_FOUND = "Prompt not found: {identifier}"
-    PROMPT_ALREADY_EXISTS = "Prompt already exists: {identifier}"
-    PROMPT_MANAGER_UNAVAILABLE = "Prompt manager unavailable during '{operation}' for '{identifier}': {error}"
-    PROMPT_MANAGER_SERVER_ERROR = "Prompt manager server error ({status_code}) during '{operation}' for '{identifier}'"
+    # --- Prompt management (Phoenix, removed) ---
+    # Legacy Phoenix prompt templates removed with the Phoenix prompt path.
+    # (kept placeholder comment for section continuity)
+
+    # --- Local prompt registry (spec §5.1) ---
+    PROMPT_NOT_FOUND = "Prompt not found: {prompt_id}"
+    PROMPT_VERSION_NOT_FOUND = "Prompt version {version} not found for prompt {prompt_id}"
+    PROMPT_IN_USE = "Prompt is referenced by one or more agents and cannot be deleted: {prompt_id}"
+    PROMPT_FAILED_CREATE = "Failed to create prompt: {error}"
+    PROMPT_FAILED_GET = "Failed to get prompt {prompt_id}: {error}"
+    PROMPT_FAILED_LIST = "Failed to list prompts: {error}"
+    PROMPT_FAILED_DELETE = "Failed to delete prompt {prompt_id}: {error}"
+    PROMPT_FAILED_ADD_VERSION = "Failed to add version to prompt {prompt_id}: {error}"
+    PROMPT_FAILED_LIST_VERSIONS = "Failed to list versions for prompt {prompt_id}: {error}"
+
+    # --- Model catalog (spec §5.2) ---
+    MODEL_NOT_FOUND = "Model not found: {model_id}"
+    MODEL_IN_USE = "Model is referenced by one or more agents and cannot be deleted: {model_id}"
+    MODEL_FAILED_CREATE = "Failed to create model: {error}"
+    MODEL_FAILED_GET = "Failed to get model {model_id}: {error}"
+    MODEL_FAILED_LIST = "Failed to list models: {error}"
+    MODEL_FAILED_DELETE = "Failed to delete model {model_id}: {error}"
+
+    # --- Cron subsystem (spec §5.3) ---
+    CRON_NOT_FOUND = "Cron not found: {cron_id}"
+    CRON_INVALID_EXPRESSION = "Invalid cron expression '{expression}': {reason}"
+    CRON_INVALID_TIMEZONE = "Invalid timezone '{timezone}'"
+    CRON_AGENT_NOT_ACCESSIBLE = "Cron agent not found or not owned by you: {agent_name}"
+    # Rendered as a 422 boundary error — the message deliberately carries no
+    # client-supplied value (QA BUG-010: no Python ``None`` repr in payloads).
+    CRON_AGENT_NAME_REQUIRED = (
+        "agent_name must be provided as a non-empty string (an explicit null is not a valid agent reference)"
+    )
+    CRON_AGENT_UNATTENDED_PLACEHOLDER = (
+        "Agent '{agent_name}' requires ${{USER_JWT}}/${{USER_API_KEY}} user credentials and cannot run "
+        "unattended (scheduled executions never borrow an interactive user's credentials)."
+    )
+    CRON_FAILED_CREATE = "Failed to create cron: {error}"
+    CRON_FAILED_GET = "Failed to get cron {cron_id}: {error}"
+    CRON_FAILED_LIST = "Failed to list crons: {error}"
+    CRON_FAILED_DELETE = "Failed to delete cron {cron_id}: {error}"
+    CRON_FAILED_UPDATE = "Failed to update cron {cron_id}: {error}"
+    CRON_RUN_CONFLICT = "Cron {cron_id} already has an active run"
+    CRON_RUN_NOT_CREATED = "Failed to create cron run for cron {cron_id}: {error}"
+    CRON_RUN_NOT_UPDATED = "Failed to update cron run {run_id}: {error}"
+    CRON_RUN_LIST_FAILED = "Failed to list runs for cron {cron_id}: {error}"
+    CRON_RUN_AGENT_MISSING = "Cron agent no longer available: {agent_name}"
+    CRON_RUN_INVOCATION_FAILED = "Cron run invocation failed: {error}"
+    CRON_RUN_STALE_RECLAIMED = (
+        "Cron run was interrupted (worker terminated) and was reclaimed; it will not be retried automatically."
+    )
+
 
     # --- Security ---
     API_KEY_UNAUTHORIZED = "The Api Key you provided is unauthorized"

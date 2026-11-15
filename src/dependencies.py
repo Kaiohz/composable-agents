@@ -2,7 +2,11 @@ import logging
 import ssl
 from dataclasses import dataclass
 
-from miniopy_async import Minio
+# NOTE: imported from the typed submodule — the package's own ``__init__.py``
+# carries a file-level ``# type: ignore[...]`` comment, so mypy cannot see the
+# ``Minio`` re-export through the package root (py.typed is only complete on
+# the internal modules).
+from miniopy_async.api import Minio
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import AsyncAdaptedQueuePool
 
@@ -10,16 +14,28 @@ from src.application.use_cases.api_key.create_api_key import CreateApiKeyUseCase
 from src.application.use_cases.api_key.list_api_keys import ListApiKeysUseCase
 from src.application.use_cases.api_key.revoke_api_key import RevokeApiKeyUseCase
 from src.application.use_cases.create_agent_config import CreateAgentConfigUseCase
-from src.application.use_cases.create_prompt import CreatePromptUseCase
 from src.application.use_cases.create_thread import CreateThreadUseCase
+from src.application.use_cases.cron.manage_crons import (
+    CreateCronUseCase,
+    DeleteCronUseCase,
+    GetCronUseCase,
+    ListCronsUseCase,
+    UpdateCronUseCase,
+)
+from src.application.use_cases.cron.run_crons import (
+    ExecuteCronRunUseCase,
+    ListCronRunsUseCase,
+    RunCronNowUseCase,
+    SchedulerTickUseCase,
+)
 from src.application.use_cases.delete_agent_config import DeleteAgentConfigUseCase
 from src.application.use_cases.delete_thread import DeleteThreadUseCase
 from src.application.use_cases.get_agent_config import GetAgentConfigUseCase
-from src.application.use_cases.get_prompt import GetPromptContentUseCase, GetPromptUseCase
 from src.application.use_cases.get_thread import GetThreadUseCase
 from src.application.use_cases.get_thread_history import GetThreadHistoryUseCase
 from src.application.use_cases.list_agent_configs import ListAgentConfigsUseCase
 from src.application.use_cases.list_threads import ListThreadsUseCase
+from src.application.use_cases.list_traces import ListTracesUseCase
 from src.application.use_cases.load_agent_config import LoadAgentConfigUseCase
 from src.application.use_cases.manage_store_file import (
     DeleteStoreFileUseCase,
@@ -28,10 +44,28 @@ from src.application.use_cases.manage_store_file import (
     ListStoreFilesUseCase,
     PutStoreFileUseCase,
 )
+from src.application.use_cases.model.manage_models import (
+    CreateModelUseCase,
+    DeleteModelUseCase,
+    GetModelUseCase,
+    ListModelsUseCase,
+    UpdateModelUseCase,
+)
+from src.application.use_cases.prompt.create_prompt import CreatePromptUseCase
+from src.application.use_cases.prompt.manage_prompt_versions import (
+    AddPromptVersionUseCase,
+    GetPromptVersionUseCase,
+    ListPromptVersionsUseCase,
+)
+from src.application.use_cases.prompt.manage_prompts import (
+    DeletePromptUseCase,
+    GetPromptUseCase,
+    ListPromptsUseCase,
+    UpdatePromptUseCase,
+)
 from src.application.use_cases.send_message import SendMessageUseCase
 from src.application.use_cases.stream_message import StreamMessageUseCase
 from src.application.use_cases.update_agent_config import UpdateAgentConfigUseCase
-from src.application.use_cases.update_prompt import UpdatePromptUseCase
 from src.application.use_cases.user.get_current_user import GetCurrentUserUseCase
 from src.application.use_cases.user_llm_settings.delete_user_llm_settings import DeleteUserLlmSettingsUseCase
 from src.application.use_cases.user_llm_settings.get_user_llm_settings import GetUserLlmSettingsUseCase
@@ -44,24 +78,31 @@ from src.domain.errors.storage import StorageError
 from src.domain.logging.messages import LogMessage
 from src.domain.ports.agent_registry import AgentRegistry
 from src.domain.ports.auth.api_key_repository import ApiKeyRepository
-from src.domain.ports.prompt_manager import PromptManager
+from src.domain.ports.cron_repository import CronRepository, CronRunRepository
+from src.domain.ports.model_repository import ModelRepository
+from src.domain.ports.prompt_repository import PromptRepository
 from src.domain.ports.store_file_repository import StoreFileRepository
 from src.domain.ports.thread_repository import ThreadRepository
 from src.domain.ports.trace_event_repository import TraceEventRepository
+from src.domain.ports.trace_summary_repository import TraceSummaryRepository
 from src.domain.ports.tracing_provider import TracingProvider
 from src.domain.ports.user_llm_settings_repository import UserLlmSettingsRepository
 from src.infrastructure.auth.jwt_adapter import JwtAdapter
 from src.infrastructure.crypto.fernet_crypto import FernetCrypto
 from src.infrastructure.database.rls_context import current_auth_context, current_user_id
 from src.infrastructure.mcp.adapter import LangchainMcpToolLoader
-from src.infrastructure.rustfs_store.adapter import RustfsAgentConfigStore
 from src.infrastructure.persistent_registry.adapter import PersistentAgentRegistry
 from src.infrastructure.postgres_api_key.adapter import PostgresApiKeyRepository
+from src.infrastructure.postgres_cron.adapter import PostgresCronRepository, PostgresCronRunRepository
+from src.infrastructure.postgres_model.adapter import PostgresModelRepository
+from src.infrastructure.postgres_prompt.adapter import PostgresPromptRepository
 from src.infrastructure.postgres_repository.adapter import PostgresAgentConfigRepository
 from src.infrastructure.postgres_thread.adapter import PostgresThreadRepository
 from src.infrastructure.postgres_trace.adapter import PostgresTraceEventRepository
+from src.infrastructure.postgres_trace.summary_repository import PostgresTraceSummaryRepository
 from src.infrastructure.postgres_user_llm.adapter import PostgresUserLlmSettingsRepository
-from src.infrastructure.prompt_management.adapter import PhoenixPromptManagerProvider
+from src.infrastructure.runner_freshness.adapter import PostgresRunnerFreshness
+from src.infrastructure.rustfs_store.adapter import RustfsAgentConfigStore
 from src.infrastructure.store_file.adapter import LangGraphStoreFileRepository
 from src.infrastructure.tracing.noop_adapter import NoopTracingProvider
 from src.infrastructure.yaml_config.adapter import YamlAgentConfigLoader
@@ -71,13 +112,19 @@ logger = logging.getLogger(__name__)
 
 # ============= CONFIG =============
 
-settings = Settings()
+# Runtime-equivalent of ``Settings()``: pydantic-settings resolves required
+# fields (e.g. ``database_url``) from the environment at call time; mypy
+# cannot model that, so the constructor call needs a scoped suppression.
+settings = Settings()  # type: ignore[call-arg]
 
 # ============= TRACING =============
 
 
 def _create_tracing_provider(settings: Settings) -> TracingProvider:
     """Create the appropriate TracingProvider based on settings.
+
+    Phoenix remains CONFIGURED SOLELY as an optional tracing provider
+    (spec §8.9); no prompt path uses it anymore.
 
     Args:
         settings: Application settings containing tracing configuration.
@@ -109,15 +156,6 @@ def _create_tracing_provider(settings: Settings) -> TracingProvider:
 
     logger.info(LogMessage.TRACING_DISABLED)
     return NoopTracingProvider()
-
-
-def get_prompt_manager() -> PromptManager:
-    """Provide PromptManager implementation."""
-    tracing = settings.tracing
-    return PhoenixPromptManagerProvider(
-        base_url=tracing.phoenix_collector_endpoint,
-        api_key=tracing.phoenix_api_key,
-    )
 
 
 # ============= ADAPTERS =============
@@ -152,9 +190,15 @@ class CompositionRoot:
     agent_registry: AgentRegistry | None = None
     thread_repository: ThreadRepository | None = None
     trace_event_repository: TraceEventRepository | None = None
+    trace_summary_repository: TraceSummaryRepository | None = None
     store_file_repository: StoreFileRepository | None = None
     api_key_repository: ApiKeyRepository | None = None
     user_llm_settings_repository: UserLlmSettingsRepository | None = None
+    prompt_repository: PromptRepository | None = None
+    model_repository: ModelRepository | None = None
+    cron_repository: CronRepository | None = None
+    cron_run_repository: CronRunRepository | None = None
+    runner_freshness: PostgresRunnerFreshness | None = None
     fernet_crypto: FernetCrypto | None = None
     jwt_adapter: JwtAdapter | None = None
 
@@ -174,20 +218,37 @@ async def init_persistence() -> None:
         connect_args["statement_cache_size"] = settings.postgres_statement_cache_size
 
     # Build asyncpg SSL context from the sslmode extracted by Settings.
-    # verify-ca / verify-full: use the default context (CA + hostname verification).
-    # require / prefer: encryption without CA verification (matches asyncpg's
-    #   defaults for these modes). Note: "prefer" here forces SSL on with no
-    #   plaintext fallback (unlike libpq's try-SSL-then-fallback semantics);
-    #   this is acceptable for hosts that require SSL (e.g. Neon).
+    #
+    # SSL decision (Sonar S5527/S4830, configuration-driven, safe by default):
+    # every encryption mode builds a single validated context — certificate AND
+    # hostname verification on. Local/self-signed deployments may explicitly
+    # opt out via ``DATABASE_SSL_INSECURE=true``: the flag relaxes exactly one
+    # isolated context (each branch constructs its own connection object so a
+    # relaxed flow can never pollute the validated ones) and logs a loud
+    # warning. The bypass is configuration-driven and never the default.
+    # - ``disable`` / ``allow``: no SSL is built (unchanged).
     ssl_mode = settings.ssl_mode
-    if ssl_mode and ssl_mode not in ("disable", "allow"):
-        if ssl_mode in ("verify-ca", "verify-full"):
-            ctx = ssl.create_default_context()
+    if ssl_mode in ("verify-ca", "verify-full"):
+        connect_args["ssl"] = ssl.create_default_context()
+    elif ssl_mode in ("require", "prefer"):
+        if settings.database_ssl_insecure:
+            logger.warning(
+                LogMessage.DATABASE_SSL_INSECURE_ENABLED,
+                ssl_mode,
+            )
+            # Explicit, configuration-driven opt-out for local/self-signed
+            # stacks (see config.py): the context is created then deliberately
+            # relaxed. Sonar S5527/S4830 correctly flag relaxed verification on
+            # any context they can trace; the marker on each line documents the
+            # single deliberate opt-out (env-gated, warned, never the
+            # production default). Justification: local/self-signed TLS test
+            # stacks need unverified TLS while production defaults validate.
+            insecure_ctx = ssl.create_default_context()  # NOSONAR
+            insecure_ctx.check_hostname = False  # NOSONAR
+            insecure_ctx.verify_mode = ssl.CERT_NONE  # NOSONAR
+            connect_args["ssl"] = insecure_ctx
         else:
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-        connect_args["ssl"] = ctx
+            connect_args["ssl"] = ssl.create_default_context()
 
     _root.async_engine = create_async_engine(
         settings.database_url,
@@ -209,7 +270,13 @@ async def init_persistence() -> None:
     _root.pg_repository = PostgresAgentConfigRepository(engine=_root.async_engine)
     _root.thread_repository = PostgresThreadRepository(engine=_root.async_engine)
     _root.trace_event_repository = PostgresTraceEventRepository(engine=_root.async_engine)
+    _root.trace_summary_repository = PostgresTraceSummaryRepository(engine=_root.async_engine)
     _root.api_key_repository = PostgresApiKeyRepository(engine=_root.async_engine)
+    _root.prompt_repository = PostgresPromptRepository(engine=_root.async_engine)
+    _root.model_repository = PostgresModelRepository(engine=_root.async_engine)
+    _root.cron_repository = PostgresCronRepository(engine=_root.async_engine)
+    _root.cron_run_repository = PostgresCronRunRepository(engine=_root.async_engine)
+    _root.runner_freshness = PostgresRunnerFreshness(engine=_root.async_engine)
     logger.info(LogMessage.POSTGRES_REPOS_INITIALIZED)
 
     # FernetCrypto for per-user LLM API key encryption. If the configured key
@@ -255,10 +322,12 @@ async def init_persistence() -> None:
         config_repository=_root.pg_repository,
         mcp_tool_loader=mcp_tool_loader,
         tracing_provider=tracing_provider,
-        prompt_manager=get_prompt_manager(),
         stream_idle_timeout=settings.agent_stream_idle_timeout,
         invoke_timeout=settings.agent_invoke_timeout,
         llm_credentials_resolver=get_llm_credentials_resolver(),
+        prompt_repository=_root.prompt_repository,
+        model_repository=_root.model_repository,
+        runner_freshness=_root.runner_freshness,
     )
 
     # Store file repository — reuse the singleton LangGraph BaseStore from the
@@ -306,6 +375,11 @@ async def close_persistence() -> None:
     """Close persistent infrastructure resources.
 
     Must be called during application shutdown.
+
+    Also resets the deepagent factory's module-level singletons (shared Postgres
+    store/checkpointer) so a subsequent process (or test session reusing this
+    event loop scope) starts clean instead of encountering connections pinned
+    to a shut-down engine/loop.
     """
     if _root.agent_registry and isinstance(_root.agent_registry, PersistentAgentRegistry):
         await _root.agent_registry.close()
@@ -321,6 +395,8 @@ async def close_persistence() -> None:
         logger.info(LogMessage.JWT_ADAPTER_CLOSED)
 
 
+
+
 def reset() -> None:
     """Reset all persisted state. Useful for testing."""
     _root.async_engine = None
@@ -329,9 +405,15 @@ def reset() -> None:
     _root.agent_registry = None
     _root.thread_repository = None
     _root.trace_event_repository = None
+    _root.trace_summary_repository = None
     _root.store_file_repository = None
     _root.api_key_repository = None
     _root.user_llm_settings_repository = None
+    _root.prompt_repository = None
+    _root.model_repository = None
+    _root.cron_repository = None
+    _root.cron_run_repository = None
+    _root.runner_freshness = None
     _root.fernet_crypto = None
     _root.jwt_adapter = None
 
@@ -426,6 +508,8 @@ def get_create_agent_config_use_case() -> CreateAgentConfigUseCase:
         config_loader=agent_config_loader,
         config_store=store,
         config_repository=repo,
+        prompt_repository=_require_prompt_repository(),
+        model_repository=_require_model_repository(),
     )
 
 
@@ -437,6 +521,8 @@ def get_update_agent_config_use_case() -> UpdateAgentConfigUseCase:
         config_store=store,
         config_repository=repo,
         agent_registry=_require_agent_registry(),
+        prompt_repository=_require_prompt_repository(),
+        model_repository=_require_model_repository(),
     )
 
 
@@ -466,24 +552,202 @@ def get_list_agent_configs_use_case() -> ListAgentConfigsUseCase:
     return ListAgentConfigsUseCase(config_repository=repo)
 
 
+def _require_prompt_repository() -> PromptRepository:
+    """Return the prompt repository or raise StorageError if not initialized."""
+    if _root.prompt_repository is None:
+        raise StorageError(ErrorMessage.STORAGE_REPO_NOT_INITIALIZED)
+    return _root.prompt_repository
+
+
+def _require_model_repository() -> ModelRepository:
+    """Return the model repository or raise StorageError if not initialized."""
+    if _root.model_repository is None:
+        raise StorageError(ErrorMessage.STORAGE_REPO_NOT_INITIALIZED)
+    return _root.model_repository
+
+
+def get_prompt_repository() -> PromptRepository:
+    """Provide a PromptRepository instance (singleton wired at startup)."""
+    return _require_prompt_repository()
+
+
+def get_model_repository() -> ModelRepository:
+    """Provide a ModelRepository instance (singleton wired at startup)."""
+    return _require_model_repository()
+
+
+def _require_cron_repository() -> CronRepository:
+    if _root.cron_repository is None:
+        raise StorageError(ErrorMessage.STORAGE_REPO_NOT_INITIALIZED)
+    return _root.cron_repository
+
+
+def get_cron_repository() -> CronRepository:
+    """Provide a CronRepository instance (singleton wired at startup)."""
+    return _require_cron_repository()
+
+
+def _require_cron_run_repository() -> CronRunRepository:
+    if _root.cron_run_repository is None:
+        raise StorageError(ErrorMessage.STORAGE_REPO_NOT_INITIALIZED)
+    return _root.cron_run_repository
+
+
+def get_cron_run_repository() -> CronRunRepository:
+    """Provide a CronRunRepository instance (singleton wired at startup)."""
+    return _require_cron_run_repository()
+
+
 def get_create_prompt_use_case() -> CreatePromptUseCase:
-    """Provide a CreatePromptUseCase instance."""
-    return CreatePromptUseCase(get_prompt_manager())
+    """Provide a CreatePromptUseCase instance (local registry, PR-004)."""
+    return CreatePromptUseCase(_require_prompt_repository())
 
 
 def get_get_prompt_use_case() -> GetPromptUseCase:
     """Provide a GetPromptUseCase instance."""
-    return GetPromptUseCase(get_prompt_manager())
+    return GetPromptUseCase(_require_prompt_repository())
+
+
+def get_list_prompts_use_case() -> ListPromptsUseCase:
+    """Provide a ListPromptsUseCase instance."""
+    return ListPromptsUseCase(_require_prompt_repository())
 
 
 def get_update_prompt_use_case() -> UpdatePromptUseCase:
-    """Provide an UpdatePromptUseCase instance."""
-    return UpdatePromptUseCase(get_prompt_manager())
+    """Provide a metadata-only UpdatePromptUseCase instance."""
+    return UpdatePromptUseCase(_require_prompt_repository())
 
 
-def get_get_prompt_content_use_case() -> GetPromptContentUseCase:
-    """Provide a GetPromptContentUseCase instance."""
-    return GetPromptContentUseCase(get_prompt_manager())
+def get_delete_prompt_use_case() -> DeletePromptUseCase:
+    """Provide a DeletePromptUseCase instance (reference-safe, PR-005)."""
+    return DeletePromptUseCase(_require_prompt_repository())
+
+
+def get_add_prompt_version_use_case() -> AddPromptVersionUseCase:
+    """Provide an AddPromptVersionUseCase instance (transactional, PR-003)."""
+    return AddPromptVersionUseCase(_require_prompt_repository())
+
+
+def get_list_prompt_versions_use_case() -> ListPromptVersionsUseCase:
+    """Provide a ListPromptVersionsUseCase instance."""
+    return ListPromptVersionsUseCase(_require_prompt_repository())
+
+
+def get_get_prompt_version_use_case() -> GetPromptVersionUseCase:
+    """Provide a GetPromptVersionUseCase instance (pinned immutable read)."""
+    return GetPromptVersionUseCase(_require_prompt_repository())
+
+
+# ============= MODEL CATALOG PROVIDERS =============
+
+
+def get_create_model_use_case() -> CreateModelUseCase:
+    """Provide a CreateModelUseCase instance (metadata-only, MDL-001)."""
+    return CreateModelUseCase(_require_model_repository())
+
+
+def get_get_model_use_case() -> GetModelUseCase:
+    """Provide a GetModelUseCase instance."""
+    return GetModelUseCase(_require_model_repository())
+
+
+def get_list_models_use_case() -> ListModelsUseCase:
+    """Provide a ListModelsUseCase instance."""
+    return ListModelsUseCase(_require_model_repository())
+
+
+def get_update_model_use_case() -> UpdateModelUseCase:
+    """Provide an UpdateModelUseCase instance."""
+    return UpdateModelUseCase(_require_model_repository())
+
+
+def get_delete_model_use_case() -> DeleteModelUseCase:
+    """Provide a DeleteModelUseCase instance (reference-safe, MDL-004)."""
+    return DeleteModelUseCase(_require_model_repository())
+
+
+# ============= CRON PROVIDERS =============
+
+
+def get_create_cron_use_case() -> CreateCronUseCase:
+    """Provide a CreateCronUseCase instance (validated, CRN-002)."""
+    store, repo = _require_persistence()
+    return CreateCronUseCase(
+        cron_repository=_require_cron_repository(),
+        agent_config_repository=repo,
+        config_store=store,
+    )
+
+
+def get_get_cron_use_case() -> GetCronUseCase:
+    """Provide a GetCronUseCase instance."""
+    return GetCronUseCase(_require_cron_repository())
+
+
+def get_list_crons_use_case() -> ListCronsUseCase:
+    """Provide a ListCronsUseCase instance."""
+    return ListCronsUseCase(_require_cron_repository())
+
+
+def get_update_cron_use_case() -> UpdateCronUseCase:
+    """Provide an UpdateCronUseCase instance."""
+    store, repo = _require_persistence()
+    return UpdateCronUseCase(
+        cron_repository=_require_cron_repository(),
+        agent_config_repository=repo,
+        config_store=store,
+    )
+
+
+def get_delete_cron_use_case() -> DeleteCronUseCase:
+    """Provide a DeleteCronUseCase instance."""
+    return DeleteCronUseCase(_require_cron_repository())
+
+
+def get_execute_cron_run_use_case() -> ExecuteCronRunUseCase:
+    """Provide an ExecuteCronRunUseCase instance (single invocation path)."""
+    store, _repo = _require_persistence()
+    return ExecuteCronRunUseCase(
+        cron_repository=_require_cron_repository(),
+        run_repository=_require_cron_run_repository(),
+        thread_repository=_require_thread_repository(),
+        trace_repository=_require_trace_event_repository(),
+        agent_registry=_require_agent_registry(),
+        config_store=store,
+    )
+
+
+def get_run_cron_now_use_case() -> RunCronNowUseCase:
+    """Provide a RunCronNowUseCase instance."""
+    return RunCronNowUseCase(
+        cron_repository=_require_cron_repository(),
+        run_repository=_require_cron_run_repository(),
+        executor=get_execute_cron_run_use_case(),
+    )
+
+
+def get_list_cron_runs_use_case() -> ListCronRunsUseCase:
+    """Provide a ListCronRunsUseCase instance."""
+    return ListCronRunsUseCase(
+        cron_repository=_require_cron_repository(),
+        run_repository=_require_cron_run_repository(),
+    )
+
+
+def get_scheduler_tick_use_case() -> SchedulerTickUseCase:
+    """Provide the production scheduler tick use case (CRN-006 claims)."""
+    return SchedulerTickUseCase(
+        cron_repository=_require_cron_repository(),
+        run_repository=_require_cron_run_repository(),
+        executor=get_execute_cron_run_use_case(),
+    )
+
+
+def get_list_traces_use_case() -> ListTracesUseCase:
+    """Provide a ListTracesUseCase instance (bounded aggregate, TRC-002)."""
+    if _root.trace_summary_repository is None:
+        raise StorageError(ErrorMessage.STORAGE_REPO_NOT_INITIALIZED)
+    return ListTracesUseCase(_root.trace_summary_repository)
 
 
 # ============= STORE FILE PROVIDERS =============

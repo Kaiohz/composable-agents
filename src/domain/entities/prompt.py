@@ -1,42 +1,50 @@
-import re
-from datetime import datetime
-from typing import Any
+"""Local prompt registry domain entities (spec §5.1 PR-002).
 
-from pydantic import BaseModel, Field
+Prompts are per-user records stored in local PostgreSQL. Prompt identity is
+the UUID, not the mutable display name. Versions are immutable and strictly
+sequential (version 1 is created atomically with the prompt).
+"""
 
+import uuid
+from datetime import UTC, datetime
 
-class PromptVersion(BaseModel):
-    """A specific version of a prompt."""
-
-    version_id: str
-    content: list[dict[str, str]] = Field(..., description="Messages with role/content")
-    model_name: str
-    tags: list[str] = Field(default_factory=list)
-    created_at: datetime | None = None  # optional, Phoenix doesn't always return this
+from pydantic import BaseModel, Field, field_validator
 
 
 class Prompt(BaseModel):
-    """Domain entity representing a prompt in Phoenix registry."""
+    """Prompt metadata (owned by a user; versions held separately)."""
 
-    identifier: str = Field(..., description="Unique prompt identifier/name")
-    description: str | None = Field(None)
-    current_version: PromptVersion
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str
+    description: str | None = None
+    latest_version: int = 1
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    # Owner of the prompt — set by the repository from the ``current_user_id``
+    # contextvar on create. Defaults to ``""`` so existing constructions (no
+    # auth context) keep working and the row is invisible under RLS but visible
+    # in SQLite tests (no RLS policies).
+    user_id: str = ""
 
-    def extract_template_variables(self) -> list[str]:
-        """Extract template variable names from current version."""
-        content_str = str(self.current_version.content)
-        pattern = r"\{([^{}]+)\}"
-        matches = re.findall(pattern, content_str)
-        return list(set(matches))
+    @field_validator("name")
+    @classmethod
+    def name_trimmed_non_empty(cls, value: str) -> str:
+        """Trim whitespace and reject empty names (PR-002)."""
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("name must be a non-empty string")
+        return trimmed
 
-    def validate_variables(self, required: list[str]) -> dict[str, Any]:
-        """Validate template has required variables."""
-        found = self.extract_template_variables()
-        missing = set(required) - set(found)
-        return {
-            "is_valid": len(missing) == 0,
-            "found": found,
-            "missing": list(missing),
-        }
+
+class PromptVersion(BaseModel):
+    """An immutable prompt content version (PR-002/PR-003).
+
+    ``content`` is stored and returned verbatim, including whitespace. Empty
+    string is a valid content value.
+    """
+
+    prompt_id: str
+    version: int = Field(ge=1)
+    content: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    user_id: str = ""

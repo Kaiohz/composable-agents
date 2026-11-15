@@ -13,7 +13,6 @@ from src.domain.ports.agent_config_repository import AgentConfigRepository
 from src.domain.ports.agent_config_store import AgentConfigStore
 from src.domain.ports.agent_runner import AgentRunner
 from src.domain.ports.mcp_tool_loader import McpToolLoader
-from src.domain.ports.prompt_manager import PromptManager
 from src.domain.ports.tracing_provider import TracingProvider
 
 
@@ -49,9 +48,3 @@ def mock_agent_config_store():
 def mock_agent_config_repository():
     """AsyncMock spec'd to the AgentConfigRepository port (PostgreSQL boundary)."""
     return AsyncMock(spec=AgentConfigRepository)
-
-
-@pytest.fixture
-def mock_prompt_manager():
-    """AsyncMock spec'd to the PromptManager port (Phoenix boundary)."""
-    return AsyncMock(spec=PromptManager)

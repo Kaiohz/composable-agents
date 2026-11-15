@@ -24,7 +24,7 @@ class TestLoadAgentConfigUseCase:
         yaml_file.write_text("name: test-agent")
 
         # Act
-        result = await use_case.execute(str(yaml_file))
+        result = use_case.execute(str(yaml_file))
 
         # Assert
         assert result.name == "test-agent"
@@ -34,4 +34,4 @@ class TestLoadAgentConfigUseCase:
         # Arrange
         # Act & Assert
         with pytest.raises(ConfigNotFoundError):
-            await use_case.execute("/nonexistent/path.yaml")
+            use_case.execute("/nonexistent/path.yaml")

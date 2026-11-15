@@ -2,6 +2,7 @@ import logging
 from datetime import UTC, datetime
 
 from src.application.use_cases._subagent_ref_utils import invalidate_dependent_agents, validate_subagent_refs
+from src.application.use_cases.create_agent_config import registry_ref_metadata_fields, validate_registry_refs
 from src.domain.entities.agent_config import AgentConfig
 from src.domain.errors.config import ConfigError
 from src.domain.errors.messages import ErrorMessage
@@ -10,6 +11,8 @@ from src.domain.ports.agent_config_loader import AgentConfigLoader
 from src.domain.ports.agent_config_repository import AgentConfigRepository
 from src.domain.ports.agent_config_store import AgentConfigStore
 from src.domain.ports.agent_registry import AgentRegistry
+from src.domain.ports.model_repository import ModelRepository
+from src.domain.ports.prompt_repository import PromptRepository
 
 logger = logging.getLogger(__name__)
 
@@ -23,14 +26,23 @@ class UpdateAgentConfigUseCase:
         config_store: AgentConfigStore,
         config_repository: AgentConfigRepository,
         agent_registry: AgentRegistry,
+        prompt_repository: PromptRepository | None = None,
+        model_repository: ModelRepository | None = None,
     ) -> None:
         self._config_loader = config_loader
         self._config_store = config_store
         self._config_repository = config_repository
         self._agent_registry = agent_registry
+        self._prompt_repository = prompt_repository
+        self._model_repository = model_repository
 
     async def execute(self, name: str, yaml_content: str) -> AgentConfig:
         """Validate, update in MinIO and PostgreSQL, invalidate cache.
+
+        The registry references are revalidated at save time so switching to a
+        removed prompt/model or a foreign id fails explicitly (AGT-002/003),
+        and the projections keep the in-use integrity mechanism (SEC-002) and
+        the freshness fingerprints (CACHE-002) up to date.
 
         Args:
             name: Agent name to update.
@@ -42,6 +54,8 @@ class UpdateAgentConfigUseCase:
         Raises:
             AgentNotFoundError: If no agent with this name exists.
             ConfigError: If the name in YAML does not match.
+            PromptNotFoundError / ModelNotFoundError: If prompt_ref/model_ref
+                cannot be resolved for the owner (§9).
         """
         metadata = await self._config_repository.get(name)
 
@@ -51,6 +65,7 @@ class UpdateAgentConfigUseCase:
             raise ConfigError(ErrorMessage.AGENT_NAME_MISMATCH_URL.format(yaml_name=config.name, name=name))
 
         await validate_subagent_refs(config, self._config_repository)
+        await validate_registry_refs(config, self._prompt_repository, self._model_repository)
 
         await self._config_store.put(name, yaml_content)
 
@@ -59,6 +74,7 @@ class UpdateAgentConfigUseCase:
             update={
                 "model": config.model,
                 "description": config.description,
+                **registry_ref_metadata_fields(config),
                 "updated_at": now,
             },
         )

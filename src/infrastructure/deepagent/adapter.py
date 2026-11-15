@@ -22,16 +22,18 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from typing import Any
 
 from langchain_core.messages import ToolMessage
+from langchain_core.runnables import RunnableConfig
+from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import Command
+from pydantic import BaseModel
 
 try:
     from langgraph._internal._constants import NS_SEP
 except ImportError:
     NS_SEP = "|"
-from langgraph.graph.state import CompiledStateGraph
-from langgraph.types import Command
-from pydantic import BaseModel
 
 from src.domain.entities.hitl_decision import HitlDecision
 from src.domain.entities.message import Message, MessageRole, MessageStatus
@@ -47,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 # Tuple produced by ``_classify`` and consumed by ``_collect_trace``.
 # (type, name, content, metadata)
-ClassifiedEvent = tuple[TraceEventType, str | None, str | None, dict | None]
+ClassifiedEvent = tuple[TraceEventType, str | None, str | None, dict[str, Any] | None]
 
 
 class DeepAgentRunner(AgentRunner):
@@ -133,15 +135,15 @@ class DeepAgentRunner(AgentRunner):
     def _is_nonblank_str(val: object) -> bool:
         return isinstance(val, str) and val.strip() != ""
 
-    def _build_config(self, thread_id: str) -> dict:
-        config: dict = {"configurable": {"thread_id": thread_id}}
+    def _build_config(self, thread_id: str) -> RunnableConfig:
+        config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
         if self._tracing_provider:
             callbacks = self._tracing_provider.get_callbacks()
             if callbacks:
                 config["callbacks"] = callbacks
         return config
 
-    async def _aget_state(self, config: dict):
+    async def _aget_state(self, config: RunnableConfig):
         """Read the graph state, preferring the async ``aget_state`` API.
 
         ``CompiledStateGraph`` exposes both ``aget_state`` (async) and
@@ -181,7 +183,7 @@ class DeepAgentRunner(AgentRunner):
     async def _build_response(
         self,
         result: dict,
-        config: dict,
+        config: RunnableConfig,
         thinking: str | None,
         resume_decided_ids: set[str] | None = None,
     ) -> Message:
@@ -360,7 +362,7 @@ class DeepAgentRunner(AgentRunner):
         self,
         stream_iter,
         thread_id: str,
-    ) -> AsyncIterator[tuple[str, str | None, str | None, str | None, dict | None, str | None]]:
+    ) -> AsyncIterator[tuple[str | None, TraceEventType, str | None, str | None, dict[str, Any] | None, str | None]]:
         """Yield (source, ev_type, ev_name, ev_content, ev_meta, thinking_content) from the stream."""
         import time
 
@@ -395,9 +397,9 @@ class DeepAgentRunner(AgentRunner):
     async def _collect_trace(
         self,
         thread_id: str,
-        config: dict,
+        config: RunnableConfig,
         turn_id: str,
-        graph_input,
+        graph_input: Any,
         leading_events: list[ClassifiedEvent],
         resume_decided_ids: set[str] | None = None,
     ) -> AsyncIterator[TraceEvent]:
@@ -495,7 +497,7 @@ class DeepAgentRunner(AgentRunner):
         self,
         thread_id: str,
         message: str,
-        config: dict,
+        config: RunnableConfig,
         turn_id: str,
     ) -> AsyncIterator[TraceEvent]:
         """Async generator backing ``stream`` (wraps ``_collect_trace`` with error handling)."""
@@ -549,6 +551,7 @@ class DeepAgentRunner(AgentRunner):
                     timeout=self._invoke_timeout,
                 )
                 final_message = await self._build_response(result, config, None)
+            trace = self._dedupe_invoke_content(trace)
             logger.info(LogMessage.AGENT_INVOKE_COMPLETE, thread_id, final_message.status, elapsed)
             return final_message, trace
         except TimeoutError as e:
@@ -668,10 +671,11 @@ class DeepAgentRunner(AgentRunner):
             if tc_id is not None:
                 tool_name_by_id[tc_id] = tc.get("name")
 
-        positional: list[dict] = []
+        positional: list[dict[str, Any]] = []
         leading_events: list[ClassifiedEvent] = []
         for tc_id, _ar in pairs:
             decision = by_id[tc_id]
+            payload: dict[str, Any]
             match decision.action:
                 case "approve":
                     payload = {"type": "approve"}
@@ -737,11 +741,13 @@ class DeepAgentRunner(AgentRunner):
         pairs = self._pair_action_requests(last_ai, action_requests)
         positional, leading_events = self._build_resume_decisions(pairs, decisions, last_ai, thread_id)
         resume_decided_ids = {tc_id for tc_id, _ in pairs}
-        graph_input = Command(resume={"decisions": positional})
+        # ``Command``'s TypeVar is bound to Hashable and does not describe the
+        # resume payload shape; the graph consumes it untyped (Any).
+        graph_input: Any = Command(resume={"decisions": positional})
         return graph_input, leading_events, resume_decided_ids
 
     async def _build_resume_trace_fallback(
-        self, thread_id: str, turn_id: str, config: dict, leading_events, resume_decided_ids: set[str]
+        self, thread_id: str, turn_id: str, config: RunnableConfig, leading_events: list[ClassifiedEvent], resume_decided_ids: set[str]
     ) -> tuple[Message, list[TraceEvent]]:
         """Build the resume trace when ``astream`` is not an async iterable.
 
@@ -767,6 +773,20 @@ class DeepAgentRunner(AgentRunner):
             )
         )
         return final_message, trace
+
+    @staticmethod
+    def _dedupe_invoke_content(trace: list[TraceEvent]) -> list[TraceEvent]:
+        """Drop parent-level CONTENT duplicates persisted by the invoke path.
+
+        On the non-streaming :meth:`invoke` path the streamed CONTENT chunks of
+        the parent turn are transient artifacts of the streaming collection —
+        the durable ``AI_MESSAGE`` event already carries the authoritative,
+        complete message payload. Subagent-level chunks (``source`` set) are
+        kept: their text has no other durable representation. The streaming
+        :meth:`stream` path persists every chunk untouched (live SSE fidelity).
+        """
+        kept = [e for e in trace if not (e.type is TraceEventType.CONTENT and e.source is None)]
+        return kept if len(kept) != len(trace) else trace
 
     async def resume_hitl(
         self,

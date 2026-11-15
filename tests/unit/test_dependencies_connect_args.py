@@ -126,8 +126,33 @@ class TestSslContextSecurityProperties:
         ctx = captured_engine["connect_args"]["ssl"]
         assert ctx.verify_mode == ssl.CERT_REQUIRED
 
-    async def test_require_no_cert_verification(self, captured_engine, patch_settings):
+    async def test_require_has_cert_verification_by_default(self, captured_engine, patch_settings):
+        """Sonar S5527/S4830: ``require`` validates by default (legacy no-check
+        behavior requires the explicit DATABASE_SSL_INSECURE opt-out)."""
         patch_settings(DATABASE_URL="postgresql://user:pass@host:5432/db?sslmode=require")
+
+        reset()
+        await init_persistence()
+
+        ctx = captured_engine["connect_args"]["ssl"]
+        assert ctx.check_hostname is True
+        assert ctx.verify_mode == ssl.CERT_REQUIRED
+
+    async def test_prefer_has_cert_verification_by_default(self, captured_engine, patch_settings):
+        """Sonar S5527/S4830: ``prefer`` validates by default."""
+        patch_settings(DATABASE_URL="postgresql://user:pass@host:5432/db?sslmode=prefer")
+
+        reset()
+        await init_persistence()
+
+        ctx = captured_engine["connect_args"]["ssl"]
+        assert ctx.check_hostname is True
+        assert ctx.verify_mode == ssl.CERT_REQUIRED
+
+    async def test_prefer_insecure_opt_out_restores_legacy_no_check(self, captured_engine, patch_settings):
+        patch_settings(
+            DATABASE_URL="postgresql://user:pass@host:5432/db?sslmode=prefer", DATABASE_SSL_INSECURE="true"
+        )
 
         reset()
         await init_persistence()
@@ -136,8 +161,8 @@ class TestSslContextSecurityProperties:
         assert ctx.check_hostname is False
         assert ctx.verify_mode == ssl.CERT_NONE
 
-    async def test_prefer_no_cert_verification(self, captured_engine, patch_settings):
-        patch_settings(DATABASE_URL="postgresql://user:pass@host:5432/db?sslmode=prefer")
+    async def test_require_insecure_opt_out_restores_legacy_no_check(self, captured_engine, patch_settings):
+        patch_settings(DATABASE_URL="postgresql://user:pass@host:5432/db?sslmode=require", DATABASE_SSL_INSECURE="true")
 
         reset()
         await init_persistence()

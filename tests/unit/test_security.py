@@ -120,7 +120,7 @@ class TestVerifyApiKey:
         security = ComposableAgentsSecurity(master_key="")
 
         # Act
-        result = await security.verify_api_key(api_key_header="anything")
+        result = security.verify_api_key(api_key_header="anything")
 
         # Assert
         assert result == ""
@@ -135,7 +135,7 @@ class TestVerifyApiKey:
         security = ComposableAgentsSecurity(master_key=_MASTER_KEY)
 
         # Act
-        result = await security.verify_api_key(api_key_header=_MASTER_KEY)
+        result = security.verify_api_key(api_key_header=_MASTER_KEY)
 
         # Assert
         assert result == _MASTER_KEY
@@ -146,7 +146,7 @@ class TestVerifyApiKey:
 
         # Act & Assert
         with pytest.raises(InvalidApiKeyError, match=str(ErrorMessage.API_KEY_EMPTY)):
-            await security.verify_api_key(api_key_header=None)
+            security.verify_api_key(api_key_header=None)
 
     async def test_verify_api_key_raises_when_invalid(self):
         # Arrange
@@ -154,7 +154,7 @@ class TestVerifyApiKey:
 
         # Act & Assert
         with pytest.raises(InvalidApiKeyError, match=str(ErrorMessage.API_KEY_UNAUTHORIZED)):
-            await security.verify_api_key(api_key_header="wrong-key")
+            security.verify_api_key(api_key_header="wrong-key")
 
     async def test_invalid_api_key_error_status_code_is_401(self):
         # Arrange

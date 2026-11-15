@@ -25,7 +25,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.orm import selectinload
 
-from src.domain.entities.thread import Thread
+from src.domain.entities.thread import Thread, ThreadSource
 from src.domain.entities.trace_event import TraceEvent, TraceEventType
 from src.domain.errors.messages import ErrorMessage
 from src.domain.errors.storage import StorageError
@@ -70,6 +70,7 @@ def _model_to_thread(thread_model: ThreadModel) -> Thread:
     return Thread(
         id=thread_model.id,
         agent_name=thread_model.agent_name,
+        source=ThreadSource(thread_model.source),
         trace_events=trace_events,
         created_at=thread_model.created_at,
         updated_at=thread_model.updated_at,
@@ -92,15 +93,17 @@ class PostgresThreadRepository(ThreadRepository):
         """Return the ``current_user_id`` contextvar value or ``None``."""
         return current_user_id.get()
 
-    async def create(self, agent_name: str) -> Thread:
-        """Create a new conversation thread.
+    async def create(self, agent_name: str, source: ThreadSource = ThreadSource.CHAT) -> Thread:
+        """Create a new conversation thread with an immutable source (SRC-001).
 
-        The row's ``user_id`` is set from the ``current_user_id`` contextvar
-        (or ``""`` when the contextvar is unset, preserving existing
-        behaviour).
+        Chat / public creation always receives ``chat`` (the default); only
+        the trusted cron execution path requests ``cron``. The row's
+        ``user_id`` is set from the ``current_user_id`` contextvar (or ``""``
+        when the contextvar is unset, preserving existing behaviour).
 
         Args:
             agent_name: Name of the agent owning this thread.
+            source: Immutable thread origin.
 
         Returns:
             The newly created Thread.
@@ -115,6 +118,7 @@ class PostgresThreadRepository(ThreadRepository):
                 model = ThreadModel(
                     id=str(uuid4()),
                     agent_name=agent_name,
+                    source=source.value,
                     created_at=now,
                     updated_at=now,
                     user_id=uid,
@@ -125,6 +129,7 @@ class PostgresThreadRepository(ThreadRepository):
                 return Thread(
                     id=model.id,
                     agent_name=model.agent_name,
+                    source=ThreadSource(model.source),
                     trace_events=[],
                     created_at=model.created_at,
                     updated_at=model.updated_at,

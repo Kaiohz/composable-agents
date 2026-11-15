@@ -68,3 +68,25 @@ async def system_rls_context() -> AsyncIterator[None]:
         yield
     finally:
         bypass_rls.reset(token)
+
+
+@asynccontextmanager
+async def user_rls_context(user_id: str) -> AsyncIterator[None]:
+    """Bind the current task to a user's RLS context (SEC-001).
+
+    Used by the cron scheduler and its execution tasks: every repository
+    operation and runner resolution for a scheduled cron runs under the cron
+    owner's user id. Credentials are explicitly cleared so an unattended run
+    never borrows an interactive user's JWT/API key (CRN-002/§9).
+    """
+    user_token = current_user_id.set(user_id)
+    credential_token = current_credential.set(None)
+    method_token = current_auth_method.set(None)
+    context_token = current_auth_context.set(None)
+    try:
+        yield
+    finally:
+        current_auth_context.reset(context_token)
+        current_auth_method.reset(method_token)
+        current_credential.reset(credential_token)
+        current_user_id.reset(user_token)

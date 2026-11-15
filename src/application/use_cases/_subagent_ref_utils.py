@@ -4,7 +4,7 @@ import logging
 
 import yaml  # type: ignore[import-untyped]
 
-from src.domain.entities.agent_config import AgentConfig
+from src.domain.entities.agent_config import AgentConfig, SubAgentConfig
 from src.domain.errors.config import ConfigError
 from src.domain.ports.agent_config_repository import AgentConfigRepository
 from src.domain.ports.agent_config_store import AgentConfigStore
@@ -24,22 +24,30 @@ async def validate_subagent_refs(
     the use case decoupled from any one adapter's notion of existence and avoids
     drift if the store/repository split is refactored later.
 
-    Raises ``ConfigError`` on self-reference or when a referenced agent
-    does not exist.
+    Each ref is validated by an extracted helper, keeping this orchestrator at a
+    minimal cognitive complexity.
 
-    Args:
-        config: The agent configuration whose subagents are checked.
-        repository: Metadata repository used to confirm referenced agents exist.
+    Raises:
+        ConfigError: On self-reference or when a referenced agent does not exist.
     """
     for sa in config.subagents:
-        if sa.agent_ref is None:
-            continue
-        if sa.agent_ref == config.name:
-            raise ConfigError(
-                f"Subagent '{sa.name}' references its own agent '{config.name}' (self-reference is not allowed)."
-            )
-        if not await repository.exists(sa.agent_ref):
-            raise ConfigError(f"Subagent '{sa.name}' references unknown agent '{sa.agent_ref}'.")
+        await _assert_subagent_ref_exists(sa, config.name, repository)
+
+
+async def _assert_subagent_ref_exists(
+    sa: SubAgentConfig,
+    container_name: str,
+    repository: AgentConfigRepository,
+) -> None:
+    """Validate one subagent's ``agent_ref`` against the metadata repository."""
+    if sa.agent_ref is None:
+        return
+    if sa.agent_ref == container_name:
+        raise ConfigError(
+            f"Subagent '{sa.name}' references its own agent '{container_name}' (self-reference is not allowed)."
+        )
+    if not await repository.exists(sa.agent_ref):
+        raise ConfigError(f"Subagent '{sa.name}' references unknown agent '{sa.agent_ref}'.")
 
 
 async def invalidate_dependent_agents(
@@ -54,10 +62,10 @@ async def invalidate_dependent_agents(
     ``agent_ref`` equals ``agent_name``. The ``agent_name`` itself is not invalidated
     a second time (the caller is expected to have already invalidated it).
 
-    Corrupted or unparseable YAMLs are logged at ``ERROR`` level (with the
-    exception) and skipped so a single bad config cannot prevent invalidation of
-    the rest. After the loop, a summary error lists every agent that could not be
-    inspected so the failure surface is observable — not silently swallowed.
+    Corrupted or unparseable YAMLs are logged and skipped so a single bad config
+    cannot prevent invalidation of the rest. After the loop, a summary error lists
+    every agent that could not be inspected so the failure surface is
+    observable — not silently swallowed.
 
     Args:
         config_store: Store exposing all persisted YAML configs.
@@ -67,39 +75,64 @@ async def invalidate_dependent_agents(
     try:
         all_names = await config_store.list_all()
     except Exception:
-        logger.warning(
-            "Failed to list stored agent configs during dependent invalidation for '%s'",
-            agent_name,
-            exc_info=True,
+        logger.exception(
+            "Failed to list stored agent configs during dependent invalidation for '%s'", agent_name
         )
         return
 
+    dependent_agents: dict[str, str] = {}
     failed_agents: list[str] = []
 
     for other_name in all_names:
         if other_name == agent_name:
             continue
         try:
-            yaml_content = await config_store.get(other_name)
-            data = yaml.safe_load(yaml_content) or {}
-            if not isinstance(data, dict):
-                continue
-            subagents = data.get("subagents") or []
-            if not isinstance(subagents, list):
-                continue
-            for sa in subagents:
-                if isinstance(sa, dict) and sa.get("agent_ref") == agent_name:
-                    await agent_registry.invalidate(other_name)
-                    break
+            subagent_ref = await _find_agent_ref_in(other_name, agent_name, config_store)
+            if subagent_ref is not None:
+                dependent_agents[other_name] = subagent_ref
         except Exception:
-            logger.error(
+            logger.exception(
                 "Failed to parse YAML for agent '%s' during dependent invalidation of '%s'",
                 other_name,
                 agent_name,
-                exc_info=True,
             )
             failed_agents.append(other_name)
-            continue
+
+    await _invalidate_dependents(dependent_agents, agent_registry, agent_name, failed_agents)
+
+
+async def _find_agent_ref_in(
+    other_name: str,
+    agent_name: str,
+    config_store: AgentConfigStore,
+) -> str | None:
+    """Return this config's ``agent_ref`` equal to ``agent_name``, if any.
+
+    Raises:
+        Exception: On store read / YAML parse failures (surface as failed agent).
+    """
+    yaml_content = await config_store.get(other_name)
+    data = yaml.safe_load(yaml_content) or {}
+    if not isinstance(data, dict):
+        return None
+    subagents = data.get("subagents")
+    if not isinstance(subagents, list):
+        return None
+    for sa in subagents:
+        if isinstance(sa, dict) and sa.get("agent_ref") == agent_name:
+            return str(sa["agent_ref"])
+    return None
+
+
+async def _invalidate_dependents(
+    dependent_agents: dict[str, str],
+    agent_registry: AgentRegistry,
+    agent_name: str,
+    failed_agents: list[str],
+) -> None:
+    """Invalidate the found dependents and summarise the parse failures."""
+    for other_name in dependent_agents:
+        await agent_registry.invalidate(other_name)
 
     if failed_agents:
         logger.error(

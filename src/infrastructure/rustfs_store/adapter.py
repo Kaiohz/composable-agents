@@ -1,7 +1,11 @@
 import io
 import logging
 
-from miniopy_async import Minio
+# NOTE: imported from the typed submodule — the package's own ``__init__.py``
+# carries a file-level ``# type: ignore[...]`` comment, so mypy cannot see the
+# ``Minio`` re-export through the package root (py.typed is only complete on
+# the internal modules).
+from miniopy_async.api import Minio
 from miniopy_async.error import S3Error
 
 from src.domain.errors.agent import AgentNotFoundError
@@ -76,11 +80,15 @@ class RustfsAgentConfigStore(AgentConfigStore):
             return False
 
     async def list_all(self) -> list[str]:
-        """List all agent names stored in the bucket."""
+        """List all agent names stored in the bucket.
+
+        The SDK stubs ``object_name`` optional (bulk-delete results); listed
+        objects always carry a key, and the guard keeps the comprehension typed.
+        """
         return [
             obj.object_name.removesuffix(".yaml")
             async for obj in self._client.list_objects(self._bucket)
-            if not obj.is_dir
+            if not obj.is_dir and obj.object_name is not None
         ]
 
     async def ensure_bucket(self) -> None:
