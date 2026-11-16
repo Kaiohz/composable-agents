@@ -36,9 +36,14 @@ from src.domain.ports.runner_freshness import RunnerFreshness
 from src.domain.ports.tracing_provider import TracingProvider
 from src.infrastructure.database.rls_context import current_user_id
 from src.infrastructure.deepagent.adapter import DeepAgentRunner
-from src.infrastructure.deepagent.factory import create_agent_from_config
+from src.infrastructure.deepagent.factory import create_agent_from_config, resolve_model_identity
 
 logger = logging.getLogger(__name__)
+
+# Serving-provider label recorded on the LLM-usage capture when the user has
+# no per-user LLM settings (env-fallback serving chain): the agents are always
+# served by the OpenAI-compatible ChatOpenAI chain.
+_DEFAULT_PROVIDER = "openai"
 
 
 @dataclass
@@ -62,6 +67,7 @@ class PersistentAgentRegistry(AgentRegistry):
         stream_idle_timeout: float = 120.0,
         invoke_timeout: float = 120.0,
         llm_credentials_resolver=None,
+        llm_provider_resolver=None,
         prompt_repository: PromptRepository | None = None,
         model_repository: ModelRepository | None = None,
         runner_freshness: RunnerFreshness | None = None,
@@ -74,6 +80,7 @@ class PersistentAgentRegistry(AgentRegistry):
         self._stream_idle_timeout = stream_idle_timeout
         self._invoke_timeout = invoke_timeout
         self._llm_credentials_resolver = llm_credentials_resolver
+        self._llm_provider_resolver = llm_provider_resolver
         self._prompt_repository = prompt_repository
         self._model_repository = model_repository
         self._runner_freshness = runner_freshness
@@ -137,12 +144,21 @@ class PersistentAgentRegistry(AgentRegistry):
                 prompt_resolver=self._build_prompt_resolver(),
                 model_resolver=self._build_model_resolver(),
             )
+            # LLM-usage capture identity (dashboard spec §1): the resolved
+            # serving model name (AGT-003 precedence) and the user's configured
+            # provider label (fallback: the OpenAI-compatible serving chain).
+            model_name, _model_base_url = await resolve_model_identity(config, self._build_model_resolver())
+            provider = _DEFAULT_PROVIDER
+            if self._llm_provider_resolver is not None:
+                provider = await self._llm_provider_resolver(uid) or _DEFAULT_PROVIDER
             runner = DeepAgentRunner(
                 graph,
                 tracing_provider=self._tracing_provider,
                 response_format_model=response_format_model,
                 stream_idle_timeout=self._stream_idle_timeout,
                 invoke_timeout=self._invoke_timeout,
+                model_name=model_name,
+                provider=provider,
             )
             fingerprint = (
                 await self._runner_freshness.fingerprint(agent_name) if self._runner_freshness is not None else ""

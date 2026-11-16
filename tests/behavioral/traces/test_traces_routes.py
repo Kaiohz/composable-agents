@@ -174,9 +174,13 @@ class TestPagination:
 
         page1 = await _traces(client, users["a"]["headers"], agent_name=agent_name, limit=2)
         assert page1["next_cursor"] is not None
-        again = await _traces(client, users["a"]["headers"], agent_name=agent_name, limit=2, cursor=page1["next_cursor"])
+        again = await _traces(
+            client, users["a"]["headers"], agent_name=agent_name, limit=2, cursor=page1["next_cursor"]
+        )
         first_from_cursor = [i["thread_id"] for i in again["items"]]
-        repeat = await _traces(client, users["a"]["headers"], agent_name=agent_name, limit=2, cursor=page1["next_cursor"])
+        repeat = await _traces(
+            client, users["a"]["headers"], agent_name=agent_name, limit=2, cursor=page1["next_cursor"]
+        )
         assert [i["thread_id"] for i in repeat["items"]] == first_from_cursor
 
     async def test_limit_boundary_validation(self, client, users):
@@ -244,7 +248,7 @@ class TestCursorRobustness:
             '{"v":"v1","activity":"not-a-date","thread_id":"x"}',
             '{"v":"v1","activity":"2026-01-01T00:00:00","thread_id":"x"}',  # naive tz
             '{"v":"v9","activity":"2026-01-01T00:00:00+00:00","thread_id":"x"}',  # bad version
-            'not base64 at all',
+            "not base64 at all",
         ):
             cursor = base64.urlsafe_b64encode(payload.encode()).decode()
             resp = await client.get("/api/v1/traces", headers=users["a"]["headers"], params={"cursor": cursor})

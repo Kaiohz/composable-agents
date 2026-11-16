@@ -18,8 +18,17 @@ The stub supports three modes:
 * ``slow:<seconds>`` — sleep before responding (drives overlap / concurrency).
 * ``fail``    — respond 500 (drives failed-run / no-retry scenarios).
 
-Streaming requests (``"stream": true``) receive an SSE chunked reply; the
-request body is still recorded so assertions work for both paths.
+``reset(mode, usage=...)`` additionally controls the ``usage`` object of the
+non-streaming JSON completion, driving the LLM-usage observability pipeline
+(dashboard spec §1-2):
+
+* ``"default"`` (default) — the standard ``{prompt_tokens: 1, completion_tokens: 1, total_tokens: 2}`` usage,
+* a ``dict``  — custom token counts (``prompt_tokens``/``completion_tokens``/``total_tokens``),
+* ``None``    — the completion carries NO ``usage`` object at all (drives the
+  missing-``usage_metadata`` contract: ``llm_usage`` must stay absent and the
+  request must not break).
+
+Streaming replies never carry usage (unchanged behavior).
 """
 
 import asyncio
@@ -38,6 +47,9 @@ STUB_HOST = "127.0.0.1"
 # behavioral tests never route LLM traffic to a concurrently running QA stub.
 TEST_STUB_LLM_PORT = int(os.environ.get("TEST_STUB_LLM_PORT", "28777"))
 
+# Default OpenAI-style usage object returned by non-streaming completions.
+_DEFAULT_USAGE: dict[str, int] = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+
 
 @dataclass
 class RecordedRequest:
@@ -46,11 +58,7 @@ class RecordedRequest:
 
     @property
     def system_messages(self) -> list[str]:
-        return [
-            str(m.get("content", ""))
-            for m in self.body.get("messages", [])
-            if m.get("role") == "system"
-        ]
+        return [str(m.get("content", "")) for m in self.body.get("messages", []) if m.get("role") == "system"]
 
     @property
     def model(self) -> str | None:
@@ -63,6 +71,7 @@ class StubLlmApp:
     def __init__(self) -> None:
         self.requests: list[RecordedRequest] = []
         self.mode: str = "normal"
+        self._usage: dict[str, int] | None = dict(_DEFAULT_USAGE)
         self._lock = asyncio.Lock()
 
     async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001
@@ -109,9 +118,8 @@ class StubLlmApp:
         async with self._lock:
             self.requests.append(RecordedRequest(auth_header=headers.get("authorization"), body=payload))
 
-    @staticmethod
-    def _completion(model: str, created: int) -> dict:
-        return {
+    def _completion(self, model: str, created: int) -> dict:
+        completion = {
             "id": "chatcmpl-stub",
             "object": "chat.completion",
             "created": created,
@@ -123,8 +131,10 @@ class StubLlmApp:
                     "finish_reason": "stop",
                 }
             ],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         }
+        if self._usage is not None:
+            completion["usage"] = dict(self._usage)
+        return completion
 
     @staticmethod
     def _chunk(model: str, created: int, delta: dict, finish: str | None) -> str:
@@ -171,10 +181,21 @@ class StubLlmApp:
         await send({"type": "http.response.body", "body": body, "more_body": False})
 
     # ------------------------------------------------------------------
-    def reset(self, mode: str = "normal") -> None:
-        """Clear recordings and set the response mode (per-test reset)."""
+    def reset(self, mode: str = "normal", usage: dict[str, int] | None | str = "default") -> None:
+        """Clear recordings, set the response mode and the completion usage.
+
+        Args:
+            mode: ``normal``, ``slow:<seconds>`` or ``fail``.
+            usage: ``"default"`` keeps the standard usage object, ``None``
+                omits the ``usage`` field entirely, a dict sets custom token
+                counts verbatim.
+        """
         self.requests = []
         self.mode = mode
+        if usage == "default":
+            self._usage = dict(_DEFAULT_USAGE)
+        else:
+            self._usage = usage
 
 
 class StubLlmServer:
@@ -201,9 +222,9 @@ class StubLlmServer:
         self._thread = threading.Thread(target=_run, name="stub-llm-server", daemon=True)
         self._thread.start()
 
-    def reset(self, mode: str = "normal") -> None:
+    def reset(self, mode: str = "normal", usage: dict[str, int] | None | str = "default") -> None:
         """Delegate to the in-process app reset (tests reset the server)."""
-        self.app.reset(mode)
+        self.app.reset(mode, usage)
 
     def stop(self) -> None:
         if self._server is not None:

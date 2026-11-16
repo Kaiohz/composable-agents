@@ -82,6 +82,11 @@ class ErrorMessage(StrEnum):
     TRACE_FAILED_LIST = "Failed to list trace events for thread {thread_id}: {error}"
     TRACE_FAILED_ADD_BATCH = "Failed to add batch trace events to thread {thread_id}: {error}"
 
+    # --- LLM usage observability (dashboard spec §1-§5) ---
+    TRACE_USAGE_AGGREGATE_FAILED = "Failed to aggregate LLM usage: {error}"
+    TRACE_USAGE_TOP_FAILED = "Failed to aggregate the top LLM usage runs: {error}"
+    LLM_PRICES_SEED_FAILED = "Failed to seed the LLM price table: {error}"
+
     # --- Storage / persistence ---
     STORAGE_REPO_NOT_INITIALIZED = "Thread repository not initialized. Check PostgreSQL connectivity."
     STORAGE_REGISTRY_NOT_INITIALIZED = "Agent registry not initialized. Check MinIO/PostgreSQL connectivity."
@@ -153,7 +158,6 @@ class ErrorMessage(StrEnum):
     CRON_RUN_STALE_RECLAIMED = (
         "Cron run was interrupted (worker terminated) and was reclaimed; it will not be retried automatically."
     )
-
 
     # --- Security ---
     API_KEY_UNAUTHORIZED = "The Api Key you provided is unauthorized"

@@ -100,8 +100,7 @@ async def real_app_and_db() -> AsyncGenerator[dict, None]:
         pg.start()
     except Exception as exc:  # noqa: BLE001 — fail fast with an explicit message
         raise RuntimeError(
-            "Behavioral tests require Docker (testcontainers) for a REAL PostgreSQL. "
-            f"Docker unavailable: {exc!r}"
+            f"Behavioral tests require Docker (testcontainers) for a REAL PostgreSQL. Docker unavailable: {exc!r}"
         ) from exc
 
     host = pg.get_container_host_ip()
@@ -181,7 +180,7 @@ async def real_app_and_db() -> AsyncGenerator[dict, None]:
     finally:
         await bootstrap_conn.close()
 
-    app_dsn_asyncpg = "postgresql+asyncpg://app_rls_test:app_rls_test@" f"{host}:{port}/test"
+    app_dsn_asyncpg = f"postgresql+asyncpg://app_rls_test:app_rls_test@{host}:{port}/test"
 
     # 2) Boot the REAL composition root (engine + repos + MinIO store +
     #    PersistentAgentRegistry + auth service wiring + RLS listener) — but
@@ -205,7 +204,9 @@ async def real_app_and_db() -> AsyncGenerator[dict, None]:
     async with system_rls_context():
         for alias, uid in (("a", "user-a"), ("b", "user-b")):
             key = ApiKeyHasher.generate_key()
-            await key_repo.create(user_id=uid, name=f"behavioral-{uid}", key_hash=ApiKeyHasher.hash_key(key), key_prefix=key[:10])
+            await key_repo.create(
+                user_id=uid, name=f"behavioral-{uid}", key_hash=ApiKeyHasher.hash_key(key), key_prefix=key[:10]
+            )
             users[alias] = {
                 "id": uid,
                 "key": key,
@@ -297,15 +298,17 @@ async def client_factory(stack: dict):
 async def _truncate_user_tables(engine) -> None:
     """Reset per-test state by truncating every user-owned table.
 
-    Preserves ``alembic_version``, ``api_keys`` (auth seeding) and the
-    LangGraph store/checkpoint tables. Data-level reset only — schemas and
-    migrations stay for the whole session.
+    Preserves ``alembic_version``, ``api_keys`` (auth seeding), ``llm_prices``
+    (global pricing reference table seeded by the startup seeder / migration
+    020 — system-scoped, not user-owned data) and the LangGraph
+    store/checkpoint tables. Data-level reset only — schemas and migrations
+    stay for the whole session.
     """
     from sqlalchemy import text
 
     from src.infrastructure.database.rls_context import system_rls_context
 
-    keep_prefixes = ("alembic", "api_keys", "checkpoint", "store")
+    keep_prefixes = ("alembic", "api_keys", "llm_prices", "checkpoint", "store")
     async with system_rls_context(), engine.begin() as conn:
         rows = await conn.execute(
             text(
