@@ -269,10 +269,17 @@ class LogMessage(StrEnum):
     TRACE_SUMMARIES_LISTED = "Listed %d trace summaries (agent_name=%s, cursor=%s)"
     TRACE_SUMMARIES_UNSCOPED = "Trace summaries requested without an authenticated owner — returning an empty page"
 
+    # --- LLM usage observability (dashboard spec §1-§5) ---
+    TRACE_USAGE_LISTED = "Aggregated LLM usage (agent_name=%s, run_count=%d, error_count=%d)"
+    TRACE_USAGE_TOP_LISTED = "Listed top LLM usage runs (limit=%d, items=%d)"
+    TRACE_USAGE_UNSCOPED = "LLM usage requested without an authenticated owner — returning an empty result"
+    TRACE_USAGE_UNEXPECTED_SHAPE = "LLM usage statement returned an unexpected shape — returning an empty summary"
+    LLM_PRICES_SEEDED = "Seeded/refreshed %d known LLM price rows"
+    LLM_PRICES_SEED_FAILED = "LLM price seeding failed (non-fatal): usage costs will resolve as unpriced"
+
     # --- Registry freshness (CACHE-002) ---
     RUNNER_FRESHNESS_REBUILD = "Dependency fingerprint changed for agent '%s' (user=%s); rebuilding runner"
     RUNNER_FRESHNESS_STALE_EVICTED = "Evicted stale cached runner for agent '%s' (user=%s)"
-
 
     # --- Phoenix tracing provider ---
     PHOENIX_PROVIDER_INIT = "Initializing PhoenixTracingProvider with endpoint=%s, project_name=%s"

@@ -65,6 +65,7 @@ from src.application.use_cases.prompt.manage_prompts import (
 )
 from src.application.use_cases.send_message import SendMessageUseCase
 from src.application.use_cases.stream_message import StreamMessageUseCase
+from src.application.use_cases.trace_usage import GetTopUsageRunsUseCase, GetTraceUsageUseCase
 from src.application.use_cases.update_agent_config import UpdateAgentConfigUseCase
 from src.application.use_cases.user.get_current_user import GetCurrentUserUseCase
 from src.application.use_cases.user_llm_settings.delete_user_llm_settings import DeleteUserLlmSettingsUseCase
@@ -79,12 +80,14 @@ from src.domain.logging.messages import LogMessage
 from src.domain.ports.agent_registry import AgentRegistry
 from src.domain.ports.auth.api_key_repository import ApiKeyRepository
 from src.domain.ports.cron_repository import CronRepository, CronRunRepository
+from src.domain.ports.llm_price_repository import LlmPriceRepository
 from src.domain.ports.model_repository import ModelRepository
 from src.domain.ports.prompt_repository import PromptRepository
 from src.domain.ports.store_file_repository import StoreFileRepository
 from src.domain.ports.thread_repository import ThreadRepository
 from src.domain.ports.trace_event_repository import TraceEventRepository
 from src.domain.ports.trace_summary_repository import TraceSummaryRepository
+from src.domain.ports.trace_usage_repository import TraceUsageRepository
 from src.domain.ports.tracing_provider import TracingProvider
 from src.domain.ports.user_llm_settings_repository import UserLlmSettingsRepository
 from src.infrastructure.auth.jwt_adapter import JwtAdapter
@@ -94,12 +97,14 @@ from src.infrastructure.mcp.adapter import LangchainMcpToolLoader
 from src.infrastructure.persistent_registry.adapter import PersistentAgentRegistry
 from src.infrastructure.postgres_api_key.adapter import PostgresApiKeyRepository
 from src.infrastructure.postgres_cron.adapter import PostgresCronRepository, PostgresCronRunRepository
+from src.infrastructure.postgres_llm_prices.adapter import PostgresLlmPriceRepository
 from src.infrastructure.postgres_model.adapter import PostgresModelRepository
 from src.infrastructure.postgres_prompt.adapter import PostgresPromptRepository
 from src.infrastructure.postgres_repository.adapter import PostgresAgentConfigRepository
 from src.infrastructure.postgres_thread.adapter import PostgresThreadRepository
 from src.infrastructure.postgres_trace.adapter import PostgresTraceEventRepository
 from src.infrastructure.postgres_trace.summary_repository import PostgresTraceSummaryRepository
+from src.infrastructure.postgres_trace.usage_repository import PostgresTraceUsageRepository
 from src.infrastructure.postgres_user_llm.adapter import PostgresUserLlmSettingsRepository
 from src.infrastructure.runner_freshness.adapter import PostgresRunnerFreshness
 from src.infrastructure.rustfs_store.adapter import RustfsAgentConfigStore
@@ -198,6 +203,8 @@ class CompositionRoot:
     model_repository: ModelRepository | None = None
     cron_repository: CronRepository | None = None
     cron_run_repository: CronRunRepository | None = None
+    trace_usage_repository: TraceUsageRepository | None = None
+    llm_price_repository: LlmPriceRepository | None = None
     runner_freshness: PostgresRunnerFreshness | None = None
     fernet_crypto: FernetCrypto | None = None
     jwt_adapter: JwtAdapter | None = None
@@ -276,8 +283,24 @@ async def init_persistence() -> None:
     _root.model_repository = PostgresModelRepository(engine=_root.async_engine)
     _root.cron_repository = PostgresCronRepository(engine=_root.async_engine)
     _root.cron_run_repository = PostgresCronRunRepository(engine=_root.async_engine)
+    _root.trace_usage_repository = PostgresTraceUsageRepository(engine=_root.async_engine)
+    _root.llm_price_repository = PostgresLlmPriceRepository(engine=_root.async_engine)
     _root.runner_freshness = PostgresRunnerFreshness(engine=_root.async_engine)
     logger.info(LogMessage.POSTGRES_REPOS_INITIALIZED)
+
+    # Seed/refresh the known LLM price catalog (dashboard spec §3). Runs on the
+    # system write path (bypass-aware RLS policy) and is deliberately NON-fatal:
+    # a seeding failure must never block startup — unpriced models degrade to
+    # cost=0 / priced=false in the usage endpoints instead.
+    if _root.llm_price_repository is not None:
+        try:
+            seeded = await _root.llm_price_repository.seed_known_defaults()
+            logger.info(LogMessage.LLM_PRICES_SEEDED, seeded)
+        except Exception:
+            # NON-fatal, but NEVER detail-free: logger.exception carries the
+            # traceback, and a raised StorageError already embeds the driver
+            # cause — the operator keeps the diagnosis an operator needs.
+            logger.exception(LogMessage.LLM_PRICES_SEED_FAILED)
 
     # FernetCrypto for per-user LLM API key encryption. If the configured key
     # is empty (dev / test), generate a throwaway in-memory key so init does
@@ -325,6 +348,7 @@ async def init_persistence() -> None:
         stream_idle_timeout=settings.agent_stream_idle_timeout,
         invoke_timeout=settings.agent_invoke_timeout,
         llm_credentials_resolver=get_llm_credentials_resolver(),
+        llm_provider_resolver=get_llm_provider_resolver(),
         prompt_repository=_root.prompt_repository,
         model_repository=_root.model_repository,
         runner_freshness=_root.runner_freshness,
@@ -395,8 +419,6 @@ async def close_persistence() -> None:
         logger.info(LogMessage.JWT_ADAPTER_CLOSED)
 
 
-
-
 def reset() -> None:
     """Reset all persisted state. Useful for testing."""
     _root.async_engine = None
@@ -406,6 +428,8 @@ def reset() -> None:
     _root.thread_repository = None
     _root.trace_event_repository = None
     _root.trace_summary_repository = None
+    _root.trace_usage_repository = None
+    _root.llm_price_repository = None
     _root.store_file_repository = None
     _root.api_key_repository = None
     _root.user_llm_settings_repository = None
@@ -750,6 +774,26 @@ def get_list_traces_use_case() -> ListTracesUseCase:
     return ListTracesUseCase(_root.trace_summary_repository)
 
 
+# ============= LLM USAGE DASHBOARD PROVIDERS =============
+
+
+def _require_trace_usage_repository() -> TraceUsageRepository:
+    """Return the usage repository or raise StorageError if not initialized."""
+    if _root.trace_usage_repository is None:
+        raise StorageError(ErrorMessage.STORAGE_REPO_NOT_INITIALIZED)
+    return _root.trace_usage_repository
+
+
+def get_trace_usage_use_case() -> GetTraceUsageUseCase:
+    """Provide a GetTraceUsageUseCase instance (dashboard spec §4)."""
+    return GetTraceUsageUseCase(_require_trace_usage_repository())
+
+
+def get_top_usage_runs_use_case() -> GetTopUsageRunsUseCase:
+    """Provide a GetTopUsageRunsUseCase instance (dashboard spec §5)."""
+    return GetTopUsageRunsUseCase(_require_trace_usage_repository())
+
+
 # ============= STORE FILE PROVIDERS =============
 
 
@@ -945,5 +989,24 @@ def get_llm_credentials_resolver():
 
     async def _resolve(user_id: str) -> tuple[str, str] | None:
         return await _require_user_llm_settings_repository().get_decrypted(user_id)
+
+    return _resolve
+
+
+def get_llm_provider_resolver():
+    """Return a closure resolving the current user's LLM provider label.
+
+    Used by the :class:`PersistentAgentRegistry` to stamp the serving provider
+    on the LLM-usage capture (``metadata.llm_usage.provider``). Returns
+    ``None`` when the user has no configured provider (the registry then falls
+    back to the OpenAI-compatible serving chain label).
+
+    Returns:
+        An async callable ``(user_id: str) -> str | None``.
+    """
+
+    async def _resolve(user_id: str) -> str | None:
+        settings = await _require_user_llm_settings_repository().get(user_id)
+        return settings.provider if settings is not None else None
 
     return _resolve

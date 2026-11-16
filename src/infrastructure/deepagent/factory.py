@@ -32,6 +32,36 @@ PromptResolver = Callable[[Any], Awaitable[str]]
 ModelResolver = Callable[[Any], Awaitable[ModelMetadata]]
 
 
+async def resolve_model_identity(
+    config: AgentConfig,
+    model_resolver: ModelResolver | None,
+) -> tuple[str, str | None]:
+    """Resolve the effective serving model identity (AGT-003 precedence).
+
+    Returns ``(model_name, base_url)``: the ``model_ref`` catalog's
+    ``provider_model`` identifier and ``base_url`` when the reference is set,
+    else the legacy ``model`` string with ``None`` base URL. Shared by
+    ``_resolve_model`` and the agent registry (which passes the served model
+    name to the runner for the LLM-usage trace enrichment, dashboard spec §1).
+
+    Args:
+        config: The agent configuration.
+        model_resolver: Optional catalog model metadata resolver.
+
+    Returns:
+        Tuple of ``(model_name, base_url)``.
+
+    Raises:
+        ConfigError: When ``model_ref`` is set but no resolver is wired.
+    """
+    if config.model_ref is None:
+        return config.model, None
+    if model_resolver is None:
+        raise ConfigError(f"Agent '{config.name}' sets model_ref but no model metadata resolver is wired.")
+    metadata = await model_resolver(str(config.model_ref))
+    return metadata.provider_model, metadata.base_url
+
+
 async def _resolve_model(
     config: AgentConfig,
     llm_credentials_resolver: Callable[[str], Awaitable[tuple[str, str] | None]] | None,
@@ -74,19 +104,15 @@ async def _resolve_model(
     from src.domain.errors.model import ModelNotFoundError
     from src.infrastructure.database.rls_context import current_user_id
 
-    model_name: str = config.model
+    model_name = config.model
     model_base_url: str | None = None
 
     if config.model_ref is not None:
-        if model_resolver is None:
-            raise ConfigError(f"Agent '{config.name}' sets model_ref but no model metadata resolver is wired.")
         try:
-            metadata = await model_resolver(str(config.model_ref))
+            model_name, model_base_url = await resolve_model_identity(config, model_resolver)
         except ModelNotFoundError:
             logger.error(LogMessage.AGENT_CREATE_ERROR, config.name)
             raise
-        model_name = metadata.provider_model
-        model_base_url = metadata.base_url
 
     user_id = current_user_id.get()
     if llm_credentials_resolver is None or user_id is None:
@@ -102,6 +128,17 @@ async def _resolve_model(
         model=model_name,
         base_url=model_base_url or credentials_base_url,
         api_key=SecretStr(api_key),
+        # LLM-usage capture (dashboard spec §1-§2): the LangGraph agent node
+        # invokes the model with ``ainvoke`` — a NON-streaming provider call —
+        # so the completion carries ``usage_metadata``, which the capture
+        # reads. ``streaming`` is pinned to the langchain-openai DEFAULT
+        # (False) only to keep that guarantee explicit: setting it to True
+        # would switch the provider call to a streamed one, where usage is
+        # only returned when the provider honours stream_options.include_usage
+        # (the SSE event stream itself is unaffected either way — TraceEvents
+        # still stream in turn order, and per-token realtime updates are an
+        # explicit dashboard non-goal).
+        streaming=False,
     )
 
 

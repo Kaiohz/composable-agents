@@ -593,6 +593,8 @@ All endpoints are prefixed appropriately. The server runs on `http://localhost:8
 | `POST` | `/api/v1/crons/{id}/run` | Trigger **Run now** (`202`); concurrent call returns `409` | `202` |
 | `GET` | `/api/v1/crons/{id}/runs` | List paginated run history (`limit` 1-200) | `200` |
 | `GET` | `/api/v1/traces` | List global trace summaries; optional exact `agent_name`, cursor pagination | `200` |
+| `GET` | `/api/v1/traces/usage` | LLM usage aggregates (tokens/cost/duration/errors) for a window, optional exact `agent_name`, breakdown `series` | `200` |
+| `GET` | `/api/v1/traces/usage/top` | Top-N most expensive LLM runs for a window (ranked by cost) | `200` |
 
 ### Error Responses
 
@@ -1261,6 +1263,96 @@ Response shape:
 ```
 
 `agent_name` is optional but exact and case-sensitive. Detail reuses `GET /api/v1/threads/{thread_id}/history`; trace detail is read-only.
+
+### 18. LLM Usage Dashboard (tokens / cost / latency)
+
+Two aggregation endpoints power the `/traces` dashboard. Both read the same per-user RLS-scoped `trace_events` and join the server-side `llm_prices` price table (USD per 1M tokens). Aggregation semantics:
+
+- One **run** = one turn (`thread_id` + `turn_id`). A run is **COMPLETED** when the turn has a terminal `AI_MESSAGE`, otherwise it is an **ERROR** run — `run_count` and `error_count` are disjoint sets (total = `run_count + error_count`).
+- **Tokens** come from the terminal `AI_MESSAGE`'s `metadata.llm_usage` (`input_tokens`, `output_tokens`, `total_tokens`, `model_name`, `provider`, `duration_ms`), captured automatically by the chat path (including stream and HITL-resume turns) from LangGraph's `usage_metadata`. Runs without usage metadata count as 0 tokens.
+- **Cost** resolves each run's effective model against `llm_prices` by **longest-prefix match** (exact id wins; `gpt-4o-2024-08-06` is priced as `gpt-4o`; `o3-mini-2025-04-16` is priced as `o3-mini`, never as `o3` thanks to a version-boundary anchor). A model with **no** price match contributes `cost=0` and is reported `priced=false` so usage still shows.
+- **Duration** is derived per run from the turn opener (`HUMAN_MESSAGE`, or the leading `HITL_DECISION` for an HITL-resume turn) minus the terminal `AI_MESSAGE` timestamp; `duration_ms_p50`/`p95` are computed over COMPLETED runs only.
+- The window bounds apply to the turn OPENING event; `from`/`to` are ISO datetimes (naive values are UTC-normalized).
+
+```bash
+# KPI aggregation (defaults: last 7 days, both breakdowns)
+curl 'http://localhost:8000/api/v1/traces/usage?agent_name=research-agent&from=2026-11-01T00:00:00Z&to=2026-11-30T23:59:59Z' \
+  -H "X-API-Key: <API_KEY>"
+```
+
+Response (`200`) — `TraceUsageResponse`:
+
+```json
+{
+  "total_input_tokens": 15420,
+  "total_output_tokens": 8300,
+  "total_tokens": 23720,
+  "total_cost_usd": 0.0953,
+  "run_count": 12,
+  "error_count": 1,
+  "duration_ms_p50": 3150.5,
+  "duration_ms_p95": 9800.0,
+  "series": {
+    "by_agent": [
+      {
+        "agent_name": "research-agent",
+        "input_tokens": 15420,
+        "output_tokens": 8300,
+        "total_tokens": 23720,
+        "cost_usd": 0.0953,
+        "priced": true
+      }
+    ],
+    "by_model": [
+      {
+        "model_name": "claude-sonnet-4-5-20250929",
+        "input_tokens": 14000,
+        "output_tokens": 7600,
+        "total_tokens": 21600,
+        "cost_usd": 0.0881,
+        "priced": true
+      },
+      {
+        "model_name": "gpt-4o-2024-08-06",
+        "input_tokens": 1420,
+        "output_tokens": 700,
+        "total_tokens": 2120,
+        "cost_usd": 0.0,
+        "priced": false
+      }
+    ]
+  }
+}
+```
+
+Pass `group_by=agent` or `group_by=model` to narrow `series` to a single breakdown (the other key is then omitted from the payload).
+
+```bash
+# Top-N most expensive runs (limit 1-100, default 10), ranked by cost
+curl 'http://localhost:8000/api/v1/traces/usage/top?limit=5&from=2026-11-01T00:00:00Z&to=2026-11-30T23:59:59Z' \
+  -H "X-API-Key: <API_KEY>"
+```
+
+Response (`200`) — `TopRunsResponse` (envelope):
+
+```json
+{
+  "items": [
+    {
+      "thread_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "turn_id": "turn-uuid-7",
+      "agent_name": "research-agent",
+      "model_name": "claude-sonnet-4-5-20250929",
+      "total_tokens": 6420,
+      "cost_usd": 0.0311,
+      "duration_ms": 9150.5,
+      "started_at": "2026-11-15T10:30:00.000000Z"
+    }
+  ]
+}
+```
+
+Pricing table: the `llm_prices` table (Alembic `020_create_llm_prices_table`, forced RLS, server-visible, one row per model with `input_price_per_million` / `output_price_per_million` USD) is seeded at startup for common Anthropic / OpenAI / Google / Mistral / OpenRouter model names and families (prefix rows, e.g. `gpt-4o`, `claude-sonnet-4-5`, `mistral-large`, `openrouter/anthropic/claude-…`). Seeding is idempotent and never fatal. Editing/deleting price rows from the UI is out of scope for this iteration.
 
 ### Thread Source
 

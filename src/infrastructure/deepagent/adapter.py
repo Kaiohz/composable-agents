@@ -62,6 +62,8 @@ class DeepAgentRunner(AgentRunner):
         response_format_model: type[BaseModel] | None = None,
         stream_idle_timeout: float = 120.0,
         invoke_timeout: float = 120.0,
+        model_name: str | None = None,
+        provider: str | None = None,
     ):
         self._graph = graph
         self._tracing_provider = tracing_provider
@@ -71,6 +73,11 @@ class DeepAgentRunner(AgentRunner):
         # time (s) for a non-streaming invoke/HITL call.
         self._stream_idle_timeout = stream_idle_timeout
         self._invoke_timeout = invoke_timeout
+        # LLM-usage capture identity (dashboard spec §1): the resolved serving
+        # model and the provider label recorded on each turn's
+        # ``metadata.llm_usage``. Populated by the agent registry.
+        self._model_name = model_name
+        self._provider = provider
         self._patch_tool_node_error_handling()
 
     # ------------------------------------------------------------------ #
@@ -343,7 +350,15 @@ class DeepAgentRunner(AgentRunner):
 
     @staticmethod
     def _make_trace_event(
-        thread_id: str, turn_id: str, seq: int, ev_type, source, name, content, metadata
+        thread_id: str,
+        turn_id: str,
+        seq: int,
+        ev_type,
+        source,
+        name,
+        content,
+        metadata,
+        timestamp: datetime | None = None,
     ) -> TraceEvent:
         return TraceEvent(
             id=str(uuid.uuid4()),
@@ -354,16 +369,72 @@ class DeepAgentRunner(AgentRunner):
             name=name,
             content=content,
             metadata=metadata,
-            timestamp=datetime.now(UTC),
+            timestamp=timestamp or datetime.now(UTC),
             sequence=seq,
         )
+
+    @staticmethod
+    def _extract_usage(chunk) -> dict[str, Any] | None:
+        """Return the chunk's LangChain ``usage_metadata``, if present.
+
+        Args:
+            chunk: A streamed message chunk (AIMessage/AIMessageChunk/...).
+
+        Returns:
+            The ``usage_metadata`` dict (input/output/total tokens) or ``None``
+            when the chunk (or the LLM) carries no usage.
+        """
+        usage = getattr(chunk, "usage_metadata", None)
+        if isinstance(usage, dict) and usage:
+            return usage
+        return None
+
+    def _build_llm_usage(
+        self, usage: dict[str, Any] | None, turn_start_ts: datetime | None, ai_ts: datetime
+    ) -> dict[str, Any] | None:
+        """Build the ``metadata.llm_usage`` payload of the turn's AI_MESSAGE.
+
+        The payload carries the token counts from the LLM's ``usage_metadata``,
+        the resolved serving model/provider identity and the wall-time
+        ``duration_ms`` measured from the turn's first persisted event
+        timestamp (the HUMAN_MESSAGE in conversational turns) to the terminal
+        AI_MESSAGE timestamp — an ``int >= 0``.
+
+        Args:
+            usage: The captured ``usage_metadata`` (``None`` when the LLM
+                returned no usage).
+            turn_start_ts: The turn's start timestamp (or ``None`` when the
+                turn has no leading event; the AI timestamp is used then).
+            ai_ts: The terminal AI_MESSAGE timestamp.
+
+        Returns:
+            The ``llm_usage`` dict, or ``None`` when there is no usage — the
+            AI_MESSAGE metadata then stays absent (missing-usage contract: the
+            persisted event keeps its legacy shape and the usage aggregation
+            later reports the run with zero tokens, cost=0 and priced=false).
+        """
+        if not usage:
+            return None
+        start = turn_start_ts or ai_ts
+        return {
+            "input_tokens": int(usage.get("input_tokens") or 0),
+            "output_tokens": int(usage.get("output_tokens") or 0),
+            "total_tokens": int(usage.get("total_tokens") or 0),
+            "model_name": self._model_name or "unknown",
+            "provider": self._provider or "openai",
+            "duration_ms": max(0, int((ai_ts - start).total_seconds() * 1000)),
+        }
 
     async def _stream_intermediate_events(
         self,
         stream_iter,
         thread_id: str,
-    ) -> AsyncIterator[tuple[str | None, TraceEventType, str | None, str | None, dict[str, Any] | None, str | None]]:
-        """Yield (source, ev_type, ev_name, ev_content, ev_meta, thinking_content) from the stream."""
+    ) -> AsyncIterator[
+        tuple[
+            str | None, TraceEventType, str | None, str | None, dict[str, Any] | None, str | None, dict[str, Any] | None
+        ]
+    ]:
+        """Yield (source, ev_type, ev_name, ev_content, ev_meta, thinking_content, usage_metadata) from the stream."""
         import time
 
         stream_start = time.monotonic()
@@ -390,9 +461,10 @@ class DeepAgentRunner(AgentRunner):
                 continue
 
             source = self._extract_source(metadata)
+            usage_metadata = self._extract_usage(chunk)
             for ev_type, ev_name, ev_content, ev_meta in self._classify(chunk, metadata, source):
                 thinking_content = ev_content if ev_type == TraceEventType.THINKING and ev_content else None
-                yield source, ev_type, ev_name, ev_content, ev_meta, thinking_content
+                yield source, ev_type, ev_name, ev_content, ev_meta, thinking_content, usage_metadata
 
     async def _collect_trace(
         self,
@@ -402,6 +474,7 @@ class DeepAgentRunner(AgentRunner):
         graph_input: Any,
         leading_events: list[ClassifiedEvent],
         resume_decided_ids: set[str] | None = None,
+        drop_parent_content: bool = False,
     ) -> AsyncIterator[TraceEvent]:
         """Yield every TraceEvent of a turn: leading events, intermediates, AI_MESSAGE.
 
@@ -416,17 +489,27 @@ class DeepAgentRunner(AgentRunner):
                 classified into ``(type, name, content, metadata)`` tuples.
             resume_decided_ids: When set, forwarded to ``_build_response`` to
                 derive the resume-specific status (see ``_build_response``).
+            drop_parent_content: When set (non-streaming ``invoke`` path),
+                parent-level CONTENT chunks are skipped inline instead of being
+                yielded and de-duped afterwards — the durable AI_MESSAGE event
+                carries the authoritative, complete payload, and skipping keeps
+                the persisted per-turn sequences contiguous.
 
         Yields:
             TraceEvent instances in turn order, with monotonic sequences.
         """
         seq = 0
+        turn_start_ts: datetime | None = None
 
         for ev_type, ev_name, ev_content, ev_meta in leading_events:
-            yield self._make_trace_event(thread_id, turn_id, seq, ev_type, None, ev_name, ev_content, ev_meta)
+            event = self._make_trace_event(thread_id, turn_id, seq, ev_type, None, ev_name, ev_content, ev_meta)
+            if turn_start_ts is None:
+                turn_start_ts = event.timestamp
+            yield event
             seq += 1
 
         thinking_parts: list[str] = []
+        captured_usage: dict[str, Any] | None = None
         stream_iter = aiter(
             self._graph.astream(
                 graph_input,
@@ -443,9 +526,19 @@ class DeepAgentRunner(AgentRunner):
                 ev_content,
                 ev_meta,
                 thinking_content,
+                usage_metadata,
             ) in self._stream_intermediate_events(stream_iter, thread_id):
+                if usage_metadata is not None:
+                    captured_usage = usage_metadata
                 if thinking_content:
                     thinking_parts.append(thinking_content)
+                if drop_parent_content and source is None and ev_type is TraceEventType.CONTENT:
+                    # Invoke path: parent-level CONTENT chunks are transient
+                    # streaming artifacts — the durable AI_MESSAGE event below
+                    # carries the authoritative payload. Skipping them inline
+                    # (instead of the legacy post-hoc dedupe) keeps the
+                    # persisted per-turn sequences contiguous.
+                    continue
                 yield self._make_trace_event(thread_id, turn_id, seq, ev_type, source, ev_name, ev_content, ev_meta)
                 seq += 1
         finally:
@@ -463,6 +556,12 @@ class DeepAgentRunner(AgentRunner):
         thinking = "".join(thinking_parts) if thinking_parts else None
         final_message = await self._build_response(result, config, thinking, resume_decided_ids)
 
+        # LLM-usage capture (dashboard spec §1-§2): when the streamed final AI
+        # event carried ``usage_metadata``, enrich ONLY the terminal
+        # AI_MESSAGE TraceEvent metadata under ``llm_usage`` — preserving the
+        # legacy event shape otherwise (no usage ⇒ metadata stays None).
+        ai_ts = datetime.now(UTC)
+        llm_usage = self._build_llm_usage(captured_usage, turn_start_ts, ai_ts)
         yield self._make_trace_event(
             thread_id,
             turn_id,
@@ -471,7 +570,8 @@ class DeepAgentRunner(AgentRunner):
             None,
             None,
             final_message.model_dump_json(),
-            None,
+            ({"llm_usage": llm_usage} if llm_usage else None),
+            timestamp=ai_ts,
         )
 
     # ------------------------------------------------------------------ #
@@ -535,7 +635,9 @@ class DeepAgentRunner(AgentRunner):
             leading_events: list[ClassifiedEvent] = [(TraceEventType.HUMAN_MESSAGE, None, message, None)]
             trace: list[TraceEvent] = []
             final_message: Message | None = None
-            async for event in self._collect_trace(thread_id, config, turn_id, graph_input, leading_events):
+            async for event in self._collect_trace(
+                thread_id, config, turn_id, graph_input, leading_events, drop_parent_content=True
+            ):
                 trace.append(event)
                 if event.type == TraceEventType.AI_MESSAGE:
                     final_message = Message.from_trace_event(event)
@@ -551,7 +653,6 @@ class DeepAgentRunner(AgentRunner):
                     timeout=self._invoke_timeout,
                 )
                 final_message = await self._build_response(result, config, None)
-            trace = self._dedupe_invoke_content(trace)
             logger.info(LogMessage.AGENT_INVOKE_COMPLETE, thread_id, final_message.status, elapsed)
             return final_message, trace
         except TimeoutError as e:
@@ -747,7 +848,12 @@ class DeepAgentRunner(AgentRunner):
         return graph_input, leading_events, resume_decided_ids
 
     async def _build_resume_trace_fallback(
-        self, thread_id: str, turn_id: str, config: RunnableConfig, leading_events: list[ClassifiedEvent], resume_decided_ids: set[str]
+        self,
+        thread_id: str,
+        turn_id: str,
+        config: RunnableConfig,
+        leading_events: list[ClassifiedEvent],
+        resume_decided_ids: set[str],
     ) -> tuple[Message, list[TraceEvent]]:
         """Build the resume trace when ``astream`` is not an async iterable.
 
@@ -773,20 +879,6 @@ class DeepAgentRunner(AgentRunner):
             )
         )
         return final_message, trace
-
-    @staticmethod
-    def _dedupe_invoke_content(trace: list[TraceEvent]) -> list[TraceEvent]:
-        """Drop parent-level CONTENT duplicates persisted by the invoke path.
-
-        On the non-streaming :meth:`invoke` path the streamed CONTENT chunks of
-        the parent turn are transient artifacts of the streaming collection —
-        the durable ``AI_MESSAGE`` event already carries the authoritative,
-        complete message payload. Subagent-level chunks (``source`` set) are
-        kept: their text has no other durable representation. The streaming
-        :meth:`stream` path persists every chunk untouched (live SSE fidelity).
-        """
-        kept = [e for e in trace if not (e.type is TraceEventType.CONTENT and e.source is None)]
-        return kept if len(kept) != len(trace) else trace
 
     async def resume_hitl(
         self,
