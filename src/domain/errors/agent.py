@@ -20,3 +20,14 @@ class AgentConfigAlreadyExistsError(DomainError):
     """Agent configuration already exists."""
 
     status_code = ErrorCode.CONFLICT
+
+
+class AgentConfigReferenceError(DomainError):
+    """Agent configuration references a missing/inaccessible prompt or model.
+
+    Raised at save time (refs must resolve for the owner, §9) and when a
+    concurrent prompt/model deletion raced the reference insert (SEC-002:
+    no dangling reference may be accepted).
+    """
+
+    status_code = ErrorCode.UNPROCESSABLE_ENTITY

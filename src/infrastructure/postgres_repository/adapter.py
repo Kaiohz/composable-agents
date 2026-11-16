@@ -7,13 +7,14 @@ existing behaviour is preserved.
 """
 
 import logging
+from uuid import UUID
 
 from sqlalchemy import select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from src.domain.entities.agent_config_metadata import AgentConfigMetadata
-from src.domain.errors.agent import AgentNotFoundError
+from src.domain.errors.agent import AgentConfigReferenceError, AgentNotFoundError
 from src.domain.errors.messages import ErrorMessage
 from src.domain.errors.storage import StorageError
 from src.domain.logging.messages import LogMessage
@@ -30,6 +31,8 @@ def _model_to_metadata(model: AgentConfigModel) -> AgentConfigMetadata:
         model=model.model,
         minio_path=model.minio_path,
         description=model.description,
+        prompt_ref=str(model.prompt_ref) if model.prompt_ref else None,
+        model_ref=str(model.model_ref) if model.model_ref else None,
         created_at=model.created_at,
         updated_at=model.updated_at,
         user_id=model.user_id,
@@ -56,12 +59,18 @@ class PostgresAgentConfigRepository(AgentConfigRepository):
 
         Uses merge for upsert semantics: insert if new, update if exists.
         The row's ``user_id`` is set from the ``current_user_id`` contextvar
-        (or ``""`` when unset).
+        (or ``""`` when unset). The registry reference projections
+        (``prompt_ref``/``model_ref``) are persisted so reference-safe
+        deletion (SEC-002) and freshness fingerprints (CACHE-002) work
+        relationally.
 
         Args:
             metadata: The agent configuration metadata to persist.
 
         Raises:
+            AgentConfigReferenceError: When a concurrent prompt/model deletion
+                raced the reference insert (FK violation — never a dangling
+                reference, SEC-002).
             StorageError: If the database operation fails.
         """
         async with AsyncSession(self._engine, expire_on_commit=False) as session:
@@ -72,6 +81,8 @@ class PostgresAgentConfigRepository(AgentConfigRepository):
                     model=metadata.model,
                     minio_path=metadata.minio_path,
                     description=metadata.description,
+                    prompt_ref=UUID(metadata.prompt_ref) if metadata.prompt_ref else None,
+                    model_ref=UUID(metadata.model_ref) if metadata.model_ref else None,
                     created_at=metadata.created_at,
                     updated_at=metadata.updated_at,
                     user_id=uid,
@@ -79,6 +90,12 @@ class PostgresAgentConfigRepository(AgentConfigRepository):
                 await session.merge(model)
                 await session.commit()
                 logger.info(LogMessage.AGENT_CONFIG_METADATA_SAVED, metadata.name)
+            except IntegrityError as e:
+                # SEC-002: prompt/model deleted concurrently → the FK blocks
+                # the reference insert; surface an explicit error (never 500).
+                raise AgentConfigReferenceError(
+                    ErrorMessage.AGENT_CONFIG_REFERENCE_RACE.format(name=metadata.name)
+                ) from e
             except SQLAlchemyError as e:
                 raise StorageError(
                     ErrorMessage.STORAGE_FAILED_SAVE_AGENT_CONFIG.format(name=metadata.name, error=e)
@@ -198,12 +215,12 @@ class PostgresAgentConfigRepository(AgentConfigRepository):
             try:
                 uid = self._current_user_id()
                 if uid is None:
-                    model = await session.get(AgentConfigModel, name)
+                    model: AgentConfigModel | None = await session.get(AgentConfigModel, name)
                     return model is not None
                 stmt = select(AgentConfigModel.name).where(
                     AgentConfigModel.name == name, AgentConfigModel.user_id == uid
                 )
-                model = (await session.execute(stmt)).scalar_one_or_none()
-                return model is not None
+                exists = (await session.execute(stmt)).scalar_one_or_none()
+                return exists is not None
             except SQLAlchemyError as e:
                 raise StorageError(ErrorMessage.STORAGE_FAILED_EXISTS_AGENT_CONFIG.format(name=name, error=e)) from e

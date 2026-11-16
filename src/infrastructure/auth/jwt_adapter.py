@@ -162,8 +162,9 @@ class JwtAdapter(JwtServicePort):
 
             return User.model_validate(payload)
         except (httpx.HTTPError, PyJWKClientConnectionError) as e:
-            # Both signal a JWKS endpoint outage / transport failure.
-            logger.error("%s: %s", LogMessage.AUTH_JWKS_FETCH_FAILED, e)
+            # Both signal a JWKS endpoint outage / transport failure. The
+            # exception is logged with its traceback (Sonar S8572).
+            logger.exception("%s: %s", LogMessage.AUTH_JWKS_FETCH_FAILED, e)
             return None
         except (jwt.ExpiredSignatureError, jwt.InvalidAlgorithmError, jwt.PyJWTError) as e:
             # PyJWKClientError is a subclass of PyJWTError and is caught here.

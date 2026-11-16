@@ -4,6 +4,8 @@ Configure Deep Agent LangGraph agents in YAML and expose them via FastAPI.
 
 **composable-agents** is a Python framework that lets you declare AI agents as simple YAML files and instantly expose them as a full-featured HTTP API. It is built on [deepagents](https://pypi.org/project/deepagents/) (LangGraph-based Deep Agent) with a strict hexagonal architecture, making every component testable and replaceable.
 
+It also provides a local, per-user **prompt registry with immutable versions**, a metadata-only **model catalog**, validated **crons** that produce cron-sourced threads, and a global **trace summary** API. Phoenix may still be used as an optional tracing provider, but prompts are completely independent from Phoenix.
+
 The server supports **multi-agent mode**: multiple agents are defined as separate YAML files in an `agents/` directory, each thread is bound to a specific agent at creation time, and agents are lazily instantiated on first use. Sub-agents declared in the `subagents` config are fully traced: every event emitted by a sub-agent carries its name in the `source` field of the corresponding `TraceEvent`, so the client can group events per sub-agent (see [TraceEvent](#traceevent-format)).
 
 The server enforces **per-user isolation** via **dual authentication** (JWT via Logto OIDC **or** per-user API keys), **PostgreSQL Row-Level Security** (RLS) on every per-user table, **per-user LLM credentials** (each user brings their own provider/key), and **per-user LangGraph Store namespaces** for skills and memories. See [Authentication](#authentication), [Row-Level Security (RLS)](#row-level-security-rls), [Per-User LLM Settings](#per-user-llm-settings), and [Store Namespaces per User](#store-namespaces-per-user).
@@ -570,9 +572,27 @@ All endpoints are prefixed appropriately. The server runs on `http://localhost:8
 | `PUT` | `/api/v1/store/files/{path}` | Create or replace a file in the store | `200` |
 | `DELETE` | `/api/v1/store/files/{path}` | Delete a file from the store | `204` |
 | `WS` | `/api/v1/ws/{thread_id}` | WebSocket endpoint for streaming chat | -- |
-| `POST` | `/prompts/create` | Create a new prompt | `201` |
-| `GET` | `/prompts/get/{identifier}` | Get a specific prompt by identifier, version, or tag | `200` |
-| `PUT` | `/prompts/update/{identifier}` | Update an existing prompt (creates new version) | `200` |
+| `GET` | `/api/v1/models` | List the authenticated user's reusable model metadata | `200` |
+| `POST` | `/api/v1/models` | Create a metadata-only model definition | `201` |
+| `GET` | `/api/v1/models/{id}` | Get a reusable model definition | `200` |
+| `PATCH` | `/api/v1/models/{id}` | Edit model metadata (`base_url: null` clears it) | `200` |
+| `DELETE` | `/api/v1/models/{id}` | Delete an unreferenced model definition (in-use returns `409`) | `204` |
+| `GET` | `/api/v1/prompts` | List the authenticated user's prompts | `200` |
+| `POST` | `/api/v1/prompts` | Create a prompt (creates immutable version 1) | `201` |
+| `GET` | `/api/v1/prompts/{id}` | Get prompt metadata | `200` |
+| `PATCH` | `/api/v1/prompts/{id}` | Edit name/description only (`description: null` clears it) | `200` |
+| `DELETE` | `/api/v1/prompts/{id}` | Delete an unreferenced prompt (in-use returns `409`) | `204` |
+| `GET` | `/api/v1/prompts/{id}/versions` | List immutable version summaries | `200` |
+| `POST` | `/api/v1/prompts/{id}/versions` | Create the next immutable prompt version | `201` |
+| `GET` | `/api/v1/prompts/{id}/versions/{version}` | Get one prompt version's verbatim content | `200` |
+| `GET` | `/api/v1/crons` | List the authenticated user's cron jobs | `200` |
+| `POST` | `/api/v1/crons` | Create a five-field cron job (validated agent/message/timezone) | `201` |
+| `GET` | `/api/v1/crons/{id}` | Get a cron job and its scheduling state | `200` |
+| `PATCH` | `/api/v1/crons/{id}` | Edit a cron job, including enable/disable | `200` |
+| `DELETE` | `/api/v1/crons/{id}` | Delete a cron job and stop future scheduling | `204` |
+| `POST` | `/api/v1/crons/{id}/run` | Trigger **Run now** (`202`); concurrent call returns `409` | `202` |
+| `GET` | `/api/v1/crons/{id}/runs` | List paginated run history (`limit` 1-200) | `200` |
+| `GET` | `/api/v1/traces` | List global trace summaries; optional exact `agent_name`, cursor pagination | `200` |
 
 ### Error Responses
 
@@ -999,129 +1019,252 @@ curl -X DELETE http://localhost:8000/api/v1/threads/a1b2c3d4-e5f6-7890-abcd-ef12
 
 Response: `204 No Content`
 
-### 14. Prompt Management
+### 14. Prompt Registry (Phoenix-independent)
 
-Prompts are managed via a dedicated registry backed by Phoenix. Enable prompt management by setting `TRACING_PROVIDER=phoenix` and `PHOENIX_PROMPT_ENABLED=true` in your `.env`.
+Prompts use a local, per-user PostgreSQL registry. Phoenix is never used for prompt storage, lookup, versioning, or agent fallback.
 
 #### 14.1 Create a Prompt
 
 ```bash
-curl -X POST http://localhost:8000/prompts/create \
+curl -X POST http://localhost:8000/api/v1/prompts \
   -H "Content-Type: application/json" \
   -H "X-API-Key: <API_KEY>" \
   -d '{
-    "identifier": "customer-support",
-    "content": [
-      {
-        "role": "system",
-        "content": "You are a helpful customer support agent. Be polite and professional."
-      }
-    ],
-    "model_name": "claude-sonnet-4-5-20250929",
-    "description": "Prompt for general customer support queries",
-    "tags": ["production"],
-    "metadata": {"project_name": "composable-agents", "agent_type": "deep_agent"}
+    "name": "customer-support",
+    "description": "General customer support system prompt",
+    "content": "You are a helpful customer support agent. Be polite and professional."
   }'
 ```
 
-Response (`200`):
+Response (`201`):
 
 ```json
 {
-  "status": "success",
-  "prompt": {
-    "identifier": "customer-support",
-    "description": "Prompt for general customer support queries",
-    "current_version": {
-      "version_id": "v1",
-      "content": [...],
-      "model_name": "claude-sonnet-4-5-20250929",
-      "created_at": "2025-01-15T10:30:00.000000",
-      "tags": ["support", "production"]
-    },
-    "created_at": "2025-01-15T10:30:00.000000",
-    "updated_at": "2025-01-15T10:30:00.000000"
-  }
+  "id": "7e6a56fd-83e7-46a1-a2f2-f5c5f8d9a52e",
+  "name": "customer-support",
+  "description": "General customer support system prompt",
+  "latest_version": 1,
+  "created_at": "2026-11-15T10:30:00.000000Z",
+  "updated_at": "2026-11-15T10:30:00.000000Z"
 }
 ```
 
-#### 14.2 List All Prompts
+Creating a prompt also creates immutable version 1. Version content is retrievable separately.
+
+#### 14.2 Get Prompt Metadata
 
 ```bash
-curl http://localhost:8000/prompts/customer-support \
+curl http://localhost:8000/api/v1/prompts/7e6a56fd-83e7-46a1-a2f2-f5c5f8d9a52e \
   -H "X-API-Key: <API_KEY>"
 ```
 
-Optional query parameters:
-- `version_id`: Get a specific version
-- `tag`: Get the prompt with a specific tag
+#### 14.3 Edit Metadata (no new version)
 
-Response (`200`):
+```bash
+curl -X PATCH http://localhost:8000/api/v1/prompts/7e6a56fd-83e7-46a1-a2f2-f5c5f8d9a52e \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: <API_KEY>" \
+  -d '{"description": "More detailed support prompt"}'
+```
+
+`{"description": null}` clears the description. `name: null` is rejected with `422`.
+
+#### 14.4 Create Version 2
+
+```bash
+curl -X POST http://localhost:8000/api/v1/prompts/7e6a56fd-83e7-46a1-a2f2-f5c5f8d9a52e/versions \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: <API_KEY>" \
+  -d '{"content": "You are a knowledgeable, thorough, and polite support agent."}'
+```
+
+Response (`201`):
 
 ```json
 {
-    "status": "success",
-    "prompt": {
-        "identifier": "customer-support",
-        "description": "",
-        "current_version": {
-            "version_id": "UHJvbXB0VmVyc2lvbjo4Mw==",
-            "content": [
-                {
-                    "role": "system",
-                    "content": "You are a helpful customer support agent. Be polite and professional."
-                }
-            ],
-            "model_name": "claude-sonnet-4-5-20250929",
-            "tags": []
-        },
-        "created_at": null,
-        "updated_at": null
-    }
+  "prompt_id": "7e6a56fd-83e7-46a1-a2f2-f5c5f8d9a52e",
+  "version": 2,
+  "created_at": "2026-11-15T10:31:00.000000Z"
 }
 ```
 
-#### 14.3 Update a Prompt
-
-Create a new version of an existing prompt:
+#### 14.5 List Summary History
 
 ```bash
-curl -X PUT http://localhost:8000/prompts/update/customer-support \
+curl http://localhost:8000/api/v1/prompts/7e6a56fd-83e7-46a1-a2f2-f5c5f8d9a52e/versions \
+  -H "X-API-Key: <API_KEY>"
+```
+
+#### 14.6 Read Immutable Version Content
+
+```bash
+curl http://localhost:8000/api/v1/prompts/7e6a56fd-83e7-46a1-a2f2-f5c5f8d9a52e/versions/1 \
+  -H "X-API-Key: <API_KEY>"
+```
+
+#### 14.7 Referencing a Prompt from Agent YAML
+
+```yaml
+name: research-agent
+prompt_ref:
+  id: 7e6a56fd-83e7-46a1-a2f2-f5c5f8d9a52e
+  # version: 1  # Omit for Latest; specify to pin.
+```
+
+Rules:
+
+- `prompt_ref` is mutually exclusive with `system_prompt` and `system_prompt_file`.
+- Omitted `version` resolves the prompt's current `latest_version`.
+- A supplied version is immutable.
+- Missing/inaccessible references fail explicitly; there is no Phoenix fallback or old agent-name lookup.
+- Deleting a referenced prompt returns `409`.
+
+#### 14.8 Delete a Prompt
+
+```bash
+curl -X DELETE http://localhost:8000/api/v1/prompts/7e6a56fd-83e7-46a1-a2f2-f5c5f8d9a52e \
+  -H "X-API-Key: <API_KEY>"
+```
+
+Success: `204`. A referenced prompt returns `409`.
+
+### 15. Model Catalog (metadata-only)
+
+Models are reusable, per-user configuration records. They contain **no API keys or other credentials**; runtime credential resolution is unchanged.
+
+#### 15.1 Create a Model
+
+```bash
+curl -X POST http://localhost:8000/api/v1/models \
   -H "Content-Type: application/json" \
   -H "X-API-Key: <API_KEY>" \
   -d '{
-    "content": [
-      {
-        "role": "system",
-        "content": "You are a knowledgeable customer support agent. Be polite, professional, and thorough in your responses."
-      }
-    ],
-    "model_name": "claude-sonnet-4-5-20250929",
-    "description": "Updated prompt for customer support (more detailed)",
-    "tags": ["production"],
-    "metadata": {"project_name": "composable-agents", "agent_type": "deep_agent"}
+    "name": "Sonnet via OpenRouter",
+    "provider": "openai",
+    "provider_model": "anthropic/claude-sonnet-4",
+    "base_url": "https://openrouter.ai/api/v1"
   }'
 ```
 
-Response (`200`):
+`base_url` is optional. The response exposes only `id`, `name`, `provider`, `provider_model`, `base_url`, `created_at`, and `updated_at`.
+
+#### 15.2 Edit a Model
+
+```bash
+curl -X PATCH http://localhost:8000/api/v1/models/<model_id> \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: <API_KEY>" \
+  -d '{"provider_model": "anthropic/claude-sonnet-4-5"}'
+```
+
+`{"base_url": null}` clears the optional base URL. Editing metadata affects referencing agents on their next invocation.
+
+#### 15.3 Reference a Model from Agent YAML
+
+```yaml
+name: research-agent
+model_ref: 1a5bca0d-0f14-4ed6-98db-b07c39e0d4a2
+```
+
+`model_ref` takes precedence over legacy `model` for catalog selection; an invalid reference is an error, not a fallback.
+
+#### 15.4 Delete a Model
+
+```bash
+curl -X DELETE http://localhost:8000/api/v1/models/<model_id> \
+  -H "X-API-Key: <API_KEY>"
+```
+
+Success: `204`. A referenced model returns `409`.
+
+### 16. Crons
+
+Crons are per-user scheduled agent invocations. Standard five-field expressions and IANA timezones are validated. Every accepted run creates a new thread with immutable `source="cron"`.
+
+#### 16.1 Create a Cron
+
+```bash
+curl -X POST http://localhost:8000/api/v1/crons \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: <API_KEY>" \
+  -d '{
+    "name": "daily-briefing",
+    "agent_name": "research-agent",
+    "message": "Summarize the latest papers.",
+    "cron_expression": "0 9 * * *",
+    "timezone": "America/New_York",
+    "enabled": true
+  }'
+```
+
+#### 16.2 Edit or Enable/Disable
+
+```bash
+curl -X PATCH http://localhost:8000/api/v1/crons/<cron_id> \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: <API_KEY>" \
+  -d '{"enabled": false}'
+```
+
+#### 16.3 Run Now
+
+```bash
+curl -X POST http://localhost:8000/api/v1/crons/<cron_id>/run \
+  -H "X-API-Key: <API_KEY>"
+```
+
+Response: `202`. A concurrent manual run returns `409`; disabled jobs may still be run manually.
+
+#### 16.4 Run History
+
+```bash
+curl 'http://localhost:8000/api/v1/crons/<cron_id>/runs?limit=50' \
+  -H "X-API-Key: <API_KEY>"
+```
+
+Run records expose trigger, terminal status (`succeeded`/`failed`/`skipped`/etc.), `occurrence_at`, `thread_id`, timestamps, and a safe error summary. The linked `thread_id` can be opened in traces.
+
+Policies:
+
+- Scheduled and manual runs use one execution path.
+- Database atomic claiming prevents duplicate execution across workers.
+- Overlapping occurrences are skipped; downtime occurrences coalesce into at most one run.
+- Failures are terminal; there is no automatic retry.
+- Agents requiring `${USER_JWT}` or `${USER_API_KEY}` cannot run unattended and fail explicitly.
+
+### 17. Global Traces
+
+`GET /api/v1/traces` returns a bounded, paginated summary of the caller's threads. It does not fetch full thread histories.
+
+```bash
+curl 'http://localhost:8000/api/v1/traces?agent_name=research-agent&limit=50' \
+  -H "X-API-Key: <API_KEY>"
+```
+
+Response shape:
 
 ```json
 {
-  "status": "success",
-  "prompt": {
-    "identifier": "customer-support",
-    "description": "Updated prompt for customer support (more detailed)",
-    "current_version": {
-      "version_id": "v2",
-      "content": [...],
-      "model_name": "claude-sonnet-4-5-20250929",
-      "created_at": "2025-01-15T10:31:00.000000",
-      "tags": ["support", "production"]
+  "items": [
+    {
+      "thread_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "agent_name": "research-agent",
+      "source": "chat",
+      "started_at": "2026-11-15T10:30:00Z",
+      "last_event_at": "2026-11-15T10:32:00Z",
+      "event_count": 42,
+      "turn_count": 2
     }
-  },
-  "message": "Prompt 'customer-support' updated successfully"
+  ],
+  "next_cursor": null
 }
 ```
+
+`agent_name` is optional but exact and case-sensitive. Detail reuses `GET /api/v1/threads/{thread_id}/history`; trace detail is read-only.
+
+### Thread Source
+
+Every thread has immutable `source: "chat" | "cron"`. Public thread creation always produces `chat`; scheduled and manual cron execution produces `cron`. Existing rows were backfilled to `chat`. Clients cannot override it.
 
 ### WebSocket
 
@@ -1150,50 +1293,6 @@ ws.onmessage = (event) => {
 ```
 
 The WebSocket stream emits `TraceEvent` JSON objects (same shape as the `/stream` SSE endpoint), then `[END]`. On error, emits `{"type":"error","data":"..."}` before `[END]`.
-
----
-
-## Prompt Management Setup
-
-To enable prompt management in Phoenix:
-
-### 1. Install Optional Dependencies
-
-```bash
-uv sync --extra phoenix
-```
-
-Or add to `pyproject.toml`:
-```toml
-arize-phoenix-otel = ">=0.1.0"
-openinference-instrumentation-langchain = ">=0.1.0"
-httpx = ">=0.27.0"
-```
-
-### 2. Configure Environment Variables
-
-Add to `.env`:
-
-```dotenv
-PROVIDER=phoenix
-PHOENIX_COLLECTOR_ENDPOINT=http://localhost:6006
-PHOENIX_PROMPT_ENABLED=true
-PHOENIX_API_KEY=your-api-key-here
-```
-
-### 3. Architecture
-
-Prompt management follows the **Clean Architecture** pattern:
-
-- **Domain Entity** (`src/domain/entities/prompt.py`): `Prompt`, `PromptVersion`
-- **Domain Port** (`src/domain/ports/prompt_manager.py`): `PromptManager` interface
-- **Use Cases** (`src/application/use_cases/`): `CreatePromptUseCase`, `GetPromptUseCase`, `GetPromptContentUseCase`, `UpdatePromptUseCase`
-- **Request DTOs** (`src/application/requests/prompt.py`): Request models for each endpoint
-- **Response DTOs** (`src/application/responses/prompt.py`): `PromptResponse`, `PromptVersionResponse`
-- **Routes** (`src/application/routes/prompt.py`): FastAPI endpoint handlers
-- **Infrastructure Adapter** (`src/infrastructure/prompt_management/adapter.py`): Phoenix REST API implementation
-
-All prompt management operations are async and fully integrated with the FastAPI dependency injection system.
 
 ---
 
@@ -1621,14 +1720,23 @@ composable-agents/
         012_add_user_id_to_rls_tables.py         # Add user_id to agent_configs/threads/trace_events
         013_enable_rls_policies.py               # Enable + force RLS, create per-user policies
         014_create_user_llm_settings_table.py    # Per-user LLM settings (Fernet-encrypted)
+        015_create_prompts_prompt_versions_models_tables.py
+        016_add_thread_source_and_agent_registry_refs.py
+        017_create_crons_and_cron_runs_tables.py
+        018_make_legacy_rls_policies_bypass_aware.py
+        019_create_cron_runs_single_active_index.py
     security.py                        # Dual-auth FastAPI dependency (JWT + per-user API key)
     application/
       requests/
         chat.py                        # Request models (ChatRequest, CreateThreadRequest, HITLDecisionRequest)
         api_key.py                     # CreateApiKeyRequest
         user_llm_settings.py           # UpsertUserLlmSettingsRequest
+        guard.py                       # Explicit-null/non-null PATCH validation guard
       responses/
         thread_history.py              # ThreadHistory response DTO (thread + turns)
+        prompt.py                      # Prompt/version API DTOs (no user_id)
+        cron.py                        # Cron/run API DTOs (no user_id)
+        traces.py                      # Global trace page DTO
       routes/
         health.py                      # GET /health (public)
         threads.py                     # CRUD /api/v1/threads
@@ -1638,6 +1746,10 @@ composable-agents/
         store.py                       # Store File API — /api/v1/store/files
         api_keys.py                    # POST/GET/DELETE /api/v1/api-keys (per-user API keys)
         user_llm_settings.py           # GET/PUT/DELETE /api/v1/settings/llm (per-user LLM)
+        prompt.py                      # Local prompt/version registry
+        model.py                       # Metadata-only model catalog
+        cron.py                        # Cron CRUD/Run now/history
+        traces.py                      # Global trace summaries
         websocket.py                   # WS /api/v1/ws/{id}
       use_cases/
         send_message.py                # Invoke agent synchronously
@@ -1654,14 +1766,24 @@ composable-agents/
         thread_management.py           # Create / get / list / delete threads
         api_key/                       # create / list / revoke per-user API keys
         user_llm_settings/             # get / upsert / delete per-user LLM settings
+        prompt/                        # local prompt CRUD + immutable versions
+        model/                         # metadata-only model CRUD
+        cron/                          # cron CRUD/Run now/tick execution
+        list_traces.py                 # bounded global trace summaries
     domain/
       entities/
         agent_config.py                # AgentConfig, BackendConfig, HITLConfig, SubAgentConfig
         agent_config_metadata.py       # AgentConfigMetadata (incl. description)
         mcp_server_config.py           # McpServerConfig, McpTransportType
         message.py                     # Message (role, content, timestamp, tool_calls) — projection model
-        thread.py                      # Thread (id, agent_name, user_id, timestamps)
+        thread.py                      # Thread (id, agent_name, immutable source, user_id, timestamps)
+        prompt.py                      # Prompt + PromptVersion (local registry)
+        prompt_version_summary.py       # Prompt version history read-model
+        model_metadata.py              # Metadata-only reusable model record
+        cron.py                        # Cron definition
+        cron_run.py                    # Cron run trigger/status/summary
         trace_event.py                 # TraceEvent entity + TraceEventType enum (6 types)
+        trace_summary.py               # Global cursor-paginated trace summary
         tracing_config.py              # TracingConfig, TracingProviderType
         user_llm_settings.py           # UserLlmSettings, UserLlmSettingsInput
         auth/                          # AuthContext, ApiKeyView, CreatedApiKey
@@ -1674,12 +1796,18 @@ composable-agents/
         mcp_tool_loader.py             # Abstract: load MCP tools
         store_file_repository.py       # Abstract: file CRUD on the LangGraph store (StoreFileRepository port)
         thread_repository.py           # Abstract: CRUD for threads
+        prompt_repository.py           # Abstract: per-user prompt/version CRUD + resolution
+        model_repository.py            # Abstract: metadata-only model CRUD + resolution
+        cron_repository.py             # Abstract: cron definitions/durable runs/claim/reclaim
+        trace_summary_repository.py    # Abstract: bounded global trace summaries
+        runner_freshness.py            # Abstract: cross-worker runner dependency freshness
         trace_event_repository.py      # Abstract: persist/append/list TraceEvents
         tracing_provider.py            # Abstract: tracing lifecycle
         api_key_repository.py          # Abstract: per-user API key CRUD + hash lookup
         user_llm_settings_repository.py # Abstract: per-user LLM settings CRUD
         jwt_validator.py               # Abstract: JWT validation against Logto JWKS
       services/auth/                   # AuthService (dual JWT + API key orchestration)
+      services/cron_schedule.py         # Cron expression/timezone validation + occurrence math
       errors/                          # DomainError hierarchy (incl. AuthenticationError, LlmNotConfiguredError)
     infrastructure/
       env_utils.py                     # ${VAR_NAME} + ${USER_JWT}/${USER_API_KEY} resolution
@@ -1693,6 +1821,9 @@ composable-agents/
           trace_event.py               # TraceEventModel (ORM, incl. user_id)
           api_key.py                   # ApiKeyModel (ORM)
           user_llm_settings.py         # UserLlmSettingModel (ORM)
+          prompt.py                    # Prompt/PromptVersionModel (ORM)
+          model_config.py              # ModelMetadataModel (ORM, no credentials)
+          cron.py                      # CronModel/CronRunModel (ORM)
       deepagent/
         adapter.py                     # DeepAgentRunner (LangGraph adapter) — emits TraceEvent
         factory.py                     # create_agent_from_config (per-user LLM credential resolution)
@@ -1713,6 +1844,16 @@ composable-agents/
         models.py                     # Re-exports ThreadModel
       postgres_trace/
         adapter.py                     # PostgresTraceEventRepository (trace_events persistence)
+        summary_repository.py          # Bounded global trace-summary aggregate query
+      postgres_prompt/
+        adapter.py                     # Per-user prompt/version repository
+      postgres_model/
+        adapter.py                     # Metadata-only model repository
+      postgres_cron/
+        adapter.py                     # Cron definitions, run history, atomic claims/reclaim
+      runner_freshness/
+        adapter.py                     # Cross-worker runner dependency fingerprints
+      cron_scheduler.py                # Lifespan-owned background scheduler loop
       yaml_config/
         adapter.py                     # YamlAgentConfigLoader
       tracing/
@@ -1856,11 +1997,16 @@ The database uses a flat normalized schema. Thread persistence relies on a singl
 
 | Table | Description | RLS? |
 |---|---|---|
-| `threads` | One row per conversation thread. Columns: `id` (PK, VARCHAR 36), `agent_name`, `user_id`, `created_at`, `updated_at`. | ✅ |
+| `threads` | One row per conversation thread. Columns: `id` (PK, VARCHAR 36), `agent_name`, immutable `source` (`chat`/`cron`), `user_id`, `created_at`, `updated_at`. | ✅ |
 | `trace_events` | One row per trace event. Columns: `id` (PK), `thread_id` (FK to `threads.id`, CASCADE delete), `turn_id`, `type` (enum), `source`, `name`, `content`, `metadata` (JSONB), `timestamp`, `sequence`, `user_id`. | ✅ |
 | `agent_configs` | Agent configuration metadata (incl. `description`, `user_id`). | ✅ |
 | `api_keys` | Per-user API keys (SHA-256 hashed). Columns: `id` (PK), `user_id`, `name`, `key_hash`, `key_prefix`, `revoked_at`, `last_used_at`, `created_at`. Unique index on `key_hash`. | ✅ |
 | `user_llm_settings` | Per-user LLM provider settings (Fernet-encrypted `api_key_encrypted`). PK is `user_id` — one configured provider per user. | ✅ |
+| `prompts` | Per-user prompt metadata. Columns: `id` (UUID PK), `user_id`, `name`, `description`, `latest_version`, timestamps. | ✅ |
+| `prompt_versions` | Immutable prompt versions. Columns: `prompt_id` (FK), `version`, `content`, `created_at`, `user_id`. Unique `(prompt_id, version)`. | ✅ |
+| `models` | Metadata-only per-user model catalog. Columns: `id` (UUID PK), `user_id`, `name`, `provider`, `provider_model`, nullable `base_url`, timestamps. Unique `(user_id, name)`. Stores no credentials. | ✅ |
+| `crons` | Per-user cron definitions. Columns: `id` (UUID PK), `user_id`, `name`, `agent_name`, `message`, `cron_expression`, `timezone`, `enabled`, scheduling/timestamp fields. | ✅ |
+| `cron_runs` | Durable run history. Columns: `id` (UUID PK), `user_id`, `cron_id` (FK), `trigger`, `status`, `occurrence_at`, `thread_id`, timestamps, safe `error`. | ✅ |
 
 Indexes on `trace_events`:
 
@@ -1887,6 +2033,11 @@ Relevant migrations:
 | `012_add_user_id_to_rls_tables` | Adds a `user_id VARCHAR(255)` column to `agent_configs`, `threads`, and `trace_events` so RLS policies can filter rows per user. Adds an index on `user_id` for each table. |
 | `013_enable_rls_policies` | Enables **and forces** Row-Level Security on `agent_configs`, `threads`, `trace_events`, and `api_keys`. Creates the per-user `user_isolation` policy on each table. |
 | `014_create_user_llm_settings_table` | Creates the `user_llm_settings` table (per-user LLM provider settings, Fernet-encrypted API key) and enables RLS with a per-user policy. |
+| `015_create_prompts_prompt_versions_models_tables` | Creates the local prompt registry, immutable prompt versions, and metadata-only model catalog with ownership indexes and forced RLS. |
+| `016_add_thread_source_and_agent_registry_refs` | Adds immutable `threads.source` with `chat` backfill, plus validated `agent_configs.prompt_ref` / `model_ref` FK projections and aggregate/filter indexes. |
+| `017_create_crons_and_cron_runs_tables` | Creates `crons` and `cron_runs`, CHECK constraints, run-history/due-scan indexes, forced per-user RLS, and the scheduled-occurrence uniqueness index. |
+| `018_make_legacy_rls_policies_bypass_aware` | Makes legacy per-user policies honor the explicit `app.bypass_rls` context for migrations and scheduler system operations. |
+| `019_create_cron_runs_single_active_index` | Adds DB-level uniqueness for at most one active run per cron and idempotent skipped occurrence records. |
 
 > The `mcp_servers` table is **not** managed here. It is owned by mcp-raganything's Alembic migration `001_create_mcp_servers_table` (tracked in the `raganything_alembic_version` table).
 
@@ -1938,6 +2089,18 @@ The server-wide `OPENAI_API_KEY` env var is **no longer used** to call the LLM. 
 ### Row-Level Security on per-user tables
 
 Migrations `011`–`014` add a `user_id` column to `agent_configs`, `threads`, and `trace_events`, create the `api_keys` and `user_llm_settings` tables, and enable **forced** Row-Level Security on all five tables. Existing rows become `user_id = ''` and are **invisible** under RLS (the policy compares against `current_setting('app.user_id', true)` which is NULL for unauthenticated sessions). Backfill existing rows to a real `user_id` before enabling RLS in production if you need to preserve access. See [Row-Level Security (RLS)](#row-level-security-rls).
+
+### Phoenix prompt management removed
+
+Prompt storage, listing, versioning, and agent lookup no longer use Phoenix. The old `PromptManager`/Phoenix prompt routes were replaced by the local `/api/v1/prompts` registry described above. Agents previously relying on an implicit Phoenix prompt-by-agent-name lookup must be migrated to either an inline/file prompt or a local `prompt_ref`. Phoenix remains only as an optional tracing provider.
+
+### Local prompts and metadata-only models
+
+`AgentConfig` accepts optional `prompt_ref` / `model_ref`. `prompt_ref` is mutually exclusive with `system_prompt` / `system_prompt_file`. `model_ref` takes precedence over legacy `model` and stores no credential data. Existing YAML without these references remains valid.
+
+### Immutable thread source
+
+`Thread.source` is added with values `chat` and `cron`. Existing rows are backfilled to `chat`. Public thread creation cannot override the source, and cron execution cannot accidentally create a chat thread.
 
 ### `StreamEvent` removed
 
@@ -2000,6 +2163,7 @@ Configured via `.env` file or environment variables. See `.env.example`.
 |---|---|---|
 | `DATABASE_URL` | **required** | PostgreSQL connection URL (e.g. `postgresql://user:pass@host:5432/db`). Automatically normalized to `postgresql+asyncpg://` for async SQLAlchemy. `sslmode` and `channel_binding` query params are extracted and passed via `connect_args` (asyncpg doesn't accept them in the URL). |
 | `POSTGRES_STATEMENT_CACHE_SIZE` | `100` (asyncpg default) | Set to `0` when using a connection pooler (Neon, PgBouncer, etc.). |
+| `DATABASE_SSL_INSECURE` | `false` | Explicit opt-out for local/self-signed development. `false` (default) validates the TLS certificate and hostname for all database `sslmode` settings requiring encryption. Keep `false` in production. |
 
 > **⚠️ Breaking change:** `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DATABASE` are no longer used. Migrate to `DATABASE_URL`.
 

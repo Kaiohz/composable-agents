@@ -62,10 +62,10 @@ class StoreFilePutRequest(BaseModel):
     content: str = Field(..., max_length=10_000_000)
 
 
-@router.get("/files", response_model=list[str], status_code=status.HTTP_200_OK)
+@router.get("/files", status_code=status.HTTP_200_OK)
 async def list_store_files(
     use_case: Annotated[ListStoreFilesUseCase, Depends(get_list_store_files_use_case)],
-    prefix: str = Query(default="/", description="Path prefix to filter files by."),
+    prefix: Annotated[str, Query(description="Path prefix to filter files by.")] = "/",
 ) -> list[str]:
     """List file paths in the store, optionally filtered by prefix.
 
@@ -79,11 +79,11 @@ async def list_store_files(
     return await use_case.execute(prefix=prefix)
 
 
-@router.get("/files/previews", response_model=list[StoreFilePreviewResponse], status_code=status.HTTP_200_OK)
+@router.get("/files/previews", status_code=status.HTTP_200_OK)
 async def list_store_file_previews(
     use_case: Annotated[ListStoreFilePreviewsUseCase, Depends(get_list_store_file_previews_use_case)],
-    prefix: str = Query(default="/", description="Path prefix to filter files by."),
-    chars: int = Query(default=300, ge=1, le=10000, description="Max characters per preview."),
+    prefix: Annotated[str, Query(description="Path prefix to filter files by.")] = "/",
+    chars: Annotated[int, Query(ge=1, le=10000, description="Max characters per preview.")] = 300,
 ) -> list[StoreFilePreviewResponse]:
     """List files with a truncated content preview.
 
@@ -95,7 +95,7 @@ async def list_store_file_previews(
     return [StoreFilePreviewResponse(path=p.path, preview=p.preview) for p in previews]
 
 
-@router.get("/files/{path:path}", response_model=StoreFileResponse, status_code=status.HTTP_200_OK)
+@router.get("/files/{path:path}", status_code=status.HTTP_200_OK)
 async def get_store_file(
     path: str,
     use_case: Annotated[GetStoreFileUseCase, Depends(get_get_store_file_use_case)],
@@ -118,7 +118,7 @@ async def get_store_file(
     return StoreFileResponse(path=_normalize_path(path), content=content)
 
 
-@router.put("/files/{path:path}", response_model=StoreFileResponse, status_code=status.HTTP_200_OK)
+@router.put("/files/{path:path}", status_code=status.HTTP_200_OK)
 async def put_store_file(
     path: str,
     body: StoreFilePutRequest,
@@ -153,7 +153,7 @@ async def delete_store_file(
     await use_case.execute(path=_normalize_path(path))
 
 
-@router.get("/skills/{skill_name}/usage", response_model=list[str], status_code=status.HTTP_200_OK)
+@router.get("/skills/{skill_name}/usage", status_code=status.HTTP_200_OK)
 async def get_skill_usage(
     skill_name: str,
     use_case: Annotated[ListStoreFilesUseCase, Depends(get_list_store_files_use_case)],

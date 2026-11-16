@@ -40,4 +40,4 @@ async def get_current_user(
         A :class:`UserProfile` carrying the user id and (when available) the
         email / name / username claims.
     """
-    return await use_case.execute(ctx)
+    return use_case.execute(ctx)

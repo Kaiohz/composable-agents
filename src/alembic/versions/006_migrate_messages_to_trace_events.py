@@ -61,32 +61,45 @@ def _fetch_messages(conn: Any) -> list[Any]:
     )
 
 
+def _build_ai_payload(row: Any) -> str:
+    """Serialize the AI-message payload (content + optional metadata fields)."""
+    payload: dict = {"content": row.content}
+    if row.tool_calls is not None:
+        payload["tool_calls"] = row.tool_calls
+    if row.status is not None:
+        payload["status"] = row.status
+    if row.structured_response is not None:
+        payload["structured_response"] = row.structured_response
+    if row.thinking is not None:
+        payload["thinking"] = row.thinking
+    return json.dumps(payload)
+
+
+def _build_tool_metadata(row: Any) -> dict | None:
+    """Collect tool-result metadata (tool calls + status), if any."""
+    metadata: dict | None = None
+    if row.tool_calls is not None:
+        metadata = {"tool_calls": row.tool_calls}
+    if row.status is not None:
+        metadata = {**(metadata or {}), "status": row.status}
+    return metadata
+
+
 def _build_event_row(row: Any) -> tuple[Any, ...]:
+    """Build one ``trace_events`` insert tuple from a legacy ``messages`` row."""
     role = row.role
     event_type = _ROLE_TO_TYPE.get(role, "content")
     turn_id = str(uuid4())
-    content: str | None
-    metadata: dict | None = None
 
     if event_type == "ai_message":
-        payload: dict = {"content": row.content}
-        if row.tool_calls is not None:
-            payload["tool_calls"] = row.tool_calls
-        if row.status is not None:
-            payload["status"] = row.status
-        if row.structured_response is not None:
-            payload["structured_response"] = row.structured_response
-        if row.thinking is not None:
-            payload["thinking"] = row.thinking
-        content = json.dumps(payload)
+        content = _build_ai_payload(row)
+        metadata = None
     elif event_type == "tool_result":
         content = row.content
-        if row.tool_calls is not None:
-            metadata = {"tool_calls": row.tool_calls}
-        if row.status is not None:
-            metadata = {**(metadata or {}), "status": row.status}
+        metadata = _build_tool_metadata(row)
     else:
         content = row.content
+        metadata = None
 
     return (
         str(uuid4()),

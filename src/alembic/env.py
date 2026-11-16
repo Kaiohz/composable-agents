@@ -12,6 +12,9 @@ from src.config import Settings
 from src.infrastructure.database.models.agent_config import AgentConfigModel  # noqa: F401
 from src.infrastructure.database.models.api_key import ApiKeyModel  # noqa: F401
 from src.infrastructure.database.models.base import Base
+from src.infrastructure.database.models.cron import CronModel, CronRunModel  # noqa: F401
+from src.infrastructure.database.models.model_config import ModelConfigModel  # noqa: F401
+from src.infrastructure.database.models.prompt import PromptModel, PromptVersionModel  # noqa: F401
 from src.infrastructure.database.models.thread import ThreadModel  # noqa: F401
 from src.infrastructure.database.models.trace_event import TraceEventModel  # noqa: F401
 from src.infrastructure.database.models.user_llm_setting import UserLlmSettingModel  # noqa: F401
@@ -19,7 +22,10 @@ from src.infrastructure.logging import configure_logging
 
 config = context.config
 
-configure_logging(Settings())
+# Runtime-equivalent of ``Settings()``: pydantic-settings resolves required
+# fields (e.g. ``database_url``) from the environment at call time; mypy
+# cannot model that, so the constructor call needs a scoped suppression.
+configure_logging(Settings())  # type: ignore[call-arg]
 
 target_metadata = Base.metadata
 
@@ -28,7 +34,7 @@ def get_url() -> str:
     """Build the database URL from application settings."""
     from src.config import Settings
 
-    return Settings().database_url
+    return Settings().database_url  # type: ignore[call-arg]
 
 
 def run_migrations_offline() -> None:

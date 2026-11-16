@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
-_PRIMITIVES: dict[str, type] = {"string": str, "number": float, "integer": int, "boolean": bool}
+_PRIMITIVES: dict[str, Any] = {"string": str, "number": float, "integer": int, "boolean": bool}
 
 
 def schema_to_pydantic_model(schema: dict[str, Any], model_name: str = "DynamicModel") -> type[BaseModel]:
@@ -18,7 +18,13 @@ def schema_to_pydantic_model(schema: dict[str, Any], model_name: str = "DynamicM
     return _build_model(schema, model_name)
 
 
-def _build_model(schema: dict[str, Any], name: str) -> type[BaseModel] | type:
+def _build_model(schema: dict[str, Any], name: str) -> Any:
+    """Recursively build the pydantic-resolvable type expression for a schema.
+
+    The builders return pydantic *type expressions* (models, ``Literal`` forms,
+    unions and ``list[...]`` aliases) rather than always real ``type`` objects,
+    as accepted by ``create_model``/``Field`` — hence the ``Any`` return type.
+    """
     schema_type = schema.get("type", "object")
 
     if schema_type == "object":
@@ -45,8 +51,8 @@ def _build_object_model(schema: dict[str, Any], name: str) -> type[BaseModel]:
     return create_model(name, __config__=ConfigDict(extra="ignore"), **field_defs)
 
 
-def _resolve_prop_type(prop_schema: dict[str, Any], parent_name: str, prop_name: str) -> type:
-    """Resolve the Python type for a single property schema."""
+def _resolve_prop_type(prop_schema: dict[str, Any], parent_name: str, prop_name: str) -> Any:
+    """Resolve the Python type expression for a single property schema."""
     if "enum" in prop_schema:
         return _build_enum_type(prop_schema["enum"])
 
@@ -67,12 +73,12 @@ def _resolve_prop_type(prop_schema: dict[str, Any], parent_name: str, prop_name:
     return _PRIMITIVES.get(prop_type, str)
 
 
-def _build_enum_type(values: list[Any]) -> type:
+def _build_enum_type(values: list[Any]) -> Any:
     """Build a Literal type from an enum's value list."""
     return Literal[tuple(values)]  # type: ignore[valid-type]
 
 
-def _build_union_type(variants: list[dict[str, Any]], parent_name: str, prop_name: str) -> type:
+def _build_union_type(variants: list[dict[str, Any]], parent_name: str, prop_name: str) -> Any:
     """Build a Union type from an anyOf variant list.
 
     A variant of ``{"type": "null"}`` maps to ``types.NoneType`` so the
@@ -90,7 +96,7 @@ def _build_union_type(variants: list[dict[str, Any]], parent_name: str, prop_nam
     return _join_union(non_null_types, has_null)
 
 
-def _build_type_array_union(types: list[str], prop_schema: dict[str, Any], parent_name: str, prop_name: str) -> type:
+def _build_type_array_union(types: list[str], prop_schema: dict[str, Any], parent_name: str, prop_name: str) -> Any:
     """Build a Union type from a ``type: ["a", "b", ...]`` list form.
 
     Object/array variants are built as nested models (preserving properties/items
@@ -111,19 +117,20 @@ def _build_type_array_union(types: list[str], prop_schema: dict[str, Any], paren
     return _join_union(non_null_types, has_null)
 
 
-def _join_union(non_null_types: list[type], has_null: bool) -> type:
+def _join_union(non_null_types: list[Any], has_null: bool) -> Any:
     """Combine a list of non-null types with optional ``None`` into a union."""
     base = non_null_types[0] if len(non_null_types) == 1 else reduce(or_, non_null_types)
     return base | None if has_null else base
 
 
-def _build_array_model(schema: dict[str, Any], name: str) -> type:
+def _build_array_model(schema: dict[str, Any], name: str) -> Any:
     items_schema = schema.get("items", {})
     items_type = items_schema.get("type", "string")
     if items_type == "object":
-        nested_model = _build_object_model(items_schema, f"{name}Item")
+        nested_model: Any = _build_object_model(items_schema, f"{name}Item")
         return list[nested_model]
-    return list[_PRIMITIVES.get(items_type, str)]
+    item_type: Any = _PRIMITIVES.get(items_type, str)
+    return list[item_type]
 
 
 def _sanitize(name: str) -> str:

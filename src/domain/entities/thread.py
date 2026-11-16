@@ -3,10 +3,16 @@
 A Thread groups all :class:`~src.domain.entities.trace_event.TraceEvent` records
 for a conversation. The legacy ``messages`` field is now a backward-compatible
 computed projection rebuilt from HUMAN_MESSAGE + AI_MESSAGE trace events.
+
+Each thread also carries an immutable ``source`` (spec §5.6 SRC-001): ``chat``
+for conversation-created threads and ``cron`` for scheduled/manual cron
+executions. The source is set at insert time by the trusted creation path,
+backfilled to ``chat`` for pre-existing rows, and never mutated afterwards.
 """
 
 import uuid
 from datetime import UTC, datetime
+from enum import StrEnum
 
 from pydantic import BaseModel, Field, computed_field
 
@@ -14,11 +20,19 @@ from src.domain.entities.message import Message
 from src.domain.entities.trace_event import TraceEvent, TraceEventType
 
 
+class ThreadSource(StrEnum):
+    """Immutable origin of a thread (SRC-001): chat or cron."""
+
+    CHAT = "chat"
+    CRON = "cron"
+
+
 class Thread(BaseModel):
     """A conversation thread backed by trace events."""
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     agent_name: str
+    source: ThreadSource = ThreadSource.CHAT
     trace_events: list[TraceEvent] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

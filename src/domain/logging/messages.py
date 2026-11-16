@@ -220,15 +220,59 @@ class LogMessage(StrEnum):
     MCP_CONNECT_FAILED = "Failed to connect to MCP servers"
     MCP_TOOLS_LOAD_FAILED = "Failed to load MCP tools"
 
-    # --- Phoenix prompt adapter ---
-    PHOENIX_PROMPT_PROVIDER_INITIALIZED = "PhoenixPromptManagerProvider initialized base_url=%s timeout=%ss"
-    PHOENIX_CLIENT_INIT_FAILED = "Failed to initialize Phoenix client"
-    PROMPT_VERSION_CREATED = "Created prompt '%s'"
-    PROMPT_VERSION_UPDATED = "Updated prompt '%s'"
-    PROMPT_TAG_ADD_ERROR = "Error adding tag '%s' to '%s'"
-    PHOENIX_DESC_UPDATE_UNSUPPORTED = (
-        "Phoenix does not support updating description on existing prompts — description change ignored for '%s'"
-    )
+    # --- Phoenix prompt adapter (removed with the Phoenix prompt path) ---
+
+    # --- Local prompt registry (spec §5.1) ---
+    PROMPT_REGISTRY_CREATING = "Creating prompt %s"
+    PROMPT_REGISTRY_CREATED = "Prompt created: id=%s latest_version=%s"
+    PROMPT_REGISTRY_METADATA_UPDATED = "Prompt metadata updated: id=%s"
+    PROMPT_REGISTRY_DELETED = "Prompt deleted: id=%s"
+    PROMPT_REGISTRY_VERSION_ADDED = "Prompt version added: prompt=%s version=%s"
+    PROMPT_REGISTRY_VERSIONS_LISTED = "Listed %d versions for prompt %s"
+    PROMPT_REGISTRY_FETCHED = "Fetched prompt: id=%s"
+
+    # --- Model catalog (spec §5.2) ---
+    MODEL_CREATING = "Creating model %s"
+    MODEL_CREATED = "Model created: id=%s"
+    MODEL_UPDATED = "Model updated: id=%s"
+    MODEL_DELETED = "Model deleted: id=%s"
+    MODEL_FETCHED = "Fetched model: id=%s"
+    MODEL_DELETED_IN_USE = "Refused to delete in-use model: id=%s"
+    PROMPT_DELETED_IN_USE = "Refused to delete in-use prompt: id=%s"
+
+    # --- Cron subsystem (spec §5.3) ---
+    CRON_CREATING = "Creating cron %s (agent=%s)"
+    CRON_CREATED = "Cron created: id=%s next_run_at=%s"
+    CRON_UPDATED = "Cron updated: id=%s next_run_at=%s"
+    CRON_DELETED = "Cron deleted: id=%s"
+    CRON_FETCHED = "Fetched cron: id=%s"
+    CRON_TICK_STARTED = "Scheduler tick: %d due cron(s)"
+    CRON_TICK_CLAIMED = "Scheduler claimed occurrence: cron=%s occurrence=%s"
+    CRON_TICK_CLAIM_CONFLICT = "Scheduler lost occurrence claim: cron=%s occurrence=%s"
+    CRON_TICK_OVERLAP_SKIPPED = "Overlapping occurrence skipped: cron=%s occurrence=%s"
+    CRON_RUN_NOW = "Manual run requested: cron=%s"
+    CRON_RUN_STARTING = "Starting cron run %s (cron=%s trigger=%s)"
+    CRON_RUN_PLACEHOLDER_REJECTED = "Cron run %s rejected: agent requires user placeholders"
+    CRON_RUN_FINISHED = "Cron run %s finished: status=%s elapsed=%.2fs"
+    CRON_RUN_FRONTIER_ADVANCED = "Cron %s next_run_at advanced to %s"
+    CRON_RUN_STALE_RECLAIMED = "Reclaimed %d stale cron run(s) left by a terminated worker"
+    CRON_SCHEDULER_LOOP_STARTED = "Cron scheduler loop started (interval=%ss)"
+    CRON_SCHEDULER_LOOP_STOPPED = "Cron scheduler loop stopped"
+    CRON_SCHEDULER_TICK_FAILED = "Scheduler tick failed"
+    CRON_RUN_INVOCATION_FAILED = "Cron run invocation failed: %s"
+
+    # --- RLS (Row-Level Security) ---
+    RLS_CONTEXT_SET = "RLS context set: app.user_id=%s"
+    RLS_BYPASS_ENABLED = "RLS bypass enabled (row_security=off)"
+
+    # --- Global traces (spec §5.4) ---
+    TRACE_SUMMARIES_LISTED = "Listed %d trace summaries (agent_name=%s, cursor=%s)"
+    TRACE_SUMMARIES_UNSCOPED = "Trace summaries requested without an authenticated owner — returning an empty page"
+
+    # --- Registry freshness (CACHE-002) ---
+    RUNNER_FRESHNESS_REBUILD = "Dependency fingerprint changed for agent '%s' (user=%s); rebuilding runner"
+    RUNNER_FRESHNESS_STALE_EVICTED = "Evicted stale cached runner for agent '%s' (user=%s)"
+
 
     # --- Phoenix tracing provider ---
     PHOENIX_PROVIDER_INIT = "Initializing PhoenixTracingProvider with endpoint=%s, project_name=%s"
@@ -262,6 +306,13 @@ class LogMessage(StrEnum):
     LOG_AGENT_ERROR = "Agent error: %s"
     LOG_MCP_ERROR = "MCP error: %s"
     LOG_UNHANDLED_DOMAIN_ERROR = "Unhandled domain error: %s"
+    LOG_PROMPT_IN_USE = "Prompt in use: %s"
+    LOG_MODEL_NOT_FOUND = "Model not found: %s"
+    LOG_MODEL_IN_USE = "Model in use: %s"
+    LOG_CRON_NOT_FOUND = "Cron not found: %s"
+    LOG_CRON_VALIDATION_ERROR = "Cron validation error: %s"
+    LOG_CRON_RUN_CONFLICT = "Cron run conflict: %s"
+    LOG_AGENT_CONFIG_REFERENCE_ERROR = "Agent config reference error: %s"
 
     # --- Security ---
     LOG_INVALID_API_KEY = "Invalid API key: %s"
@@ -274,14 +325,16 @@ class LogMessage(StrEnum):
     AUTH_JWKS_FETCH_FAILED = "JWKS fetch failed"
     AUTH_CREDENTIALS_VALIDATED = "Credentials validated for user_id=%s method=%s"
 
+    # --- Sonar security (TLS opt-out flag) ---
+    DATABASE_SSL_INSECURE_ENABLED = (
+        "DATABASE_SSL_INSECURE=true: PostgreSQL TLS in mode ``%s`` runs WITHOUT certificate/hostname validation "
+        "(explicit unsafe opt-out). Never enable this against a public endpoint."
+    )
+
     # --- API key management (per-user) ---
     API_KEY_CREATED = "API key created: id=%s user_id=%s"
     API_KEY_REVOKED = "API key revoked: id=%s user_id=%s"
     API_KEY_LISTED = "Listed %d API keys for user_id=%s"
-
-    # --- RLS (Row-Level Security) ---
-    RLS_CONTEXT_SET = "RLS context set: app.user_id=%s"
-    RLS_BYPASS_ENABLED = "RLS bypass enabled (row_security=off)"
 
     # --- LLM settings (per user) ---
     LLM_SETTINGS_DECRYPT_FAILED = "Failed to decrypt LLM API key for user_id=%s; returning masked=None"

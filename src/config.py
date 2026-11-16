@@ -45,8 +45,12 @@ class Settings(BaseSettings):
     minio_secure: bool = False
 
     database_url: str = Field(
-        description="PostgreSQL connection string (postgresql://, postgres://, or postgresql+asyncpg://). Required."
+        description="PostgreSQL connection string (postgresql://, postgres://, or postgresql+asyncpg://). Required.",
     )
+    # Sonar S5527/S4830: TLS to PostgreSQL validates certificates by default in
+    # every encryption mode; local/self-signed stacks may explicitly opt out.
+    # Never set this in production against a public endpoint.
+    database_ssl_insecure: bool = False
     postgres_statement_cache_size: int | None = None
     _ssl_mode: str | None = PrivateAttr(default=None)
 

@@ -11,39 +11,55 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.memory import InMemoryStore
 from langgraph.store.postgres import AsyncPostgresStore
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 
 from src.config import Settings
 from src.domain.entities.agent_config import AgentConfig, SubAgentConfig
+from src.domain.entities.model_metadata import ModelMetadata
 from src.domain.errors.config import ConfigError
 from src.domain.logging.messages import LogMessage
 from src.domain.ports.mcp_tool_loader import McpToolLoader
-from src.domain.ports.prompt_manager import PromptManager
 from src.infrastructure.deepagent.namespace import user_namespaced
 from src.infrastructure.deepagent.schema_utils import schema_to_pydantic_model
 
 logger = logging.getLogger(__name__)
 
+# Dependency resolution seams injected by the composition root (spec §5.5):
+# * prompt_resolver: PromptRef → verbatim system prompt content (Latest or
+#   pinned version) from the local prompt registry.
+# * model_resolver: model UUID → catalog ModelMetadata (metadata only).
+PromptResolver = Callable[[Any], Awaitable[str]]
+ModelResolver = Callable[[Any], Awaitable[ModelMetadata]]
+
 
 async def _resolve_model(
-    model_name: str,
+    config: AgentConfig,
     llm_credentials_resolver: Callable[[str], Awaitable[tuple[str, str] | None]] | None,
+    model_resolver: ModelResolver | None = None,
 ):
     """Resolve the ``model`` argument passed to ``create_deep_agent``.
 
-    * When ``llm_credentials_resolver`` is provided AND ``current_user_id`` is
-      set (authenticated request), resolve the user's ``(base_url, api_key)``
-      and build a per-user :class:`ChatOpenAI` instance (passed by reference).
-    * When the resolver returns ``None`` for a set user, raise
-      :class:`LlmNotConfiguredError` (422).
-    * When the resolver is ``None`` OR ``current_user_id`` is unset (no auth
-      context, tests), fall back to the env-based string model so existing
-      factory / registry / runner tests stay green.
+    Resolution order (spec §5.5 AGT-003):
+
+    * ``model_ref`` (catalog UUID) takes PRECEDENCE — the agent runs with the
+      referenced model's ``provider_model`` identifier and, when present, its
+      ``base_url``. An invalid/missing reference raises the matching error and
+      NEVER falls back to the legacy ``model`` string; the legacy string stays
+      in the YAML for schema compatibility only.
+    * Without ``model_ref`` the legacy ``model`` string applies unchanged
+      (legacy custom strings and singleton LLM settings keep their behavior).
+
+    Runtime credentials are resolved exactly as before (unchanged by this
+    feature): when ``llm_credentials_resolver`` is provided AND
+    ``current_user_id`` is set, the user's ``(base_url, api_key)`` build a
+    per-user :class:`ChatOpenAI`; an unconfigured user raises
+    :class:`LlmNotConfiguredError`; when the resolver is ``None`` OR the user
+    context is unset (tests), the env-based string model fallback applies.
 
     Args:
-        model_name: The configured model name (e.g. ``claude-sonnet-4-5``).
-        llm_credentials_resolver: Optional async callable resolving the
-            current user's LLM credentials.
+        config: The agent configuration.
+        llm_credentials_resolver: Optional per-user credential resolver.
+        model_resolver: Optional catalog model metadata resolver.
 
     Returns:
         Either a model string (env fallback) or a :class:`ChatOpenAI` instance
@@ -55,19 +71,38 @@ async def _resolve_model(
     """
     from src.domain.errors.llm import LlmNotConfiguredError
     from src.domain.errors.messages import ErrorMessage
+    from src.domain.errors.model import ModelNotFoundError
     from src.infrastructure.database.rls_context import current_user_id
+
+    model_name: str = config.model
+    model_base_url: str | None = None
+
+    if config.model_ref is not None:
+        if model_resolver is None:
+            raise ConfigError(f"Agent '{config.name}' sets model_ref but no model metadata resolver is wired.")
+        try:
+            metadata = await model_resolver(str(config.model_ref))
+        except ModelNotFoundError:
+            logger.error(LogMessage.AGENT_CREATE_ERROR, config.name)
+            raise
+        model_name = metadata.provider_model
+        model_base_url = metadata.base_url
 
     user_id = current_user_id.get()
     if llm_credentials_resolver is None or user_id is None:
-        # Env-based fallback (existing behaviour).
+        # Env-based fallback (existing behaviour) — model name only.
         return model_name
 
     credentials = await llm_credentials_resolver(user_id)
     if credentials is None:
         raise LlmNotConfiguredError(ErrorMessage.LLM_NOT_CONFIGURED.format(user_id=user_id))
 
-    base_url, api_key = credentials
-    return ChatOpenAI(model=model_name, base_url=base_url, api_key=api_key)
+    credentials_base_url, api_key = credentials
+    return ChatOpenAI(
+        model=model_name,
+        base_url=model_base_url or credentials_base_url,
+        api_key=SecretStr(api_key),
+    )
 
 
 def _to_pg_conn_string(database_url: str) -> str:
@@ -90,6 +125,11 @@ _pg_store: AsyncPostgresStore | None = None
 _pg_checkpointer: AsyncPostgresSaver | None = None
 _pg_store_cm: Any = None
 _pg_checkpointer_cm: Any = None
+# Event loop the singletons were created on. asyncpg/psycopg primitives are
+# loop-bound: a singleton acquired on another loop must not be reused (the
+# behavioral suite runs a session loop; unit tests run per-function loops).
+_pg_loop: asyncio.AbstractEventLoop | None = None
+_pg_checkpointer_loop: asyncio.AbstractEventLoop | None = None
 _memory_store: InMemoryStore | None = None
 
 
@@ -117,13 +157,17 @@ async def _get_shared_store():
     This ensures the Store File API and all agents share the same store,
     regardless of per-agent ``store_backend`` config.
 
+    The singleton is LOOP-SCOPED: asyncpg connections cannot cross event
+    loops, so a store created on a different loop is transparently re-created.
+
     An ``asyncio.Lock`` protects the lazy initialization to prevent
     concurrent agent creations from opening multiple connection pools.
     """
-    if _pg_store is not None:
+    loop = asyncio.get_running_loop()
+    if _pg_store is not None and _pg_loop is loop:
         return _pg_store
     async with _store_lock:
-        if _pg_store is not None:
+        if _pg_store is not None and _pg_loop is loop:
             return _pg_store
         try:
             return await _create_postgres_store()
@@ -145,14 +189,15 @@ async def _create_postgres_store(settings: Settings | None = None) -> AsyncPostg
     Returns:
         A configured ``AsyncPostgresStore`` with schema migrations applied.
     """
-    global _pg_store, _pg_store_cm
-    if _pg_store is not None:
+    global _pg_store, _pg_store_cm, _pg_loop
+    if _pg_store is not None and _pg_loop is asyncio.get_running_loop():
         return _pg_store
-    s = settings or Settings()
+    s = settings or Settings()  # type: ignore[call-arg]  # env-resolved required fields (pydantic-settings)
     conn_string = _to_pg_conn_string(s.database_url)
     _pg_store_cm = AsyncPostgresStore.from_conn_string(conn_string)
     _pg_store = await _pg_store_cm.__aenter__()
     await _pg_store.setup()
+    _pg_loop = asyncio.get_running_loop()
     return _pg_store
 
 
@@ -170,14 +215,16 @@ async def _create_postgres_checkpointer(settings: Settings | None = None) -> Asy
     Returns:
         A configured ``AsyncPostgresSaver`` with schema migrations applied.
     """
-    global _pg_checkpointer, _pg_checkpointer_cm
-    if _pg_checkpointer is not None:
+    global _pg_checkpointer, _pg_checkpointer_cm, _pg_checkpointer_loop
+    loop = asyncio.get_running_loop()
+    if _pg_checkpointer is not None and _pg_checkpointer_loop is loop:
         return _pg_checkpointer
-    s = settings or Settings()
+    s = settings or Settings()  # type: ignore[call-arg]  # env-resolved required fields (pydantic-settings)
     conn_string = _to_pg_conn_string(s.database_url)
     _pg_checkpointer_cm = AsyncPostgresSaver.from_conn_string(conn_string)
     _pg_checkpointer = await _pg_checkpointer_cm.__aenter__()
     await _pg_checkpointer.setup()
+    _pg_checkpointer_loop = loop
     return _pg_checkpointer
 
 
@@ -245,11 +292,11 @@ def _resolve_backend(store):
     return StoreBackend(store=store, namespace=lambda _r: user_namespaced("filesystem"))
 
 
-def _resolve_interrupt_on(config: AgentConfig) -> dict | None:
+def _resolve_interrupt_on(config: AgentConfig) -> dict[str, Any] | None:
     """Convertit la config HITL en dict pour create_deep_agent."""
     if not config.hitl.rules:
         return None
-    result = {}
+    result: dict[str, Any] = {}
     for tool_name, rule in config.hitl.rules.items():
         if isinstance(rule, bool):
             result[tool_name] = rule
@@ -258,23 +305,26 @@ def _resolve_interrupt_on(config: AgentConfig) -> dict | None:
     return result
 
 
-async def _resolve_subagent_instructions(sa: SubAgentConfig, prompt_manager: PromptManager | None) -> str | None:
-    """Resolve subagent instructions, falling back to YAML if Phoenix load fails."""
-    instructions = sa.instructions
-    if not prompt_manager:
-        return instructions
-    try:
-        content = await prompt_manager.get_prompt_content(sa.name)
-        return content.get("content")
-    except Exception:
-        logger.warning(LogMessage.SUBAGENT_PROMPT_LOAD_FAILED, sa.name)
-        return sa.instructions
+def _resolve_subagent_instructions(sa: SubAgentConfig) -> str | None:
+    """Resolve subagent instructions from the YAML only.
+
+    Spec §8.8: the implicit Phoenix agent-name prompt lookup is removed —
+    subagents use their configured ``instructions`` (or the referenced
+    agent's ``system_prompt`` via the caller's fallback logic). Nothing here
+    touches Phoenix.
+
+    Args:
+        sa: The subagent configuration.
+
+    Returns:
+        The resolved instructions or ``None`` when not configured.
+    """
+    return sa.instructions
 
 
 async def _resolve_subagents(
     config: AgentConfig,
     mcp_tool_loader: McpToolLoader | None = None,
-    prompt_manager: PromptManager | None = None,
     config_resolver: Callable[[str], Awaitable[AgentConfig]] | None = None,
 ) -> list | None:
     """Convertit les configs de sous-agents.
@@ -282,7 +332,6 @@ async def _resolve_subagents(
     Args:
         config: Configuration de l'agent principal.
         mcp_tool_loader: Loader MCP optionnel pour les sous-agents.
-        prompt_manager: Gestionnaire de prompts optionnel.
         config_resolver: Résolveur optionnel permettant de charger la
             ``AgentConfig`` référencée par ``SubAgentConfig.agent_ref``.
 
@@ -294,7 +343,7 @@ async def _resolve_subagents(
     subagents = []
     for sa in config.subagents:
         if sa.agent_ref is not None:
-            spec = await _resolve_referenced_subagent(sa, mcp_tool_loader, prompt_manager, config_resolver)
+            spec = await _resolve_referenced_subagent(sa, mcp_tool_loader, config_resolver)
             subagents.append(spec)
             continue
 
@@ -304,7 +353,7 @@ async def _resolve_subagents(
             mcp_tools = await mcp_tool_loader.load_tools(sa.mcp_servers)
         all_tools = (local_tools or []) + mcp_tools if (local_tools or mcp_tools) else None
 
-        instructions = await _resolve_subagent_instructions(sa, prompt_manager)
+        instructions = _resolve_subagent_instructions(sa)
 
         subagents.append(
             {
@@ -322,7 +371,6 @@ async def _resolve_subagents(
 async def _resolve_referenced_subagent(
     sa: SubAgentConfig,
     mcp_tool_loader: McpToolLoader | None,
-    prompt_manager: PromptManager | None,
     config_resolver: Callable[[str], Awaitable[AgentConfig]] | None,
 ) -> dict:
     """Build a subagent spec from a SubAgentConfig that references another agent.
@@ -330,7 +378,6 @@ async def _resolve_referenced_subagent(
     Args:
         sa: The subagent configuration carrying ``agent_ref``.
         mcp_tool_loader: Optional MCP tool loader.
-        prompt_manager: Optional prompt manager.
         config_resolver: Async callable returning the referenced AgentConfig.
 
     Returns:
@@ -353,7 +400,7 @@ async def _resolve_referenced_subagent(
             sa.agent_ref,
         )
 
-    instructions = await _resolve_subagent_instructions(sa, prompt_manager)
+    instructions = _resolve_subagent_instructions(sa)
     system_prompt = instructions if instructions is not None else ref.system_prompt
 
     local_tools = _resolve_tools_list(sa.tools) if sa.tools else None
@@ -574,16 +621,16 @@ async def _copy_memories_to_agent_ns(
 async def create_agent_from_config(
     config: AgentConfig,
     mcp_tool_loader: McpToolLoader | None = None,
-    prompt_manager: PromptManager | None = None,
     config_resolver: Callable[[str], Awaitable[AgentConfig]] | None = None,
     llm_credentials_resolver: Callable[[str], Awaitable[tuple[str, str] | None]] | None = None,
+    prompt_resolver: PromptResolver | None = None,
+    model_resolver: ModelResolver | None = None,
 ):
     """Create a compiled Deep Agent from configuration.
 
     Args:
         config: Agent configuration.
         mcp_tool_loader: Optional MCP tool loader for loading remote tools.
-        prompt_manager: Optional prompt manager for loading system prompts.
         config_resolver: Optional async callable used to resolve subagent
             ``agent_ref`` references into full ``AgentConfig`` objects.
         llm_credentials_resolver: Optional async callable returning
@@ -595,11 +642,21 @@ async def create_agent_from_config(
             :class:`LlmNotConfiguredError` is raised. When the resolver is
             ``None`` OR ``current_user_id`` is unset (no auth context, tests),
             the env-based string model fallback is used (current behaviour).
+        prompt_resolver: Optional resolver for ``prompt_ref`` (spec §5.5
+            AGT-002): returns the verbatim system prompt content of the
+            referenced registry prompt — Latest version when
+            ``prompt_ref.version`` is omitted, exactly that immutable version
+            when pinned. Missing/inaccessible prompts or versions raise
+            explicit errors; there is NO Phoenix path and NO agent-name
+            lookup (§8.8).
+        model_resolver: Optional resolver for ``model_ref`` (AGT-003):
+            returns the catalog model metadata used for invocation.
 
     Returns:
         Tuple of (compiled agent graph, response_format_model or None).
     """
     logger.info(LogMessage.AGENT_CREATING, config.name, config.model)
+    checkpointer: MemorySaver | AsyncPostgresSaver
     if config.backend.checkpoint_backend == "postgres":
         try:
             checkpointer = await _create_postgres_checkpointer()
@@ -617,13 +674,13 @@ async def create_agent_from_config(
     store = await _get_shared_store()
 
     all_tools = await _resolve_agent_tools(config, mcp_tool_loader)
-    system_prompt = await get_system_prompt_from_phoenix(config.name, prompt_manager) if prompt_manager else None
+    system_prompt = await _resolve_system_prompt(config, prompt_resolver)
     skills_source, memory_paths = await _resolve_skills_and_memory(store, config)
 
     kwargs = {
         "name": config.name,
-        "model": await _resolve_model(config.model, llm_credentials_resolver),
-        "system_prompt": system_prompt if system_prompt else config.system_prompt,
+        "model": await _resolve_model(config, llm_credentials_resolver, model_resolver),
+        "system_prompt": system_prompt,
         "tools": all_tools,
         "checkpointer": checkpointer,
         "store": store,
@@ -642,7 +699,7 @@ async def create_agent_from_config(
     else:
         response_format_model = None
 
-    subagents = await _resolve_subagents(config, mcp_tool_loader, prompt_manager, config_resolver)
+    subagents = await _resolve_subagents(config, mcp_tool_loader, config_resolver)
     if subagents:
         kwargs["subagents"] = subagents
         logger.info(LogMessage.AGENT_SUBAGENTS, config.name, len(subagents))
@@ -653,6 +710,35 @@ async def create_agent_from_config(
         raise
     logger.info(LogMessage.AGENT_CREATED, config.name)
     return graph, response_format_model
+
+
+async def _resolve_system_prompt(
+    config: AgentConfig,
+    prompt_resolver: PromptResolver | None,
+) -> str | None:
+    """Resolve the agent's system prompt (spec §5.5 AGT-002).
+
+    * ``prompt_ref`` set → resolve through the LOCAL registry (Latest when
+      ``version`` is omitted, exactly that immutable version when pinned).
+      Missing/inaccessible prompts or versions raise explicit errors — no
+      Phoenix lookup and no agent-name fallback (§8.8).
+    * Otherwise the legacy inline ``system_prompt`` applies as-is.
+    * When nothing is configured the existing non-Phoenix default behaviour
+      applies (``None``).
+
+    Args:
+        config: The agent configuration.
+        prompt_resolver: Optional registry resolver wired by the composition
+            root.
+
+    Returns:
+        The resolved system prompt content, or ``None``.
+    """
+    if config.prompt_ref is None:
+        return config.system_prompt
+    if prompt_resolver is None:
+        raise ConfigError(f"Agent '{config.name}' sets prompt_ref but no prompt resolver is wired.")
+    return await prompt_resolver(config.prompt_ref)
 
 
 async def _resolve_agent_tools(
@@ -699,15 +785,3 @@ async def _resolve_skills_and_memory(
         _, memory_paths = await _prepare_agent_namespace(store, config.name, [], config.memory)
         return None, memory_paths
     return None, None
-
-
-# helper to get system_prompt from Phoenix
-async def get_system_prompt_from_phoenix(agent_name: str, prompt_manager: PromptManager | None = None) -> str | None:
-    """Get system_prompt from Phoenix for a given agent name."""
-    if not prompt_manager:
-        return None
-    try:
-        content = await prompt_manager.get_prompt_content(agent_name)
-        return content.get("content") if content else None
-    except Exception:
-        return None

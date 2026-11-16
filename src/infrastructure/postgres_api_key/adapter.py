@@ -60,6 +60,10 @@ class PostgresApiKeyRepository(ApiKeyRepository):
     async def find_active_by_hash(self, key_hash: str) -> tuple[str, str] | None:
         """Return ``(user_id, key_id)`` for the active key matching ``key_hash``.
 
+        Runs under a system (RLS-bypass) context: the lookup happens BEFORE any
+        principal exists (it IS the identity resolution), while the row itself
+        is only selected by its secret hash.
+
         Args:
             key_hash: The SHA-256 hex digest of the API key plaintext.
 
@@ -70,7 +74,9 @@ class PostgresApiKeyRepository(ApiKeyRepository):
         Raises:
             StorageError: If the database operation fails.
         """
-        async with AsyncSession(self._engine, expire_on_commit=False) as session:
+        from src.infrastructure.database.rls_context import system_rls_context
+
+        async with system_rls_context(), AsyncSession(self._engine, expire_on_commit=False) as session:
             try:
                 stmt = select(ApiKeyModel.user_id, ApiKeyModel.id).where(
                     ApiKeyModel.key_hash == key_hash,
@@ -179,8 +185,9 @@ class PostgresApiKeyRepository(ApiKeyRepository):
     async def touch_last_used(self, key_id: str) -> None:
         """Update ``last_used_at`` to now for ``key_id``.
 
-        Silent no-op if the key does not exist (used on the auth hot path where
-        a stale/revoked key may still be presented).
+        Runs under a system (RLS-bypass) context: like ``find_active_by_hash``
+        it fires on the pre-authentication hot path, before any principal is
+        bound. Silent no-op if the key does not exist.
 
         Args:
             key_id: Id of the key that was just used.
@@ -188,7 +195,9 @@ class PostgresApiKeyRepository(ApiKeyRepository):
         Raises:
             StorageError: If the database operation fails.
         """
-        async with AsyncSession(self._engine, expire_on_commit=False) as session:
+        from src.infrastructure.database.rls_context import system_rls_context
+
+        async with system_rls_context(), AsyncSession(self._engine, expire_on_commit=False) as session:
             try:
                 stmt = update(ApiKeyModel).where(ApiKeyModel.id == key_id).values(last_used_at=datetime.now(UTC))
                 await session.execute(stmt)

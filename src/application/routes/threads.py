@@ -64,7 +64,7 @@ async def delete_thread(
     await use_case.execute(thread_id)
 
 
-@router.get("/{thread_id}/messages", response_model=list[Message])
+@router.get("/{thread_id}/messages")
 async def list_messages(
     thread_id: str,
     use_case: Annotated[GetThreadUseCase, Depends(get_get_thread_use_case)],

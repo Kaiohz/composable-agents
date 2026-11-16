@@ -1,6 +1,6 @@
 from typing import Literal, Self
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from src.domain.entities.hitl_decision import HitlDecision
 
@@ -42,6 +42,13 @@ class ChatRequest(BaseModel):
 
 
 class CreateThreadRequest(BaseModel):
-    """Request body for creating a new thread."""
+    """Request body for creating a new thread.
+
+    SRC-002 spoof prevention: only the existing public creation inputs are
+    accepted — ``source`` is NOT client-controllable (extra fields such as a
+    supplied ``source`` are rejected outright).
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     agent_name: str = Field(..., min_length=1)

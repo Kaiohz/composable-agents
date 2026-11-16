@@ -1,56 +1,88 @@
 """Main entry point for the Composable Agents API."""
 
+import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import TypeVar, cast
 
 import uvicorn
-from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi import APIRouter, Depends, FastAPI, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from src.application.routes.agents import router as agents_router
 from src.application.routes.api_keys import router as api_keys_router
 from src.application.routes.chat import router as chat_router
+from src.application.routes.cron import router as cron_router
 from src.application.routes.health import router as health_router
+from src.application.routes.model import router as model_router
 from src.application.routes.prompt import router as prompt_router
 from src.application.routes.store import router as store_router
 from src.application.routes.threads import router as threads_router
 from src.application.routes.trace import router as trace_router
+from src.application.routes.traces import router as traces_router
 from src.application.routes.user_llm_settings import router as user_llm_settings_router
 from src.application.routes.users import router as users_router
 from src.application.routes.websocket import router as websocket_router
-from src.config import Settings
+from src.config import (
+    Settings,  # type: ignore[call-arg]  # noqa: F401  # env-resolved required fields (pydantic-settings)
+)
 from src.dependencies import (
     close_persistence,
+    get_scheduler_tick_use_case,
     init_persistence,
     mcp_tool_loader,
     security,
     tracing_provider,
 )
-from src.domain.errors.agent import AgentConfigAlreadyExistsError, AgentError, AgentNotFoundError
+from src.domain.errors.agent import (
+    AgentConfigAlreadyExistsError,
+    AgentConfigReferenceError,
+    AgentError,
+    AgentNotFoundError,
+)
 from src.domain.errors.base import DomainError
 from src.domain.errors.config import ConfigError, ConfigNotFoundError, ConfigValidationError
+from src.domain.errors.cron import CronNotFoundError, CronRunConflictError, CronValidationError
 from src.domain.errors.hitl import InvalidHitlActionError
 from src.domain.errors.llm import LlmNotConfiguredError
 from src.domain.errors.mcp import McpError
-from src.domain.errors.prompt import (
-    PromptAlreadyExistsError,
-    PromptManagerUnavailableError,
-    PromptNotFoundError,
-)
+from src.domain.errors.model import ModelInUseError, ModelNotFoundError
+from src.domain.errors.prompt import PromptInUseError, PromptNotFoundError, PromptVersionNotFoundError
 from src.domain.errors.security import AuthenticationError, InvalidApiKeyError
 from src.domain.errors.storage import StorageError
 from src.domain.errors.store_file import StoreFileNotFoundError
 from src.domain.errors.thread import ThreadNotFoundError
 from src.domain.logging.messages import LogMessage
+from src.infrastructure.cron_scheduler import start_scheduler_loop, stop_scheduler_loop
 from src.infrastructure.logging import RequestIdMiddleware, configure_logging
 
-settings = Settings()
+settings = Settings()  # type: ignore[call-arg]  # env-resolved required fields (pydantic-settings)
 
 configure_logging(settings)
 
 logger = logging.getLogger(__name__)
+
+E = TypeVar("E", bound=DomainError)
+
+
+def _add_domain_error_handler(error_type: type[E], handler: Callable[[Request, E], Awaitable[JSONResponse] | JSONResponse]) -> None:
+    """Register a typed domain-error handler.
+
+    Starlette keys handlers on the exception type but types the callable
+    parameter as the broad ``Exception`` (contravariance), so precisely-typed
+    handlers cannot be passed without a cast. The cast is sound: Starlette
+    dispatches by ``isinstance`` on the registered type, so the narrowed
+    parameter always receives an instance of ``error_type``, and ``E`` is
+    bound to ``DomainError`` (every handler reads ``status_code``/``detail``).
+    """
+    app.add_exception_handler(
+        error_type,
+        cast("Callable[[Request, Exception], Awaitable[Response] | Response]", handler),
+    )
 
 
 def _run_alembic_upgrade() -> None:
@@ -64,17 +96,27 @@ def _run_alembic_upgrade() -> None:
     command.upgrade(cfg, "head")
 
 
+_scheduler_task: asyncio.Task | None = None
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    global _scheduler_task
     logger.info(LogMessage.APP_STARTUP_INITIATED)
     try:
         await init_persistence()
         logger.info(LogMessage.APP_PERSISTENCE_INITIALIZED)
     except Exception:
         logger.exception(LogMessage.APP_PERSISTENCE_INIT_FAILED)
+    # Cron scheduler background loop (Phase 3 lifecycle). Tests drive
+    # ``run_scheduler_tick`` directly, so the loop is intentionally only tied
+    # to the ASGI lifespan (never to the import side effects).
+    _scheduler_task = start_scheduler_loop(get_scheduler_tick_use_case().execute)
     logger.info(LogMessage.APP_STARTUP_COMPLETE)
     yield
     logger.info(LogMessage.APP_SHUTDOWN_INITIATED)
+    await stop_scheduler_loop(_scheduler_task)
+    _scheduler_task = None
     try:
         await close_persistence()
         logger.info(LogMessage.APP_PERSISTENCE_CLOSED)
@@ -124,8 +166,11 @@ protected = APIRouter(dependencies=[Depends(security.verify_credentials)])
 protected.include_router(threads_router)
 protected.include_router(chat_router)
 protected.include_router(trace_router)
+protected.include_router(traces_router)
 protected.include_router(agents_router)
 protected.include_router(prompt_router)
+protected.include_router(model_router)
+protected.include_router(cron_router)
 protected.include_router(store_router)
 protected.include_router(api_keys_router)
 protected.include_router(user_llm_settings_router)
@@ -146,82 +191,139 @@ def _error_response(exc: DomainError) -> JSONResponse:
     return JSONResponse(status_code=int(exc.status_code), content=content)
 
 
-async def agent_config_already_exists_handler(_request: Request, exc: AgentConfigAlreadyExistsError) -> JSONResponse:
+def agent_config_already_exists_handler(_request: Request, exc: AgentConfigAlreadyExistsError) -> JSONResponse:
     logger.warning(LogMessage.LOG_AGENT_CONFIG_ALREADY_EXISTS, exc.detail)
     return _error_response(exc)
 
 
-async def storage_error_handler(_request: Request, exc: StorageError) -> JSONResponse:
+def request_validation_error_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
+    """Render a request-validation failure (HTTP 422) without echoing raw input.
+
+    FastAPI's default body embeds the rejected ``input`` value. A malformed
+    body may carry credential material (models reject credential-like extra
+    fields — QA re-run), so the rendered errors strip the ``input`` member and
+    keep only the field location, message and error type.
+    """
+    errors = [
+        {key: value for key, value in error.items() if key not in ("input", "ctx")}
+        for error in exc.errors()
+        if isinstance(error, dict)
+    ]
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={"detail": "Validation error.", "errors": errors},
+    )
+
+
+def storage_error_handler(_request: Request, exc: StorageError) -> JSONResponse:
+    """Render a storage failure (HTTP 503).
+
+    The full detail (SQL statement, bound parameters, driver class) is logged
+    server-side for diagnostics but is NEVER reflected in the response body:
+    the client receives a generic, bounded message, so internal schema names,
+    bound values or entire failing rows (QA BUG-006/008/009 — the review's
+    cross-cutting finding I18) can never be disclosed over HTTP.
+    """
     logger.error(LogMessage.LOG_STORAGE_ERROR, exc.detail)
-    return _error_response(exc)
+    return JSONResponse(status_code=int(exc.status_code), content={"detail": "A storage operation failed."})
 
 
-async def agent_not_found_handler(_request: Request, exc: AgentNotFoundError) -> JSONResponse:
+def agent_not_found_handler(_request: Request, exc: AgentNotFoundError) -> JSONResponse:
     logger.warning(LogMessage.LOG_AGENT_NOT_FOUND, exc.detail)
     return _error_response(exc)
 
 
-async def config_not_found_handler(_request: Request, exc: ConfigNotFoundError) -> JSONResponse:
+def config_not_found_handler(_request: Request, exc: ConfigNotFoundError) -> JSONResponse:
     logger.warning(LogMessage.LOG_CONFIG_NOT_FOUND, exc.detail)
     return _error_response(exc)
 
 
-async def thread_not_found_handler(_request: Request, exc: ThreadNotFoundError) -> JSONResponse:
+def thread_not_found_handler(_request: Request, exc: ThreadNotFoundError) -> JSONResponse:
     logger.warning(LogMessage.LOG_THREAD_NOT_FOUND, exc.detail)
     return _error_response(exc)
 
 
-async def store_file_not_found_handler(_request: Request, exc: StoreFileNotFoundError) -> JSONResponse:
+def store_file_not_found_handler(_request: Request, exc: StoreFileNotFoundError) -> JSONResponse:
     logger.warning("Store file not found: %s", exc.detail)
     return _error_response(exc)
 
 
-async def prompt_not_found_handler(_request: Request, exc: PromptNotFoundError) -> JSONResponse:
+def prompt_not_found_handler(_request: Request, exc: PromptNotFoundError) -> JSONResponse:
     logger.warning(LogMessage.LOG_PROMPT_NOT_FOUND, exc.detail)
     return _error_response(exc)
 
 
-async def prompt_already_exists_handler(_request: Request, exc: PromptAlreadyExistsError) -> JSONResponse:
-    logger.warning(LogMessage.LOG_PROMPT_ALREADY_EXISTS, exc.detail)
+def prompt_version_not_found_handler(_request: Request, exc: PromptVersionNotFoundError) -> JSONResponse:
+    logger.warning(LogMessage.LOG_PROMPT_NOT_FOUND, exc.detail)
     return _error_response(exc)
 
 
-async def prompt_manager_unavailable_handler(_request: Request, exc: PromptManagerUnavailableError) -> JSONResponse:
-    logger.error(LogMessage.LOG_PROMPT_MANAGER_UNAVAILABLE, exc.detail)
+def prompt_in_use_handler(_request: Request, exc: PromptInUseError) -> JSONResponse:
+    logger.warning(LogMessage.LOG_PROMPT_IN_USE, exc.detail)
     return _error_response(exc)
 
 
-async def invalid_hitl_action_handler(_request: Request, exc: InvalidHitlActionError) -> JSONResponse:
+def model_not_found_handler(_request: Request, exc: ModelNotFoundError) -> JSONResponse:
+    logger.warning(LogMessage.LOG_MODEL_NOT_FOUND, exc.detail)
+    return _error_response(exc)
+
+
+def model_in_use_handler(_request: Request, exc: ModelInUseError) -> JSONResponse:
+    logger.warning(LogMessage.LOG_MODEL_IN_USE, exc.detail)
+    return _error_response(exc)
+
+
+def cron_not_found_handler(_request: Request, exc: CronNotFoundError) -> JSONResponse:
+    logger.warning(LogMessage.LOG_CRON_NOT_FOUND, exc.detail)
+    return _error_response(exc)
+
+
+def cron_validation_handler(_request: Request, exc: CronValidationError) -> JSONResponse:
+    logger.warning(LogMessage.LOG_CRON_VALIDATION_ERROR, exc.detail)
+    return _error_response(exc)
+
+
+def cron_run_conflict_handler(_request: Request, exc: CronRunConflictError) -> JSONResponse:
+    logger.warning(LogMessage.LOG_CRON_RUN_CONFLICT, exc.detail)
+    return _error_response(exc)
+
+
+def agent_config_reference_handler(_request: Request, exc: AgentConfigReferenceError) -> JSONResponse:
+    logger.warning(LogMessage.LOG_AGENT_CONFIG_REFERENCE_ERROR, exc.detail)
+    return _error_response(exc)
+
+
+def invalid_hitl_action_handler(_request: Request, exc: InvalidHitlActionError) -> JSONResponse:
     logger.warning(LogMessage.LOG_INVALID_HITL_ACTION, exc.detail)
     return _error_response(exc)
 
 
-async def config_validation_handler(_request: Request, exc: ConfigValidationError) -> JSONResponse:
+def config_validation_handler(_request: Request, exc: ConfigValidationError) -> JSONResponse:
     logger.error(LogMessage.LOG_CONFIG_VALIDATION_ERROR, exc.detail, exc.errors)
     return _error_response(exc)
 
 
-async def config_error_handler(_request: Request, exc: ConfigError) -> JSONResponse:
+def config_error_handler(_request: Request, exc: ConfigError) -> JSONResponse:
     logger.error(LogMessage.LOG_CONFIG_ERROR, exc.detail)
     return _error_response(exc)
 
 
-async def agent_error_handler(_request: Request, exc: AgentError) -> JSONResponse:
+def agent_error_handler(_request: Request, exc: AgentError) -> JSONResponse:
     logger.error(LogMessage.LOG_AGENT_ERROR, exc.detail)
     return _error_response(exc)
 
 
-async def mcp_error_handler(_request: Request, exc: McpError) -> JSONResponse:
+def mcp_error_handler(_request: Request, exc: McpError) -> JSONResponse:
     logger.error(LogMessage.LOG_MCP_ERROR, exc.detail)
     return _error_response(exc)
 
 
-async def domain_error_handler(_request: Request, exc: DomainError) -> JSONResponse:
+def domain_error_handler(_request: Request, exc: DomainError) -> JSONResponse:
     logger.error(LogMessage.LOG_UNHANDLED_DOMAIN_ERROR, exc.detail)
     return _error_response(exc)
 
 
-async def invalid_api_key_handler(_request: Request, exc: InvalidApiKeyError) -> JSONResponse:
+def invalid_api_key_handler(_request: Request, exc: InvalidApiKeyError) -> JSONResponse:
     logger.warning(LogMessage.LOG_INVALID_API_KEY, exc.detail)
     return _error_response(exc)
 
@@ -241,24 +343,40 @@ def llm_not_configured_handler(_request: Request, exc: LlmNotConfiguredError) ->
 # Register one handler per domain error type explicitly. Each handler reads the
 # exception's own status_code/detail, so no separate error->HTTP mapping table
 # is required. Most-specific types are registered first.
-app.add_exception_handler(ConfigNotFoundError, config_not_found_handler)
-app.add_exception_handler(ConfigValidationError, config_validation_handler)
-app.add_exception_handler(ConfigError, config_error_handler)
-app.add_exception_handler(ThreadNotFoundError, thread_not_found_handler)
-app.add_exception_handler(StoreFileNotFoundError, store_file_not_found_handler)
-app.add_exception_handler(AgentNotFoundError, agent_not_found_handler)
-app.add_exception_handler(AgentConfigAlreadyExistsError, agent_config_already_exists_handler)
-app.add_exception_handler(AgentError, agent_error_handler)
-app.add_exception_handler(InvalidHitlActionError, invalid_hitl_action_handler)
-app.add_exception_handler(StorageError, storage_error_handler)
-app.add_exception_handler(McpError, mcp_error_handler)
-app.add_exception_handler(PromptNotFoundError, prompt_not_found_handler)
-app.add_exception_handler(PromptAlreadyExistsError, prompt_already_exists_handler)
-app.add_exception_handler(PromptManagerUnavailableError, prompt_manager_unavailable_handler)
-app.add_exception_handler(InvalidApiKeyError, invalid_api_key_handler)
-app.add_exception_handler(AuthenticationError, authentication_error_handler)
-app.add_exception_handler(LlmNotConfiguredError, llm_not_configured_handler)
-app.add_exception_handler(DomainError, domain_error_handler)
+_add_domain_error_handler(ConfigNotFoundError, config_not_found_handler)
+_add_domain_error_handler(ConfigValidationError, config_validation_handler)
+_add_domain_error_handler(ConfigError, config_error_handler)
+_add_domain_error_handler(ThreadNotFoundError, thread_not_found_handler)
+_add_domain_error_handler(StoreFileNotFoundError, store_file_not_found_handler)
+_add_domain_error_handler(AgentNotFoundError, agent_not_found_handler)
+_add_domain_error_handler(AgentConfigAlreadyExistsError, agent_config_already_exists_handler)
+_add_domain_error_handler(AgentError, agent_error_handler)
+_add_domain_error_handler(InvalidHitlActionError, invalid_hitl_action_handler)
+# RequestValidationError is a FastAPI boundary error, not a DomainError — the
+# same contravariance cast as the typed registrar applies here; mypy's E bound
+# does not cover it, hence the direct registration with a narrowed cast.
+app.add_exception_handler(
+    RequestValidationError,
+    cast(
+        "Callable[[Request, Exception], Awaitable[Response] | Response]",
+        request_validation_error_handler,
+    ),
+)
+_add_domain_error_handler(StorageError, storage_error_handler)
+_add_domain_error_handler(McpError, mcp_error_handler)
+_add_domain_error_handler(PromptNotFoundError, prompt_not_found_handler)
+_add_domain_error_handler(PromptVersionNotFoundError, prompt_version_not_found_handler)
+_add_domain_error_handler(PromptInUseError, prompt_in_use_handler)
+_add_domain_error_handler(ModelNotFoundError, model_not_found_handler)
+_add_domain_error_handler(ModelInUseError, model_in_use_handler)
+_add_domain_error_handler(CronNotFoundError, cron_not_found_handler)
+_add_domain_error_handler(CronValidationError, cron_validation_handler)
+_add_domain_error_handler(CronRunConflictError, cron_run_conflict_handler)
+_add_domain_error_handler(AgentConfigReferenceError, agent_config_reference_handler)
+_add_domain_error_handler(InvalidApiKeyError, invalid_api_key_handler)
+_add_domain_error_handler(AuthenticationError, authentication_error_handler)
+_add_domain_error_handler(LlmNotConfiguredError, llm_not_configured_handler)
+_add_domain_error_handler(DomainError, domain_error_handler)
 
 
 def run_fastapi():

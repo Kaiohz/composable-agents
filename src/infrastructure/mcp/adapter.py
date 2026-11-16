@@ -1,9 +1,10 @@
 import asyncio
 import logging
-from typing import Any
+from typing import Any, cast
 
 from langchain_core.tools import BaseTool, StructuredTool, ToolException
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.sessions import Connection
 
 from src.domain.entities.mcp_server_config import McpServerConfig, McpTransportType
 from src.domain.errors.mcp import McpConnectionError, McpToolLoadError
@@ -59,7 +60,11 @@ class LangchainMcpToolLoader(McpToolLoader):
                 server_configs[config.name] = server_config
 
         try:
-            client = MultiServerMCPClient(server_configs)
+            # The client expects a mapping of validated connection TypedDicts.
+            # Our runtime mapping is heterogeneous (stdio/url/headers/env, all
+            # resolved and validated above), which the TypedDict union cannot
+            # express statically, so the mapping is cast once here.
+            client = MultiServerMCPClient(cast("dict[str, Connection]", server_configs))
             self._clients.append(client)
             tools = await client.get_tools()
             return self._patch_sync_support(tools)
@@ -95,7 +100,7 @@ class LangchainMcpToolLoader(McpToolLoader):
             (the LLM can retry/skip) instead of stalling or being killed.
           - a sync func that runs the same timed coroutine for deepagents.
         """
-        patched = []
+        patched: list[BaseTool] = []
         for tool in tools:
             if isinstance(tool, StructuredTool) and tool.coroutine is not None and tool.func is None:
                 original_coro = tool.coroutine

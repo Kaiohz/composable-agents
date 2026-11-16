@@ -10,5 +10,6 @@ class LoadAgentConfigUseCase:
     def __init__(self, loader: AgentConfigLoader) -> None:
         self._loader = loader
 
-    async def execute(self, config_path: str | Path) -> AgentConfig:
+    def execute(self, config_path: str | Path) -> AgentConfig:
+        """Charge la configuration via le loader (pure CPU, aucun I/O)."""
         return self._loader.load(config_path)

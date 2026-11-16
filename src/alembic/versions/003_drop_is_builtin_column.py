@@ -7,6 +7,8 @@ Create Date: 2026-04-12
 
 from collections.abc import Sequence
 
+import sqlalchemy as sa
+
 from alembic import op
 
 revision: str = "003"
@@ -20,4 +22,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.add_column("agent_configs", "is_builtin", nullable=False, server_default="false")
+    op.add_column(
+        "agent_configs",
+        sa.Column("is_builtin", sa.Boolean(), nullable=False, server_default=sa.false()),
+    )
