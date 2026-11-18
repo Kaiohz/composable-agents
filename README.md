@@ -176,6 +176,18 @@ curl -N -X POST http://localhost:8000/api/v1/chat/<thread_id>/stream \
   -H "X-API-Key: <API_KEY>" \
   -d '{"message": "Hello, what can you do?"}'
 
+# Send a message with attachments (images → vision content blocks; documents
+# require an agent whose MCP config declares an HTTP server ending with
+# /files/mcp — they are uploaded to a temporary, user-isolated chat_tmp/
+# RustFS prefix via the backend and deleted after the terminal response)
+curl -X POST http://localhost:8000/api/v1/chat/<thread_id> \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: <API_KEY>" \
+  -d '{"message": "Analyse cette image et ce document", "attachments": [
+         {"filename": "capture.png", "content_type": "image/png", "content_base64": "<base64>"},
+         {"filename": "rapport.pdf", "content_type": "application/pdf", "content_base64": "<base64>"}
+       ]}'
+
 # Get the full thread history (thread + turns grouped by turn_id)
 curl http://localhost:8000/api/v1/threads/<thread_id>/history \
   -H "X-API-Key: <API_KEY>"

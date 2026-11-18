@@ -175,6 +175,33 @@ class ErrorMessage(StrEnum):
     LLM_NOT_CONFIGURED = "No LLM provider configured for user {user_id}. Configure via PUT /api/v1/settings/llm."
     LLM_SETTINGS_NOT_FOUND = "LLM settings not found for user {user_id}"
 
+    # --- Chat attachments (chat-pdf-attachments spec §5.1/§5.4) ---
+    ATTACHMENT_EMPTY_FILE_NAME = "Attachment filename must be a non-empty string"
+    ATTACHMENT_FILE_NAME_TRAVERSAL = "Attachment filename {filename!r} contains a forbidden path sequence"
+    ATTACHMENT_INVALID_BASE64 = "Attachment {filename!r} content_base64 is not strictly decodable base64"
+    ATTACHMENT_MIME_REQUIRED = "Attachment {filename!r} must declare a content_type"
+    ATTACHMENT_IMAGE_TYPE_NOT_SUPPORTED = (
+        "Attachment {filename!r} uses unsupported image type {content_type!r} (allowed: {allowed})"
+    )
+    ATTACHMENT_TYPE_NOT_COHERENT = (
+        "Attachment {filename!r} content type {content_type!r} is not coherent with extension {extension!r}"
+    )
+    ATTACHMENT_DOCUMENT_TYPE_NOT_ALLOWED = (
+        "Attachment {filename!r} uses type {content_type!r} outside the allowed document families"
+    )
+    ATTACHMENT_IMAGE_TOO_LARGE = "Attachment {filename!r} exceeds the maximum image size of {max_bytes} bytes"
+    ATTACHMENT_DOCUMENT_TOO_LARGE = "Attachment {filename!r} exceeds the maximum document size of {max_bytes} bytes"
+    ATTACHMENT_COUNT_EXCEEDED = "Too many attachments: {count} (maximum {max_count})"
+    ATTACHMENT_TOTAL_TOO_LARGE = "Total attachment size {total_bytes} bytes exceeds the maximum of {max_bytes} bytes"
+    ATTACHMENT_DOCUMENT_POLICY = (
+        "This agent has no Files MCP server (an HTTP MCP server whose URL ends with /files/mcp): "
+        "documents cannot be attached to its conversations."
+    )
+    ATTACHMENT_MCP_UPLOAD_FAILED = "Temporary document upload failed for {filename!r}: {error}"
+    ATTACHMENT_MCP_DELETE_FAILED = "Temporary document cleanup failed (objects may remain in chat_tmp): {error}"
+    ATTACHMENT_UNAVAILABLE = "Attachments are not supported for this deployment (attachment service not wired)."
+    PDF_TOOL_ERROR = "create_pdf rejected the request: {reason}"
+
 
 def tmpl(template: str) -> Template:
     """Return a ``string.Template`` for ``$name`` style templates when needed."""

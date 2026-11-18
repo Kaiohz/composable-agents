@@ -72,6 +72,7 @@ from src.application.use_cases.user_llm_settings.delete_user_llm_settings import
 from src.application.use_cases.user_llm_settings.get_user_llm_settings import GetUserLlmSettingsUseCase
 from src.application.use_cases.user_llm_settings.upsert_user_llm_settings import UpsertUserLlmSettingsUseCase
 from src.config import Settings
+from src.domain.entities.attachment import AttachmentLimits
 from src.domain.entities.auth.auth_context import AuthContext
 from src.domain.errors.messages import ErrorMessage
 from src.domain.errors.security import AuthenticationError
@@ -80,10 +81,12 @@ from src.domain.logging.messages import LogMessage
 from src.domain.ports.agent_registry import AgentRegistry
 from src.domain.ports.auth.api_key_repository import ApiKeyRepository
 from src.domain.ports.cron_repository import CronRepository, CronRunRepository
+from src.domain.ports.files_mcp_client import FilesMcpClient
 from src.domain.ports.llm_price_repository import LlmPriceRepository
 from src.domain.ports.model_repository import ModelRepository
 from src.domain.ports.prompt_repository import PromptRepository
 from src.domain.ports.store_file_repository import StoreFileRepository
+from src.domain.ports.temporary_document_cleaner import TemporaryDocumentCleaner
 from src.domain.ports.thread_repository import ThreadRepository
 from src.domain.ports.trace_event_repository import TraceEventRepository
 from src.domain.ports.trace_summary_repository import TraceSummaryRepository
@@ -94,6 +97,7 @@ from src.infrastructure.auth.jwt_adapter import JwtAdapter
 from src.infrastructure.crypto.fernet_crypto import FernetCrypto
 from src.infrastructure.database.rls_context import current_auth_context, current_user_id
 from src.infrastructure.mcp.adapter import LangchainMcpToolLoader
+from src.infrastructure.mcp.files_client import McpFilesTemporaryCleaner, McpStreamableFilesClient
 from src.infrastructure.persistent_registry.adapter import PersistentAgentRegistry
 from src.infrastructure.postgres_api_key.adapter import PostgresApiKeyRepository
 from src.infrastructure.postgres_cron.adapter import PostgresCronRepository, PostgresCronRunRepository
@@ -392,6 +396,14 @@ async def init_persistence() -> None:
         )
         logger.info(LogMessage.PERSISTENCE_STORE_FILE_FALLBACK_INMEMORY)
 
+    # I1 (REQ-049): the module-level YAML-referencable ``create_pdf`` tool
+    # resolves the user-namespaced repository lazily at call time — wire the
+    # provider in BOTH boot paths (Postgres success AND InMemory fallback), so
+    # the tool stays usable in degraded mode.
+    from src.infrastructure.deepagent import pdf_tools
+
+    pdf_tools.set_default_store_provider(lambda: _root.store_file_repository)
+
     logger.info(LogMessage.PERSISTENCE_REGISTRY_SET)
 
 
@@ -445,6 +457,79 @@ def reset() -> None:
 logger.info(LogMessage.DEPENDENCIES_INITIALIZED)
 
 
+# ============= CHAT ATTACHMENTS PROVIDERS (chat-pdf-attachments) =============
+
+
+def get_attachment_limits() -> AttachmentLimits:
+    """Return the env-configured attachment limits VO (REQ-092..096)."""
+    return AttachmentLimits(
+        max_count=settings.chat_attachment_max_count,
+        max_total_bytes=settings.chat_attachment_max_total_bytes,
+        max_image_bytes=settings.chat_attachment_max_image_bytes,
+        max_document_bytes=settings.chat_attachment_max_document_bytes,
+    )
+
+
+def get_files_mcp_client() -> FilesMcpClient:
+    """Provide the direct Files MCP temporary-tool client (REQ-029..033).
+
+    The per-call timeout mirrors the agent MCP tool timeout (NFR-005).
+    """
+    return McpStreamableFilesClient(tool_timeout=settings.mcp_tool_timeout)
+
+
+def get_temporary_document_cleaner() -> TemporaryDocumentCleaner | None:
+    """Provide the best-effort post-turn cleaner port adapter (REQ-041..047).
+
+    Returns ``None`` when agent persistence is unavailable — the chat flow
+    stays functional and only logs the skipped-cleanup warning.
+    """
+    try:
+        return McpFilesTemporaryCleaner(
+            files_client=get_files_mcp_client(),
+            config_store=_require_persistence_store(),
+            config_loader=agent_config_loader,
+        )
+    except StorageError:
+        logger.exception(LogMessage.CHAT_TEMP_CLEANER_UNAVAILABLE)
+        return None
+
+
+def _require_persistence_store():
+    """Return the agent YAML store (RustFS) or raise a StorageError."""
+    if _root.rustfs_store is None:
+        from src.domain.errors.storage import StorageError
+
+        raise StorageError(ErrorMessage.STORAGE_PERSISTENCE_NOT_INITIALIZED)
+    return _root.rustfs_store
+
+
+def get_chat_attachments_service():
+    """Provide the shared chat attachment preparation service.
+
+    The service composes the thread/agent configuration chain used by the
+    agents routes (store + YAML loader), the user-namespaced store file
+    repository and the direct Files MCP client (REQ-025..011, EDG-008).
+    Returns ``None`` when persistence is unavailable so the chat route keeps
+    working for legacy text-only payloads (REQ-003); attachment-bearing
+    requests are then rejected with an explicit 422.
+    """
+    from src.application.services.chat_attachments_service import ChatAttachmentsService
+
+    try:
+        return ChatAttachmentsService(
+            threads=_require_thread_repository(),
+            config_store=_require_persistence_store(),
+            config_loader=agent_config_loader,
+            store_files=_require_store_file_repository(),
+            files_client=get_files_mcp_client(),
+            limits=get_attachment_limits(),
+        )
+    except StorageError:
+        logger.exception(LogMessage.CHAT_ATTACHMENTS_UNAVAILABLE)
+        return None
+
+
 # ============= USE CASE PROVIDERS =============
 
 
@@ -477,14 +562,22 @@ def _require_agent_registry() -> AgentRegistry:
 def get_send_message_use_case() -> SendMessageUseCase:
     """Provide a SendMessageUseCase instance."""
     return SendMessageUseCase(
-        _require_agent_registry(), _require_thread_repository(), _require_trace_event_repository()
+        _require_agent_registry(),
+        _require_thread_repository(),
+        _require_trace_event_repository(),
+        attachments=get_chat_attachments_service(),
+        cleaner=get_temporary_document_cleaner(),
     )
 
 
 def get_stream_message_use_case() -> StreamMessageUseCase:
     """Provide a StreamMessageUseCase instance."""
     return StreamMessageUseCase(
-        _require_agent_registry(), _require_thread_repository(), _require_trace_event_repository()
+        _require_agent_registry(),
+        _require_thread_repository(),
+        _require_trace_event_repository(),
+        attachments=get_chat_attachments_service(),
+        cleaner=get_temporary_document_cleaner(),
     )
 
 
@@ -509,8 +602,18 @@ def get_list_threads_use_case() -> ListThreadsUseCase:
 
 
 def get_delete_thread_use_case() -> DeleteThreadUseCase:
-    """Provide a DeleteThreadUseCase instance."""
-    return DeleteThreadUseCase(_require_thread_repository())
+    """Provide a DeleteThreadUseCase instance (with the store cascade, REQ-097).
+
+    The cascade is best-effort: when the store file repository is unavailable
+    the thread deletion still succeeds (REQ-100).
+    """
+    store_files: StoreFileRepository | None
+    try:
+        store_files = _require_store_file_repository()
+    except StorageError:
+        logger.exception(LogMessage.THREAD_STORE_CASCADE_UNAVAILABLE)
+        store_files = None
+    return DeleteThreadUseCase(_require_thread_repository(), store_files)
 
 
 def get_load_agent_config_use_case() -> LoadAgentConfigUseCase:

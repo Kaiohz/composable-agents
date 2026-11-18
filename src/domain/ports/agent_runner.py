@@ -10,6 +10,7 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 
 from src.domain.entities.hitl_decision import HitlDecision
+from src.domain.entities.human_turn import HumanTurnContent
 from src.domain.entities.message import Message
 from src.domain.entities.trace_event import TraceEvent
 
@@ -18,12 +19,16 @@ class AgentRunner(ABC):
     """Outbound port implemented by the deep-agent infrastructure adapter."""
 
     @abstractmethod
-    async def invoke(self, thread_id: str, message: str, turn_id: str) -> tuple[Message, list[TraceEvent]]:
+    async def invoke(
+        self, thread_id: str, message: str | HumanTurnContent, turn_id: str
+    ) -> tuple[Message, list[TraceEvent]]:
         """Invoke the agent and return the final Message + the full trace of events.
 
         Args:
             thread_id: The conversation thread identifier.
-            message: The human message text to send to the agent.
+            message: The human turn payload — the plain message string (legacy
+                path, REQ-017) or a prepared content-block turn (attachments,
+                REQ-018).
             turn_id: Identifier grouping all events of this turn.
 
         Returns:
@@ -34,16 +39,18 @@ class AgentRunner(ABC):
         ...
 
     @abstractmethod
-    def stream(self, thread_id: str, message: str, turn_id: str) -> AsyncIterator[TraceEvent]:
+    def stream(self, thread_id: str, message: str | HumanTurnContent, turn_id: str) -> AsyncIterator[TraceEvent]:
         """Stream all TraceEvents of a turn.
 
-        Emits HUMAN_MESSAGE first, intermediate events (THINKING, CONTENT,
-        TOOL_CALL, TOOL_RESULT) as they arrive from the graph, then AI_MESSAGE
-        as the trailing event.
+        Emits HUMAN_MESSAGE first (with the attachment metadata in
+        ``metadata.attachments`` when the turn carries attachments), intermediate
+        events (THINKING, CONTENT, TOOL_CALL, TOOL_RESULT) as they arrive from
+        the graph, then AI_MESSAGE as the trailing event.
 
         Args:
             thread_id: The conversation thread identifier.
-            message: The human message text to send to the agent.
+            message: The human turn payload (plain string or prepared content
+                blocks — REQ-017/REQ-018).
             turn_id: Identifier grouping all events of this turn.
 
         Yields:

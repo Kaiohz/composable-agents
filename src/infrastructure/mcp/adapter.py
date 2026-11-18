@@ -15,6 +15,12 @@ from src.infrastructure.env_utils import resolve_headers_drop_empty
 
 logger = logging.getLogger(__name__)
 
+#: Technical MCP tools reserved for the BACKEND (chat-pdf-attachments REQ-036).
+#: They drive the temporary document upload/cleanup directly (spec §5.3) and
+#: are NEVER exposed to the LLM; the normal ``list_files`` / ``list_folders``
+#: / ``read_file`` tools keep flowing through (REQ-037).
+BACKEND_ONLY_TOOL_NAMES = frozenset({"temporary_upload_file", "temporary_delete_file"})
+
 
 class LangchainMcpToolLoader(McpToolLoader):
     """Adapter MCP utilisant langchain-mcp-adapters pour charger des outils."""
@@ -67,7 +73,10 @@ class LangchainMcpToolLoader(McpToolLoader):
             client = MultiServerMCPClient(cast("dict[str, Connection]", server_configs))
             self._clients.append(client)
             tools = await client.get_tools()
-            return self._patch_sync_support(tools)
+            loaded = self._patch_sync_support(tools)
+            # REQ-036: the backend-only temporary tools are filtered here, at
+            # the loader level, so they never become LLM-facing tools.
+            return [tool for tool in loaded if tool.name not in BACKEND_ONLY_TOOL_NAMES]
         except ConnectionError as e:
             logger.exception(LogMessage.MCP_CONNECT_FAILED)
             raise McpConnectionError(ErrorMessage.MCP_CONNECTION_ERROR.format(error=e)) from e

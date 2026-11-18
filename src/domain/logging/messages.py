@@ -280,6 +280,10 @@ class LogMessage(StrEnum):
     # --- Registry freshness (CACHE-002) ---
     RUNNER_FRESHNESS_REBUILD = "Dependency fingerprint changed for agent '%s' (user=%s); rebuilding runner"
     RUNNER_FRESHNESS_STALE_EVICTED = "Evicted stale cached runner for agent '%s' (user=%s)"
+    AGENT_MCP_TOOLS_SKIPPED_SERVER = (
+        "Agent '%s': MCP server '%s' unreachable during tool loading (%s); skipped — "
+        "the agent boots with the remaining servers' tools"
+    )
 
     # --- Phoenix tracing provider ---
     PHOENIX_PROVIDER_INIT = "Initializing PhoenixTracingProvider with endpoint=%s, project_name=%s"
@@ -320,10 +324,57 @@ class LogMessage(StrEnum):
     LOG_CRON_VALIDATION_ERROR = "Cron validation error: %s"
     LOG_CRON_RUN_CONFLICT = "Cron run conflict: %s"
     LOG_AGENT_CONFIG_REFERENCE_ERROR = "Agent config reference error: %s"
+    LOG_ATTACHMENT_VALIDATION = "Attachment validation error: %s"
+    LOG_DOCUMENTS_NOT_ALLOWED = "Documents not allowed error: %s"
+    LOG_FILES_MCP_TEMPORARY_ERROR = "Files MCP temporary tool error: %s"
+
+    # --- Chat attachments (chat-pdf-attachments spec §5.1-§5.4) ---
+    CHAT_ATTACHMENTS_VALIDATING = "Validating %d attachment(s) for thread %s"
+    CHAT_ATTACHMENTS_IMAGE_STORED = "Stored image attachment %s at store path %s (thread=%s)"
+    CHAT_ATTACHMENTS_DOCUMENT_UPLOADING = "Uploading temporary document %s via Files MCP server %s (thread=%s)"
+    CHAT_ATTACHMENTS_DOCUMENT_UPLOADED = "Temporary document %s stored at %s (thread=%s)"
+    CHAT_ATTACHMENTS_DOCUMENT_POLICY_FAILED = (
+        "Document attachment refused for thread %s (agent=%s): no /files/mcp server"
+    )
+    CHAT_ATTACHMENTS_MCP_UPLOAD_FAILED = "Files MCP temporary_upload_file failed for %s (thread=%s)"
+    CHAT_ATTACHMENTS_MCP_TOOL_FAILED = "Files MCP temporary tool call failed for %s (server=%s)"
+    CHAT_TEMP_CLEANUP_STARTED = "Cleaning up %d temporary document(s) for thread %s"
+    CHAT_TEMP_CLEANUP_SUCCEEDED = "Temporary documents deleted for thread %s (count=%d)"
+    CHAT_TEMP_CLEANUP_FAILED = "Temporary document cleanup failed for object %s (thread=%s): %s"
+    CHAT_TEMP_CLEANUP_RETRY = "Retrying temporary document cleanup for object %s (thread=%s)"
+    CHAT_TEMP_CLEANUP_SKIPPED_HITL = "Turn ended in AWAITING_HITL: temporary documents kept for thread %s"
+    CHAT_TEMP_CLEANUP_CANCELLED_RETRY = "Cleanup interrupted by cancellation for thread %s; retrying once"
+    CHAT_ATTACHMENTS_UNAVAILABLE = (
+        "Chat attachment preparation is unavailable (persistence not initialized); "
+        "attachment-bearing requests will be refused while text-only chat keeps working"
+    )
+    CHAT_TEMP_CLEANER_UNAVAILABLE = (
+        "Temporary document cleaner is unavailable (agent persistence not initialized); "
+        "temp objects may remain in chat_tmp after turns"
+    )
+
+    # --- create_pdf builtin tool (chat-pdf-attachments spec §5.5) ---
+    CREATE_PDF_GENERATING = "create_pdf generating %s for thread %s (markdown_chars=%d)"
+    CREATE_PDF_ERROR = "create_pdf failed: %s"
+
+    # --- Thread deletion store cascade (chat-pdf-attachments spec §5.2.1) ---
+    THREAD_STORE_CASCADE_STARTED = "Thread store cascade started for thread %s (prefixes=%d)"
+    THREAD_STORE_CASCADE_FAILED = (
+        "Thread store cascade failed for thread %s under prefix %s: %s (thread row still deleted)"
+    )
+    THREAD_STORE_CASCADE_RETRY = "Retrying thread store cascade for thread %s under prefix %s"
+    THREAD_STORE_CASCADE_COMPLETED = "Thread store cascade completed for thread %s (deleted=%d)"
+    THREAD_STORE_CASCADE_UNAVAILABLE = (
+        "Thread store cascade unavailable (store repository not initialized): "
+        "deleting threads will leave orphan store objects under chat_attachments/documents"
+    )
+    STORE_FILE_LISTING_TRUNCATED = (
+        "Store file listing may be truncated at the %d-item namespace cap for prefix %s "
+        "(matches beyond the cap are missed)"
+    )
 
     # --- Security ---
     LOG_INVALID_API_KEY = "Invalid API key: %s"
-
     # --- Auth (dual JWT / API key) ---
     # The enum value is a stable prefix kept verbatim in the formatted log line
     # (no ``%s`` inside it) so tests can assert ``LogMessage.X in r.getMessage()``.

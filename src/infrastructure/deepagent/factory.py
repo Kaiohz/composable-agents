@@ -15,8 +15,10 @@ from pydantic import BaseModel, SecretStr
 
 from src.config import Settings
 from src.domain.entities.agent_config import AgentConfig, SubAgentConfig
+from src.domain.entities.mcp_server_config import McpServerConfig
 from src.domain.entities.model_metadata import ModelMetadata
 from src.domain.errors.config import ConfigError
+from src.domain.errors.mcp import McpError
 from src.domain.logging.messages import LogMessage
 from src.domain.ports.mcp_tool_loader import McpToolLoader
 from src.infrastructure.deepagent.namespace import user_namespaced
@@ -283,7 +285,15 @@ def _resolve_response_format(value: dict[str, Any] | None) -> tuple[type[BaseMod
 
 
 def _resolve_tools(config: AgentConfig) -> list | None:
-    """Charge les tools depuis leurs chemins Python (module:attribute)."""
+    """Charge les tools depuis leurs chemins Python (module:attribute).
+
+    The builtin ``create_pdf`` reference stays YAML-referencable (REQ-049):
+    the module-level ``create_pdf`` symbol is a ready-to-load StructuredTool
+    whose user-namespaced store provider is wired by the composition root at
+    boot (``src.dependencies.init_persistence``) and whose thread scope comes
+    from the injected LangGraph ``RunnableConfig`` — no per-tool factory
+    special-casing required (OCP: new builtin tools follow the same contract).
+    """
     if not config.tools:
         return None
     tools = []
@@ -327,6 +337,49 @@ def _resolve_backend(store):
         A ``StoreBackend`` instance.
     """
     return StoreBackend(store=store, namespace=lambda _r: user_namespaced("filesystem"))
+
+
+async def _load_mcp_tools_resilient(
+    mcp_tool_loader: McpToolLoader,
+    servers: list[McpServerConfig],
+    agent_name: str,
+) -> list:
+    """Load MCP tools SERVER BY SERVER, degrading gracefully per server.
+
+    REQ-036 companion (chat-pdf-attachments): agents may declare several MCP
+    servers (EDG-008) — one unreachable server must not brick the whole agent
+    build (a multi-server agent must still boot with the live server's tools).
+    A failing server is logged (server name + error) and simply skipped.
+
+    I6 refinement: when EVERY declared server fails, the previous hard-fail
+    semantics are preserved — the first failure is re-raised instead of
+    booting a silently tool-less agent.
+
+    Args:
+        mcp_tool_loader: The tool loader (each call receives ONE config).
+        servers: The agent's MCP server configs.
+        agent_name: The agent name (log context).
+
+    Returns:
+        The tools of every reachable server (empty only when NO server is
+        declared).
+
+    Raises:
+        McpError: When every declared server failed (no live tool source).
+    """
+    tools: list = []
+    failures: list[tuple[McpServerConfig, McpError]] = []
+    for server in servers:
+        try:
+            tools.extend(await mcp_tool_loader.load_tools([server]))
+        except McpError as exc:
+            failures.append((server, exc))
+            logger.warning(LogMessage.AGENT_MCP_TOOLS_SKIPPED_SERVER, agent_name, server.name, exc)
+    if servers and not tools and failures:
+        # Every declared server is unreachable: fail loudly (legacy behavior)
+        # rather than boot an agent that silently lost all its MCP tools.
+        raise failures[0][1]
+    return tools
 
 
 def _resolve_interrupt_on(config: AgentConfig) -> dict[str, Any] | None:
@@ -387,7 +440,7 @@ async def _resolve_subagents(
         local_tools = _resolve_tools_list(sa.tools) if sa.tools else None
         mcp_tools: list = []
         if sa.mcp_servers and mcp_tool_loader:
-            mcp_tools = await mcp_tool_loader.load_tools(sa.mcp_servers)
+            mcp_tools = await _load_mcp_tools_resilient(mcp_tool_loader, sa.mcp_servers, sa.name)
         all_tools = (local_tools or []) + mcp_tools if (local_tools or mcp_tools) else None
 
         instructions = _resolve_subagent_instructions(sa)
@@ -445,7 +498,7 @@ async def _resolve_referenced_subagent(
     mcp_tools: list = []
     servers = list(sa.mcp_servers) + list(ref.mcp_servers)
     if servers and mcp_tool_loader:
-        mcp_tools = await mcp_tool_loader.load_tools(servers)
+        mcp_tools = await _load_mcp_tools_resilient(mcp_tool_loader, servers, sa.name)
     all_tools = (local_tools or []) + (ref_tools or []) + mcp_tools if (local_tools or ref_tools or mcp_tools) else None
 
     return {
@@ -795,7 +848,7 @@ async def _resolve_agent_tools(
     mcp_tools: list = []
     if config.mcp_servers and mcp_tool_loader:
         logger.info(LogMessage.AGENT_MCP_TOOLS_LOADING, config.name, len(config.mcp_servers))
-        mcp_tools = await mcp_tool_loader.load_tools(config.mcp_servers)
+        mcp_tools = await _load_mcp_tools_resilient(mcp_tool_loader, config.mcp_servers, config.name)
         logger.info(LogMessage.AGENT_MCP_TOOLS_LOADED, len(mcp_tools), config.name)
     all_tools = (local_tools or []) + mcp_tools if (local_tools or mcp_tools) else None
     logger.info(LogMessage.AGENT_TOOLS_TOTAL, config.name, len(all_tools) if all_tools else 0)
