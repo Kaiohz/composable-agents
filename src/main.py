@@ -44,6 +44,11 @@ from src.domain.errors.agent import (
     AgentError,
     AgentNotFoundError,
 )
+from src.domain.errors.attachment import (
+    AttachmentValidationError,
+    DocumentsNotAllowedError,
+    FilesMcpTemporaryError,
+)
 from src.domain.errors.base import DomainError
 from src.domain.errors.config import ConfigError, ConfigNotFoundError, ConfigValidationError
 from src.domain.errors.cron import CronNotFoundError, CronRunConflictError, CronValidationError
@@ -69,7 +74,9 @@ logger = logging.getLogger(__name__)
 E = TypeVar("E", bound=DomainError)
 
 
-def _add_domain_error_handler(error_type: type[E], handler: Callable[[Request, E], Awaitable[JSONResponse] | JSONResponse]) -> None:
+def _add_domain_error_handler(
+    error_type: type[E], handler: Callable[[Request, E], Awaitable[JSONResponse] | JSONResponse]
+) -> None:
     """Register a typed domain-error handler.
 
     Starlette keys handlers on the exception type but types the callable
@@ -298,6 +305,24 @@ def invalid_hitl_action_handler(_request: Request, exc: InvalidHitlActionError) 
     return _error_response(exc)
 
 
+def attachment_validation_handler(_request: Request, exc: AttachmentValidationError) -> JSONResponse:
+    """Map attachment contract violations (REQ-006..008) to their 422 detail."""
+    logger.warning(LogMessage.LOG_ATTACHMENT_VALIDATION, exc.detail)
+    return _error_response(exc)
+
+
+def documents_not_allowed_handler(_request: Request, exc: DocumentsNotAllowedError) -> JSONResponse:
+    """Map the Files-MCP document policy refusal (REQ-010) to its 422 detail."""
+    logger.warning(LogMessage.LOG_DOCUMENTS_NOT_ALLOWED, exc.detail)
+    return _error_response(exc)
+
+
+def files_mcp_temporary_handler(_request: Request, exc: FilesMcpTemporaryError) -> JSONResponse:
+    """Map Files MCP temporary tool failures (EC-007) to their 502 detail."""
+    logger.error(LogMessage.LOG_FILES_MCP_TEMPORARY_ERROR, exc.detail)
+    return _error_response(exc)
+
+
 def config_validation_handler(_request: Request, exc: ConfigValidationError) -> JSONResponse:
     logger.error(LogMessage.LOG_CONFIG_VALIDATION_ERROR, exc.detail, exc.errors)
     return _error_response(exc)
@@ -352,6 +377,9 @@ _add_domain_error_handler(AgentNotFoundError, agent_not_found_handler)
 _add_domain_error_handler(AgentConfigAlreadyExistsError, agent_config_already_exists_handler)
 _add_domain_error_handler(AgentError, agent_error_handler)
 _add_domain_error_handler(InvalidHitlActionError, invalid_hitl_action_handler)
+_add_domain_error_handler(AttachmentValidationError, attachment_validation_handler)
+_add_domain_error_handler(DocumentsNotAllowedError, documents_not_allowed_handler)
+_add_domain_error_handler(FilesMcpTemporaryError, files_mcp_temporary_handler)
 # RequestValidationError is a FastAPI boundary error, not a DomainError — the
 # same contravariance cast as the typed registrar applies here; mypy's E bound
 # does not cover it, hence the direct registration with a narrowed cast.

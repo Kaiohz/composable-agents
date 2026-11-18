@@ -41,6 +41,9 @@ class Message(BaseModel, frozen=True):
     structured_response: dict | None = None
     thinking: str | None = None
     turn_id: str | None = None
+    # Attachment metadata for the conversation history (REQ-022). HUMAN
+    # messages only, projection-safe keys (REQ-023) — never base64 (REQ-021).
+    attachments: list[dict] | None = None
 
     @staticmethod
     def from_trace_event(event: "TraceEvent") -> "Message":
@@ -50,20 +53,27 @@ class Message(BaseModel, frozen=True):
             event: A TraceEvent of type HUMAN_MESSAGE or AI_MESSAGE.
 
         Returns:
-            A Message projection of the event.
+            A Message projection of the event. For HUMAN_MESSAGE events the
+            attachments metadata is projected down to the spec keys
+            (id/filename/content_type/size_bytes/kind/source) so internal
+            backend refs never leak (REQ-023).
 
         Raises:
             ValueError: If the event type is not HUMAN_MESSAGE or AI_MESSAGE, or
                 if an AI_MESSAGE event's content is not valid JSON.
         """
+        from src.domain.entities.attachment import project_attachment_entries
         from src.domain.entities.trace_event import TraceEventType
 
         if event.type == TraceEventType.HUMAN_MESSAGE:
+            metadata = event.metadata or {}
+            entries = project_attachment_entries(metadata.get("attachments"))
             return Message(
                 role=MessageRole.HUMAN,
                 content=event.content,
                 timestamp=event.timestamp,
                 turn_id=event.turn_id,
+                attachments=entries or None,
             )
 
         if event.type == TraceEventType.AI_MESSAGE:

@@ -1,12 +1,20 @@
 """LangGraph ``BaseStore`` adapter implementing :class:`StoreFileRepository`."""
 
+import logging
 from collections.abc import Callable
 
 from langgraph.store.base import BaseStore
 
+from src.domain.logging.messages import LogMessage
 from src.domain.ports.store_file_repository import StoreFilePreview, StoreFileRepository
 
+logger = logging.getLogger(__name__)
+
 _DEFAULT_NAMESPACE: tuple[str, ...] = ("filesystem",)
+
+#: Namespace-wide search cap used for the file listings (LangGraph Store has
+#: no server-side prefix filter; the cap keeps the scan bounded).
+_LIST_LIMIT = 1000
 
 
 class LangGraphStoreFileRepository(StoreFileRepository):
@@ -73,6 +81,11 @@ class LangGraphStoreFileRepository(StoreFileRepository):
     async def list_files(self, prefix: str) -> list[str]:
         """List file paths in the store that start with the given prefix.
 
+        The underlying ``asearch`` is namespace-wide with a 1000-item cap
+        (I3): when the namespace hits the cap the listing may be silently
+        truncated, so a WARNING is emitted to keep callers (thread cascade,
+        store API) aware that matches beyond the cap are missed.
+
         Args:
             prefix: Path prefix to filter on.
 
@@ -80,7 +93,9 @@ class LangGraphStoreFileRepository(StoreFileRepository):
             A list of file path strings matching the prefix.
         """
         ns = self._resolve_namespace()
-        items = await self._store.asearch(ns, limit=1000)
+        items = await self._store.asearch(ns, limit=_LIST_LIMIT)
+        if len(items) >= _LIST_LIMIT:
+            logger.warning(LogMessage.STORE_FILE_LISTING_TRUNCATED, prefix, _LIST_LIMIT)
         return [item.key for item in items if item.key.startswith(prefix)]
 
     async def list_files_with_preview(self, prefix: str, preview_chars: int) -> list[StoreFilePreview]:

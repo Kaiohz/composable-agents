@@ -176,6 +176,18 @@ curl -N -X POST http://localhost:8000/api/v1/chat/<thread_id>/stream \
   -H "X-API-Key: <API_KEY>" \
   -d '{"message": "Hello, what can you do?"}'
 
+# Send a message with attachments (images → vision content blocks; documents
+# require an agent whose MCP config declares an HTTP server ending with
+# /files/mcp — they are uploaded to a temporary, user-isolated chat_tmp/
+# RustFS prefix via the backend and deleted after the terminal response)
+curl -X POST http://localhost:8000/api/v1/chat/<thread_id> \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: <API_KEY>" \
+  -d '{"message": "Analyse cette image et ce document", "attachments": [
+         {"filename": "capture.png", "content_type": "image/png", "content_base64": "<base64>"},
+         {"filename": "rapport.pdf", "content_type": "application/pdf", "content_base64": "<base64>"}
+       ]}'
+
 # Get the full thread history (thread + turns grouped by turn_id)
 curl http://localhost:8000/api/v1/threads/<thread_id>/history \
   -H "X-API-Key: <API_KEY>"
@@ -183,6 +195,27 @@ curl http://localhost:8000/api/v1/threads/<thread_id>/history \
 # Get the flat trace of events for a thread
 curl http://localhost:8000/api/v1/threads/<thread_id>/trace \
   -H "X-API-Key: <API_KEY>"
+```
+
+### Attachments limits (environment variables)
+
+| Variable | Default | Description |
+|---|---|---|
+| `CHAT_ATTACHMENT_MAX_COUNT` | `10` | Max attachments per chat request |
+| `CHAT_ATTACHMENT_MAX_TOTAL_BYTES` | `52428800` | Max total decoded size (50 MiB) |
+| `CHAT_ATTACHMENT_MAX_IMAGE_BYTES` | `10485760` | Max size per image (10 MiB) |
+| `CHAT_ATTACHMENT_MAX_DOCUMENT_BYTES` | `52428800` | Max size per document (50 MiB) |
+| `CREATE_PDF_MAX_MARKDOWN_CHARS` | `1000000` | Max Markdown length accepted by the `create_pdf` tool |
+
+Present-but-invalid values stop startup; unset/empty values fall back silently to the defaults (hierarchy `image ≤ document ≤ total` enforced). These are declared in the `flux` GitOps repo as `prd/composables/{composable-agents,raganything}` ConfigMaps.
+
+### Builtin `create_pdf` tool
+
+`src.infrastructure.deepagent.pdf_tools:create_pdf` renders A4 PDFs from Markdown (headings, bold/italic/strikethrough, lists, inline/fenced code, tables, links, blockquotes, horizontal rules — no remote images) via `fpdf2` + `mistletoe` and stores them in the user's LangGraph Store at `/documents/<thread_id>/<uuid>/<filename>.pdf` (collision-free by construction). Tool result: `{"path": ..., "filename": ..., "mime_type": "application/pdf"}` — no binary in traces. Referencing in YAML:
+
+```yaml
+tools:
+  - "src.infrastructure.deepagent.pdf_tools:create_pdf"
 ```
 
 ---

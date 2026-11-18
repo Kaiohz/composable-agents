@@ -36,6 +36,7 @@ except ImportError:
     NS_SEP = "|"
 
 from src.domain.entities.hitl_decision import HitlDecision
+from src.domain.entities.human_turn import HumanTurnContent
 from src.domain.entities.message import Message, MessageRole, MessageStatus
 from src.domain.entities.trace_event import TraceEvent, TraceEventType
 from src.domain.errors.agent import AgentError
@@ -575,15 +576,43 @@ class DeepAgentRunner(AgentRunner):
         )
 
     # ------------------------------------------------------------------ #
+    # Prepared human turns (chat attachments REQ-017/018/019)
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _prepare_turn_input(message: str | HumanTurnContent) -> tuple[Any, list[ClassifiedEvent]]:
+        """Build the graph input + leading HUMAN_MESSAGE event for a turn.
+
+        Args:
+            message: The plain message string (legacy path — REQ-017 guarantees
+                the exact same graph input) or a :class:`HumanTurnContent` with
+                standard multimodal content blocks (REQ-018).
+
+        Returns:
+            Tuple ``(graph_input, leading_events)``. The attachments metadata
+            rides on the HUMAN_MESSAGE event metadata (REQ-020) and NEVER
+            carries any base64 payload (REQ-021).
+        """
+        if not isinstance(message, HumanTurnContent):
+            legacy_input = {"messages": [{"role": "human", "content": message}]}
+            return legacy_input, [(TraceEventType.HUMAN_MESSAGE, None, message, None)]
+
+        graph_input: dict[str, Any] = {"messages": [{"role": "human", "content": list(message.content_blocks)}]}
+        metadata: dict[str, Any] | None = None
+        if message.attachments:
+            metadata = {"attachments": list(message.attachments)}
+        return graph_input, [(TraceEventType.HUMAN_MESSAGE, None, message.text, metadata)]
+
+    # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
 
-    def stream(self, thread_id: str, message: str, turn_id: str) -> AsyncIterator[TraceEvent]:
+    def stream(self, thread_id: str, message: str | HumanTurnContent, turn_id: str) -> AsyncIterator[TraceEvent]:
         """Stream all TraceEvents of a turn.
 
         Args:
             thread_id: Conversation thread identifier.
-            message: Human input text.
+            message: Human input text (or prepared content-block turn).
             turn_id: Identifier grouping all events of this turn.
 
         Yields:
@@ -596,13 +625,12 @@ class DeepAgentRunner(AgentRunner):
     async def _stream_impl(
         self,
         thread_id: str,
-        message: str,
+        message: str | HumanTurnContent,
         config: RunnableConfig,
         turn_id: str,
     ) -> AsyncIterator[TraceEvent]:
         """Async generator backing ``stream`` (wraps ``_collect_trace`` with error handling)."""
-        graph_input = {"messages": [{"role": "human", "content": message}]}
-        leading_events: list[ClassifiedEvent] = [(TraceEventType.HUMAN_MESSAGE, None, message, None)]
+        graph_input, leading_events = self._prepare_turn_input(message)
         try:
             async for event in self._collect_trace(thread_id, config, turn_id, graph_input, leading_events):
                 yield event
@@ -612,12 +640,14 @@ class DeepAgentRunner(AgentRunner):
             logger.exception(LogMessage.AGENT_STREAMING_ERROR_LOG, thread_id)
             raise AgentError(ErrorMessage.AGENT_STREAMING_ERROR.format(error=e)) from e
 
-    async def invoke(self, thread_id: str, message: str, turn_id: str) -> tuple[Message, list[TraceEvent]]:
+    async def invoke(
+        self, thread_id: str, message: str | HumanTurnContent, turn_id: str
+    ) -> tuple[Message, list[TraceEvent]]:
         """Invoke the agent and return the final Message + the full trace.
 
         Args:
             thread_id: Conversation thread identifier.
-            message: Human input text.
+            message: Human input text (or prepared content-block turn).
             turn_id: Identifier grouping all events of this turn.
 
         Returns:
@@ -628,11 +658,11 @@ class DeepAgentRunner(AgentRunner):
         """
         config = self._build_config(thread_id)
         logger.info(LogMessage.AGENT_INVOKING, thread_id)
-        logger.info(LogMessage.AGENT_MESSAGE, thread_id, message[:200])
+        turn_text = message.text if isinstance(message, HumanTurnContent) else message
+        logger.info(LogMessage.AGENT_MESSAGE, thread_id, (turn_text or "")[:200])
         try:
             start = time.monotonic()
-            graph_input = {"messages": [{"role": "human", "content": message}]}
-            leading_events: list[ClassifiedEvent] = [(TraceEventType.HUMAN_MESSAGE, None, message, None)]
+            graph_input, leading_events = self._prepare_turn_input(message)
             trace: list[TraceEvent] = []
             final_message: Message | None = None
             async for event in self._collect_trace(
@@ -644,12 +674,10 @@ class DeepAgentRunner(AgentRunner):
             elapsed = time.monotonic() - start
             if final_message is None:
                 # Fallback: no AI_MESSAGE was emitted (shouldn't happen with a
-                # well-behaved graph). Build the response directly from ainvoke.
+                # well-behaved graph). Build the response directly from ainvoke
+                # with the SAME prepared graph input (REQ-019).
                 result = await asyncio.wait_for(
-                    self._graph.ainvoke(
-                        {"messages": [{"role": "human", "content": message}]},
-                        config=config,
-                    ),
+                    self._graph.ainvoke(graph_input, config=config),
                     timeout=self._invoke_timeout,
                 )
                 final_message = await self._build_response(result, config, None)

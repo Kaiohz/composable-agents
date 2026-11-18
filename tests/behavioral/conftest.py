@@ -186,6 +186,31 @@ async def real_app_and_db() -> AsyncGenerator[dict, None]:
     #    PersistentAgentRegistry + auth service wiring + RLS listener) — but
     #    pointing the app ENGINE at the dedicated non-superuser role.
     deps.settings.database_url = app_dsn_asyncpg
+    # INFRA FIX (CI cross-loop): inject NullPool into the TEST engine creation.
+    #
+    # pytest-asyncio 1.x closes the shared session Runner's event loop when a
+    # session-loop test raises (e.g. an assertion failure in one of these
+    # files), and every subsequent session-loop test re-enters the runner on a
+    # FRESH event loop. SQLAlchemy's AsyncAdaptedQueuePool keeps connections
+    # bound to the loop they were created on: the pool's pre-ping on such a
+    # stale connection then fails with
+    # "RuntimeError: ... got Future ... attached to a different loop"
+    # for the next N requests (asyncpg terminate fails the same way).
+    # NullPool creates one connection per checkout on the CURRENT loop, so the
+    # suite is immune to the loop rotation regardless of test failures.
+    # (pool_size / max_overflow kwargs are popped before creation.)
+    from sqlalchemy.pool import NullPool
+
+    _original_create_async_engine = deps.create_async_engine
+
+    def _nullpool_create_async_engine(*args, **kwargs):
+        kwargs["poolclass"] = NullPool
+        # NullPool rejects pooling knobs that only apply to queue pools.
+        kwargs.pop("pool_size", None)
+        kwargs.pop("max_overflow", None)
+        return _original_create_async_engine(*args, **kwargs)
+
+    deps.create_async_engine = _nullpool_create_async_engine
     await deps.init_persistence()
 
     # 3) Seed per-user API keys through the REAL repository + hasher so tests
