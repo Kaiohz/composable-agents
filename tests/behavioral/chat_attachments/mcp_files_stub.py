@@ -40,6 +40,13 @@ TEST_MCP_FILES_PORT = int(os.environ.get("TEST_MCP_FILES_PORT", "28878"))
 # policy (REQ-009: an HTTP MCP server whose URL ends with ``/files/mcp``).
 MCP_PATH = "/files/mcp"
 
+# Process-wide idempotency for the fixed port: pytest-asyncio 1.x may
+# re-execute session-scoped fixture bodies across runner loops; a second
+# ``start()`` would bind the SAME port again and crash the previous stub
+# thread with EADDRINUSE. ``_SERVING_PORT`` records the port whose stub is
+# already live; ``start()`` is then a no-op.
+_SERVING_PORT: int | None = None
+
 
 class _StripPrefix:
     """ASGI wrapper mounting the FastMCP streamable app under ``MCP_PATH``.
@@ -131,7 +138,23 @@ class McpFilesStubServer:
         self.fail_deletes = fail_deletes
 
     def start(self) -> None:
-        config = uvicorn.Config(_StripPrefix(self._app, MCP_PATH), host="127.0.0.1", port=TEST_MCP_FILES_PORT, log_level="error")
+        global _SERVING_PORT
+        if _SERVING_PORT == TEST_MCP_FILES_PORT:
+            # Already serving on this port (process-wide, idempotent start).
+            return
+        # loop="asyncio" pins the stub's server loop to the stdlib asyncio
+        # policy: uvicorn's "auto" loop factory installs uvloop GLOBALLY
+        # (asyncio.set_event_loop_policy) from this server thread, which
+        # destabilizes pytest-asyncio's session runner loops (the asyncpg
+        # pool then gets used cross-loop → "Future attached to a different
+        # loop" RuntimeError on every DB op).
+        config = uvicorn.Config(
+            _StripPrefix(self._app, MCP_PATH),
+            host="127.0.0.1",
+            port=TEST_MCP_FILES_PORT,
+            log_level="error",
+            loop="asyncio",
+        )
         self._server = uvicorn.Server(config)
 
         def _run() -> None:
@@ -140,6 +163,7 @@ class McpFilesStubServer:
 
         self._thread = threading.Thread(target=_run, name="stub-mcp-files", daemon=True)
         self._thread.start()
+        _SERVING_PORT = TEST_MCP_FILES_PORT
         # I12: wait until the socket accepts connections — the agent builds
         # start loading MCP tools immediately after this and must never race
         # the listener.
@@ -163,9 +187,11 @@ class McpFilesStubServer:
         return f"http://127.0.0.1:{TEST_MCP_FILES_PORT}{MCP_PATH}"
 
     def stop(self) -> None:
+        global _SERVING_PORT
         should_exit = getattr(self, "_server", None)
         if should_exit is not None:
             should_exit.should_exit = True
         thread = getattr(self, "_thread", None)
         if thread is not None:
             thread.join(timeout=5)
+        _SERVING_PORT = None

@@ -96,6 +96,11 @@ def files_mcp_yaml(name: str, *, mcp_url: str | None = None, extra_servers: list
 
     ``extra_servers`` appends additional MCP server URLs (e.g. a
     ``/classical/mcp`` server) to verify EDG-008 / EDG-009 selection rules.
+
+    The ``mcp_servers`` key is emitted as an EXPLICIT EMPTY LIST when no
+    server is requested — a bare ``mcp_servers:`` key parses to YAML null and
+    the agent-config validation rejects ``null`` with 422
+    ("Input should be a valid list").
     """
     lines = [
         f"name: {name}",
@@ -103,20 +108,23 @@ def files_mcp_yaml(name: str, *, mcp_url: str | None = None, extra_servers: list
         'system_prompt: "Attachments test agent."',
         "tools: []",
         "debug: false",
-        "mcp_servers:",
     ]
-    if mcp_url is not None:
-        lines += [
-            "  - name: files-server",
-            "    transport: http",
-            f"    url: {mcp_url}",
-        ]
-    for url in extra_servers or []:
-        lines += [
-            "  - name: classical-server",
-            "    transport: http",
-            f"    url: {url}",
-        ]
+    if mcp_url is not None or extra_servers:
+        lines.append("mcp_servers:")
+        if mcp_url is not None:
+            lines += [
+                "  - name: files-server",
+                "    transport: http",
+                f"    url: {mcp_url}",
+            ]
+        for url in extra_servers or []:
+            lines += [
+                "  - name: classical-server",
+                "    transport: http",
+                f"    url: {url}",
+            ]
+    else:
+        lines.append("mcp_servers: []")
     return "\n".join(lines) + "\n"
 
 
@@ -138,8 +146,20 @@ async def agent_with_thread(
     Without an explicit ``yaml_text``, the agent carries a Files MCP server
     pointing at the session stub (the ``files_mcp_yaml`` documented contract,
     REQ-009) so image+document turns and temporary uploads work out of the box.
+
+    When a caller supplies ``yaml_text`` WITHOUT ``agent_name``, the agent
+    name is derived from the YAML's ``name:`` key — creating the agent under a
+    DIFFERENT name than the one declared inside its YAML is rejected by the
+    endpoint ("Agent name in YAML ... does not match provided name").
     """
     import uuid
+
+    import yaml as yaml_parser  # type: ignore[import-untyped]
+
+    if yaml_text is not None and agent_name is None:
+        derived = (yaml_parser.safe_load(yaml_text) or {}).get("name")
+        if isinstance(derived, str) and derived.strip():
+            agent_name = derived.strip()
 
     resolved_name = agent_name or f"att-{uuid.uuid4().hex[:8]}"
     default_yaml = (
