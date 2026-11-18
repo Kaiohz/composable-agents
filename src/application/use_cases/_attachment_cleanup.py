@@ -17,6 +17,7 @@ entry points guarantee the same cleanup semantics:
 """
 
 import asyncio
+import contextlib
 import logging
 
 from src.domain.entities.message import MessageStatus
@@ -47,6 +48,12 @@ async def run_temporary_document_cleanup(
 
     Returns:
         True when the cleanup actually ran (used by tests/diagnostics).
+
+    Raises:
+        asyncio.CancelledError: When the surrounding scope was cancelled —
+            the single unshielded retry completes first (EC-013: the temp
+            document is still deleted once), then the cancellation is RAISED,
+            never swallowed (S7497).
     """
     if cleaner is None or prepared is None or not prepared.temporary_documents:
         return False
@@ -56,15 +63,15 @@ async def run_temporary_document_cleanup(
     try:
         await asyncio.shield(cleaner.delete_temporary_documents(agent_name, prepared.temporary_documents))
         return True
-    except asyncio.CancelledError:
-        # The response was cancelled (client disconnect / stream abort): retry
-        # once unshielded so the temp document still gets deleted (EC-013).
+    except asyncio.CancelledError as cancelled:
+        # The response was cancelled (client disconnect / stream abort): the
+        # temp document still gets ONE unshielded retry (EC-013) — a cancelled
+        # task may await again (the cancellation is delivered once) — and then
+        # the cancellation propagates (S7497: never swallow a cancellation).
         logger.warning(LogMessage.CHAT_TEMP_CLEANUP_CANCELLED_RETRY, thread_id)
-        try:
+        with contextlib.suppress(Exception):  # noqa: SIM105 — REQ-046: the retry failure stays logged-only
             await cleaner.delete_temporary_documents(agent_name, prepared.temporary_documents)
-            return True
-        except Exception:  # noqa: BLE001 — REQ-046: never mask/crash the turn
-            return False
+        raise cancelled
     except Exception:  # noqa: BLE001 — REQ-046: cleanup failures never propagate
         return False
 

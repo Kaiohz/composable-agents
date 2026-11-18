@@ -238,12 +238,12 @@ class McpFilesTemporaryCleaner(TemporaryDocumentCleaner):
             try:
                 await self._files_client.temporary_delete(server, object_path=ref.object_path)
                 return True
-            except Exception as exc:  # noqa: BLE001 — cleanup NEVER masks the turn (REQ-046)
-                logger.error(
+            except Exception:  # noqa: BLE001 — cleanup NEVER masks the turn (REQ-046)
+                logger.exception(
                     LogMessage.CHAT_TEMP_CLEANUP_FAILED,
                     ref.object_path,
                     thread_id,
-                    exc,
+                    "temporary_delete call failed",
                 )
                 if attempt == 1:
                     logger.warning(LogMessage.CHAT_TEMP_CLEANUP_RETRY, ref.object_path, thread_id)

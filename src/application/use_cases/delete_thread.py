@@ -70,13 +70,13 @@ class DeleteThreadUseCase:
         """List a cascade prefix, logging (and retrying once) on store failure."""
         try:
             return await store_files.list_files(prefix)
-        except Exception as exc:  # noqa: BLE001 — REQ-100: a store failure must NOT block the deletion
-            logger.warning(LogMessage.THREAD_STORE_CASCADE_FAILED, thread_id, prefix, exc)
+        except Exception:  # noqa: BLE001 — REQ-100: a store failure must NOT block the deletion
+            logger.warning(LogMessage.THREAD_STORE_CASCADE_FAILED, thread_id, prefix, "list_files failed")
             logger.info(LogMessage.THREAD_STORE_CASCADE_RETRY, thread_id, prefix)
             try:
                 return await store_files.list_files(prefix)
-            except Exception as retry_exc:  # noqa: BLE001 — same REQ-100 contract
-                logger.error(LogMessage.THREAD_STORE_CASCADE_FAILED, thread_id, prefix, retry_exc)
+            except Exception:  # noqa: BLE001 — same REQ-100 contract
+                logger.exception(LogMessage.THREAD_STORE_CASCADE_FAILED, thread_id, prefix, "list_files retry failed")
                 return []
 
     async def _delete_or_log(self, store_files: StoreFileRepository, thread_id: str, path: str) -> bool:
@@ -84,12 +84,12 @@ class DeleteThreadUseCase:
         try:
             await store_files.delete_file(path)
             return True
-        except Exception as exc:  # noqa: BLE001 — REQ-100: never block the thread deletion
-            logger.warning(LogMessage.THREAD_STORE_CASCADE_FAILED, thread_id, path, exc)
+        except Exception:  # noqa: BLE001 — REQ-100: never block the thread deletion
+            logger.warning(LogMessage.THREAD_STORE_CASCADE_FAILED, thread_id, path, "delete_file failed")
             logger.info(LogMessage.THREAD_STORE_CASCADE_RETRY, thread_id, path)
             try:
                 await store_files.delete_file(path)
                 return True
-            except Exception as retry_exc:  # noqa: BLE001 — same REQ-100 contract
-                logger.error(LogMessage.THREAD_STORE_CASCADE_FAILED, thread_id, path, retry_exc)
+            except Exception:  # noqa: BLE001 — same REQ-100 contract
+                logger.exception(LogMessage.THREAD_STORE_CASCADE_FAILED, thread_id, path, "delete_file retry failed")
                 return False

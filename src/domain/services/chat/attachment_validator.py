@@ -33,17 +33,19 @@ from src.domain.errors.attachment import AttachmentLimitError, AttachmentValidat
 from src.domain.errors.messages import ErrorMessage
 
 #: The four vision MIME types (REQ-007).
-IMAGE_MIME_TYPES: frozenset[str] = frozenset(
-    {"image/png", "image/jpeg", "image/gif", "image/webp"}
-)
+_IMAGE_PNG = "image/png"
+_IMAGE_JPEG = "image/jpeg"
+_IMAGE_GIF = "image/gif"
+_IMAGE_WEBP = "image/webp"
+IMAGE_MIME_TYPES: frozenset[str] = frozenset({_IMAGE_PNG, _IMAGE_JPEG, _IMAGE_GIF, _IMAGE_WEBP})
 
 #: Image filename extension → expected MIME (coherence rule, REQ-006).
 IMAGE_EXTENSION_MIME: dict[str, str] = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
+    ".png": _IMAGE_PNG,
+    ".jpg": _IMAGE_JPEG,
+    ".jpeg": _IMAGE_JPEG,
+    ".gif": _IMAGE_GIF,
+    ".webp": _IMAGE_WEBP,
 }
 
 #: Document extensions accepted for chat documents — the SAME family as the
@@ -70,34 +72,41 @@ DOCUMENT_EXTENSIONS: frozenset[str] = frozenset(
 )
 
 #: Document MIME families accepted for chat documents (REQ-008).
+_APPLICATION_PDF_PREFIX = "application/pdf"
+_TEXT_MIME_PREFIX = "text/"
+_OPENXML_MIME_PREFIX = "application/vnd.openxmlformats-officedocument"
+_MS_OFFICE_MIME_PREFIX = "application/vnd.ms-"
+_APPLICATION_JSON_PREFIX = "application/json"
+_APPLICATION_RTF_PREFIX = "application/rtf"
+_OPENDOCUMENT_MIME_PREFIX = "application/vnd.oasis.opendocument"
 DOCUMENT_MIME_PREFIXES: tuple[str, ...] = (
-    "application/pdf",
-    "text/",
-    "application/vnd.openxmlformats-officedocument",
-    "application/vnd.ms-",
-    "application/json",
-    "application/rtf",
-    "application/vnd.oasis.opendocument",
+    _APPLICATION_PDF_PREFIX,
+    _TEXT_MIME_PREFIX,
+    _OPENXML_MIME_PREFIX,
+    _MS_OFFICE_MIME_PREFIX,
+    _APPLICATION_JSON_PREFIX,
+    _APPLICATION_RTF_PREFIX,
+    _OPENDOCUMENT_MIME_PREFIX,
 )
 
 #: Document extension → expected MIME prefix (coherence rule, REQ-006).
 DOCUMENT_EXTENSION_MIME_PREFIX: dict[str, str] = {
-    ".pdf": "application/pdf",
-    ".txt": "text/",
-    ".md": "text/",
-    ".csv": "text/",
-    ".html": "text/",
-    ".xml": "text/",
-    ".doc": "application/vnd.ms-",
-    ".docx": "application/vnd.openxmlformats-officedocument",
-    ".xls": "application/vnd.ms-",
-    ".xlsx": "application/vnd.openxmlformats-officedocument",
-    ".ppt": "application/vnd.ms-",
-    ".pptx": "application/vnd.openxmlformats-officedocument",
-    ".json": "application/json",
-    ".rtf": "application/rtf",
-    ".odt": "application/vnd.oasis.opendocument",
-    ".ods": "application/vnd.oasis.opendocument",
+    ".pdf": _APPLICATION_PDF_PREFIX,
+    ".txt": _TEXT_MIME_PREFIX,
+    ".md": _TEXT_MIME_PREFIX,
+    ".csv": _TEXT_MIME_PREFIX,
+    ".html": _TEXT_MIME_PREFIX,
+    ".xml": _TEXT_MIME_PREFIX,
+    ".doc": _MS_OFFICE_MIME_PREFIX,
+    ".docx": _OPENXML_MIME_PREFIX,
+    ".xls": _MS_OFFICE_MIME_PREFIX,
+    ".xlsx": _OPENXML_MIME_PREFIX,
+    ".ppt": _MS_OFFICE_MIME_PREFIX,
+    ".pptx": _OPENXML_MIME_PREFIX,
+    ".json": _APPLICATION_JSON_PREFIX,
+    ".rtf": _APPLICATION_RTF_PREFIX,
+    ".odt": _OPENDOCUMENT_MIME_PREFIX,
+    ".ods": _OPENDOCUMENT_MIME_PREFIX,
 }
 
 
@@ -160,7 +169,7 @@ def _strict_decode(filename: str, content_base64: str) -> bytes:
         raise AttachmentValidationError(ErrorMessage.ATTACHMENT_INVALID_BASE64.format(filename=filename))
     try:
         return base64.b64decode(content_base64, validate=True)
-    except (binascii.Error, ValueError) as exc:
+    except binascii.Error as exc:
         raise AttachmentValidationError(
             ErrorMessage.ATTACHMENT_INVALID_BASE64.format(filename=filename)
         ) from exc

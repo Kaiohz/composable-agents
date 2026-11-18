@@ -9,6 +9,8 @@ path (EC-013: retry exactly once, unshielded).
 
 import asyncio
 
+import pytest
+
 from src.application.use_cases._attachment_cleanup import (
     resolve_cleanup_agent,
     run_temporary_document_cleanup,
@@ -80,15 +82,19 @@ async def test_plain_failure_never_raises():
 
 
 async def test_cancellation_retries_once_and_succeeds():
-    """EC-013: a cancelled response retries ONCE, unshielded — then deletes."""
+    """EC-013 + S7497: cancelled → ONE unshielded retry runs, then the raise."""
     cleaner = _Cleaner([asyncio.CancelledError(), None])
-    assert await run_temporary_document_cleanup(cleaner, "agent", "t", _prepared(), awaiting_hitl=False) is True
-    assert len(cleaner.calls) == 2, "exactly one unshielded retry after the cancellation"
+    with pytest.raises(asyncio.CancelledError):
+        await run_temporary_document_cleanup(cleaner, "agent", "t", _prepared(), awaiting_hitl=False)
+    assert len(cleaner.calls) == 2, "exactly one unshielded retry after the cancellation (EC-013)"
 
 
-async def test_cancellation_retry_failing_stays_silent():
+async def test_cancellation_retry_failing_still_reraises_the_cancellation():
+    """EC-013 + S7497: the retry failure stays logged-only; cancellation raises."""
     cleaner = _Cleaner([asyncio.CancelledError(), RuntimeError("retry failed too")])
-    assert await run_temporary_document_cleanup(cleaner, "agent", "t", _prepared(), awaiting_hitl=False) is False
+    with pytest.raises(asyncio.CancelledError):
+        await run_temporary_document_cleanup(cleaner, "agent", "t", _prepared(), awaiting_hitl=False)
+    assert len(cleaner.calls) == 2, "the retry still ran exactly once"
 
 
 async def test_resolve_cleanup_agent_prefers_the_prepared_turn():

@@ -180,7 +180,7 @@ def _render_pdf_bytes(markdown_content: str) -> bytes:
         pdf.add_page()
         for line in markdown_content.splitlines() or [""]:
             pdf.set_font("Helvetica", size=10)
-            pdf.multi_cell(w=0, h=5, text=_latin_safe(line))
+            pdf.multi_cell(0, 5, _latin_safe(line))
     return bytes(pdf.output())
 
 
