@@ -76,6 +76,15 @@ class Settings(BaseSettings):
     logto_url: str = ""
     jwt_audience: str = ""
     secret_encryption_key: str = ""
+    # --- Composable MCP control plane (feat-composable-mcp) ---
+    # Trusted mcp-raganything registry service base URL (REQ-017 / Technical
+    # Notes: deployment configuration, never hard-coded, never derived from
+    # the frontend config.json).
+    mcp_registry_base_url: str = ""
+    # Internal base URL of the built-in mcp-raganything MCP mounts
+    # (/files/mcp, /classical/mcp, /web/mcp, /memories/mcp) used server-side
+    # when assembling the built-in assistant's toolset (REQ-036).
+    builtin_mcp_base_url: str = ""
     tracing: TracingSettings = TracingSettings()
     # Agent execution timeouts (seconds). The per-tool timeout isolates a hung
     # MCP tool as a recoverable ToolMessage error (agent continues). The graph

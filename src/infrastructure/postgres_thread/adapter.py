@@ -93,17 +93,23 @@ class PostgresThreadRepository(ThreadRepository):
         """Return the ``current_user_id`` contextvar value or ``None``."""
         return current_user_id.get()
 
-    async def create(self, agent_name: str, source: ThreadSource = ThreadSource.CHAT) -> Thread:
+    async def create(self, agent_name: str | Thread, source: ThreadSource = ThreadSource.CHAT) -> Thread:
         """Create a new conversation thread with an immutable source (SRC-001).
 
         Chat / public creation always receives ``chat`` (the default); only
-        the trusted cron execution path requests ``cron``. The row's
-        ``user_id`` is set from the ``current_user_id`` contextvar (or ``""``
-        when the contextvar is unset, preserving existing behaviour).
+        the trusted cron execution path requests ``cron`` and only the trusted
+        one-shot MCP execution path requests ``mcp``. A pre-built
+        :class:`Thread` entity may be passed instead of a name: its
+        ``agent_name`` and ``source`` are persisted verbatim (repository
+        round-trip contract) while the id/timestamps/owner plumbing stays
+        repository-owned. The row's ``user_id`` is set from the
+        ``current_user_id`` contextvar (or ``""`` when the contextvar is
+        unset, preserving existing behaviour).
 
         Args:
-            agent_name: Name of the agent owning this thread.
-            source: Immutable thread origin.
+            agent_name: Name of the agent owning this thread, or the Thread
+                entity whose agent_name/source are persisted.
+            source: Immutable thread origin (ignored when a Thread is given).
 
         Returns:
             The newly created Thread.
@@ -111,6 +117,9 @@ class PostgresThreadRepository(ThreadRepository):
         Raises:
             StorageError: If the database operation fails.
         """
+        if isinstance(agent_name, Thread):
+            source = agent_name.source
+            agent_name = agent_name.agent_name
         async with AsyncSession(self._engine, expire_on_commit=False) as session:
             try:
                 now = datetime.now(UTC)

@@ -17,7 +17,9 @@ class YamlAgentConfigLoader(AgentConfigLoader):
 
     # Fields removed from AgentConfig that may still exist in stored YAMLs.
     # They are stripped before validation to maintain backward compatibility.
-    _DEPRECATED_FIELDS = {"middleware"}
+    # ``is_builtin`` is OVERLAY-COMPUTED (REQ-033): stripping it prevents any
+    # authorable YAML from drifting the built-in marker.
+    _DEPRECATED_FIELDS = {"middleware", "is_builtin"}
     _DEPRECATED_BACKEND_FIELDS = {"root_dir", "store_backend"}
     _DEPRECATED_BACKEND_TYPES = {"state"}
 

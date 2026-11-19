@@ -1,6 +1,7 @@
 """Main entry point for the Composable Agents API."""
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -34,6 +35,8 @@ from src.dependencies import (
     close_persistence,
     get_scheduler_tick_use_case,
     init_persistence,
+    mcp_asgi_app,
+    mcp_session_manager,
     mcp_tool_loader,
     security,
     tracing_provider,
@@ -43,6 +46,7 @@ from src.domain.errors.agent import (
     AgentConfigReferenceError,
     AgentError,
     AgentNotFoundError,
+    BuiltinAgentError,
 )
 from src.domain.errors.attachment import (
     AttachmentValidationError,
@@ -110,37 +114,60 @@ _scheduler_task: asyncio.Task | None = None
 async def lifespan(_app: FastAPI):
     global _scheduler_task
     logger.info(LogMessage.APP_STARTUP_INITIATED)
-    try:
-        await init_persistence()
-        logger.info(LogMessage.APP_PERSISTENCE_INITIALIZED)
-    except Exception:
-        logger.exception(LogMessage.APP_PERSISTENCE_INIT_FAILED)
-    # Cron scheduler background loop (Phase 3 lifecycle). Tests drive
-    # ``run_scheduler_tick`` directly, so the loop is intentionally only tied
-    # to the ASGI lifespan (never to the import side effects).
-    _scheduler_task = start_scheduler_loop(get_scheduler_tick_use_case().execute)
-    logger.info(LogMessage.APP_STARTUP_COMPLETE)
-    yield
-    logger.info(LogMessage.APP_SHUTDOWN_INITIATED)
-    await stop_scheduler_loop(_scheduler_task)
-    _scheduler_task = None
-    try:
-        await close_persistence()
-        logger.info(LogMessage.APP_PERSISTENCE_CLOSED)
-    except Exception:
-        logger.exception(LogMessage.APP_PERSISTENCE_CLOSE_FAILED)
-    try:
-        await mcp_tool_loader.close()
-        logger.info(LogMessage.APP_MCP_LOADER_CLOSED)
-    except Exception:
-        logger.exception(LogMessage.APP_MCP_LOADER_CLOSE_FAILED)
-    try:
-        await tracing_provider.flush()
-        await tracing_provider.shutdown()
-        logger.info(LogMessage.APP_TRACING_SHUTDOWN)
-    except Exception:
-        logger.exception(LogMessage.APP_TRACING_SHUTDOWN_FAILED)
-    logger.info(LogMessage.APP_SHUTDOWN_COMPLETE)
+    # MCP session manager lifecycle (feat-composable-mcp): the streamable-HTTP
+    # session resources start and stop with the FastAPI lifespan (Technical
+    # Notes). Entered FIRST (AsyncExitStack unwinds shutdown in reverse) so a
+    # clean startup failure never tears down the shared persistence stack.
+    async with contextlib.AsyncExitStack() as stack:
+        if mcp_session_manager is not None:
+            try:
+                await stack.enter_async_context(mcp_session_manager.run())
+                logger.info(LogMessage.MCP_SESSION_MANAGER_RUNNING)
+            except RuntimeError:
+                # The SDK allows ONE run() per session-manager instance. The
+                # production boot runs the lifespan once per process (per
+                # worker); a repeat lifespan in a long-lived process (unit
+                # tests driving lifespan directly) skips MCP session
+                # management instead of failing the whole startup.
+                logger.warning(LogMessage.MCP_SESSION_MANAGER_ALREADY_RAN)
+        try:
+            await init_persistence()
+            logger.info(LogMessage.APP_PERSISTENCE_INITIALIZED)
+        except Exception:
+            logger.exception(LogMessage.APP_PERSISTENCE_INIT_FAILED)
+        # Cron scheduler background loop (Phase 3 lifecycle). Tests drive
+        # ``run_scheduler_tick`` directly, so the loop is intentionally only tied
+        # to the ASGI lifespan (never to the import side effects). Startup is
+        # NON-FATAL on provider wiring failures — the same resilience as
+        # ``init_persistence`` (the tick would crash every cold start without
+        # a database, while the REST/SSE/MCP surfaces stay healthy).
+        try:
+            _scheduler_task = start_scheduler_loop(get_scheduler_tick_use_case().execute)
+        except Exception:
+            _scheduler_task = None
+            logger.exception(LogMessage.APP_SCHEDULER_START_FAILED)
+        logger.info(LogMessage.APP_STARTUP_COMPLETE)
+        yield
+        logger.info(LogMessage.APP_SHUTDOWN_INITIATED)
+        await stop_scheduler_loop(_scheduler_task)
+        _scheduler_task = None
+        try:
+            await close_persistence()
+            logger.info(LogMessage.APP_PERSISTENCE_CLOSED)
+        except Exception:
+            logger.exception(LogMessage.APP_PERSISTENCE_CLOSE_FAILED)
+        try:
+            await mcp_tool_loader.close()
+            logger.info(LogMessage.APP_MCP_LOADER_CLOSED)
+        except Exception:
+            logger.exception(LogMessage.APP_MCP_LOADER_CLOSE_FAILED)
+        try:
+            await tracing_provider.flush()
+            await tracing_provider.shutdown()
+            logger.info(LogMessage.APP_TRACING_SHUTDOWN)
+        except Exception:
+            logger.exception(LogMessage.APP_TRACING_SHUTDOWN_FAILED)
+        logger.info(LogMessage.APP_SHUTDOWN_COMPLETE)
 
 
 app = FastAPI(
@@ -160,6 +187,19 @@ app.add_middleware(
 )
 
 app.include_router(health_router)
+
+# Inbound Composable MCP control plane (feat-composable-mcp): an
+# independently-mounted ASGI app that performs its OWN authentication —
+# FastAPI router dependencies do NOT protect a mounted ASGI application
+# (Technical Notes). The exact-path route avoids Starlette's mount redirect
+# (307) for POST /mcp — the auth guard runs FIRST on the original request —
+# while the mount serves "/mcp/..." sub-paths. The guard returns HTTP 401
+# for missing/invalid credentials before any MCP method runs.
+if mcp_asgi_app is not None:
+    from starlette.routing import Route
+
+    app.router.routes.append(Route("/mcp", mcp_asgi_app, name="composable_mcp_endpoint"))
+    app.mount("/mcp", mcp_asgi_app)
 
 # WebSocket routes manage their own API key validation via verify_api_key_ws
 # because FastAPI APIRouter(dependencies=...) does not apply to WebSocket endpoints.
@@ -300,6 +340,12 @@ def agent_config_reference_handler(_request: Request, exc: AgentConfigReferenceE
     return _error_response(exc)
 
 
+def builtin_agent_error_handler(_request: Request, exc: BuiltinAgentError) -> JSONResponse:
+    """Map read-only built-in-agent violations (REQ-034) to their 403 detail."""
+    logger.warning(LogMessage.LOG_BUILTIN_AGENT_READONLY, exc.detail)
+    return _error_response(exc)
+
+
 def invalid_hitl_action_handler(_request: Request, exc: InvalidHitlActionError) -> JSONResponse:
     logger.warning(LogMessage.LOG_INVALID_HITL_ACTION, exc.detail)
     return _error_response(exc)
@@ -401,6 +447,7 @@ _add_domain_error_handler(CronNotFoundError, cron_not_found_handler)
 _add_domain_error_handler(CronValidationError, cron_validation_handler)
 _add_domain_error_handler(CronRunConflictError, cron_run_conflict_handler)
 _add_domain_error_handler(AgentConfigReferenceError, agent_config_reference_handler)
+_add_domain_error_handler(BuiltinAgentError, builtin_agent_error_handler)
 _add_domain_error_handler(InvalidApiKeyError, invalid_api_key_handler)
 _add_domain_error_handler(AuthenticationError, authentication_error_handler)
 _add_domain_error_handler(LlmNotConfiguredError, llm_not_configured_handler)

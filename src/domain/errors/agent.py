@@ -31,3 +31,28 @@ class AgentConfigReferenceError(DomainError):
     """
 
     status_code = ErrorCode.UNPROCESSABLE_ENTITY
+
+
+class BuiltinAgentError(DomainError):
+    """Read-only built-in agent definition violation (REQ-034).
+
+    The built-in Composable AI Assistant's definition is centrally managed:
+    updating or deleting it is refused (HTTP 403). Its name is reserved for
+    the overlay; creating a custom agent with that name raises
+    :class:`AgentConfigAlreadyExistsError` instead.
+    """
+
+    status_code = ErrorCode.FORBIDDEN
+
+
+class AgentInvocationRejectedError(AgentError):
+    """Agent-to-agent one-shot invocation rejected (REQ-029).
+
+    Direct self-invocation, an invocation cycle or an invocation deeper than
+    four nested ``composable_agents_run`` calls is rejected with a safe
+    error BEFORE another agent runner is invoked. The message carries the
+    stable ``AGENT_INVOCATION_REJECTED`` marker so nested one-shot chains can
+    propagate the rejection through the calling agent's turn.
+    """
+
+    status_code = ErrorCode.UNPROCESSABLE_ENTITY

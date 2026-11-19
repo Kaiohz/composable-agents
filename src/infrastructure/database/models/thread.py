@@ -13,8 +13,8 @@ if TYPE_CHECKING:
 class ThreadModel(Base):
     __tablename__ = "threads"
     __table_args__ = (
-        # SRC-001: immutable thread source — only chat/cron allowed.
-        CheckConstraint("source IN ('chat', 'cron')", name="ck_threads_source"),
+        # SRC-001: immutable thread source — only chat/cron/mcp allowed.
+        CheckConstraint("source IN ('chat', 'cron', 'mcp')", name="ck_threads_source"),
         Index("ix_threads_user_id", "user_id"),
         Index("ix_threads_agent_name", "agent_name"),
         Index("ix_threads_source", "source"),
@@ -24,7 +24,8 @@ class ThreadModel(Base):
     agent_name: Mapped[str] = mapped_column(String(100), nullable=False)
     # Immutable thread origin (SRC-001): 'chat' for conversation-created
     # threads (legacy rows backfilled via server default), 'cron' only from
-    # the trusted cron execution path.
+    # the trusted cron execution path, 'mcp' only from the trusted one-shot
+    # MCP execution path.
     source: Mapped[str] = mapped_column(String(10), nullable=False, server_default="chat", default="chat")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

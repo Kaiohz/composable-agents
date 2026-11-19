@@ -19,9 +19,15 @@ In-flight runs keep their snapshot: the fingerprint is read once per
 
 import asyncio
 import logging
+from collections import OrderedDict
 from dataclasses import dataclass
 from uuid import UUID
 
+from src.application.services.builtin_agent import (
+    BUILTIN_AGENT_NAME,
+    builtin_agent_config,
+    is_builtin_agent_name,
+)
 from src.domain.entities.agent_config import AgentConfig, PromptRef
 from src.domain.logging.messages import LogMessage
 from src.domain.ports.agent_config_loader import AgentConfigLoader
@@ -36,7 +42,10 @@ from src.domain.ports.runner_freshness import RunnerFreshness
 from src.domain.ports.tracing_provider import TracingProvider
 from src.infrastructure.database.rls_context import current_user_id
 from src.infrastructure.deepagent.adapter import DeepAgentRunner
+from src.infrastructure.deepagent.builtin_resolution import BuiltinToolsetResolver
 from src.infrastructure.deepagent.factory import create_agent_from_config, resolve_model_identity
+from src.infrastructure.deepagent.platform_tools import PLATFORM_TOOLS_SELECTOR, AgentPlatformToolsetBuilder
+from src.infrastructure.deepagent.toolset_guard import BuiltInToolsetGuardMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +53,10 @@ logger = logging.getLogger(__name__)
 # no per-user LLM settings (env-fallback serving chain): the agents are always
 # served by the OpenAI-compatible ChatOpenAI chain.
 _DEFAULT_PROVIDER = "openai"
+
+#: LRU cap on the per-user degraded-capability records (REQ-040 advisory data
+#: with tiny values; the cap keeps worker memory flat at any user scale).
+_DEGRADED_CACHE_MAX_USERS = 256
 
 
 @dataclass
@@ -71,6 +84,8 @@ class PersistentAgentRegistry(AgentRegistry):
         prompt_repository: PromptRepository | None = None,
         model_repository: ModelRepository | None = None,
         runner_freshness: RunnerFreshness | None = None,
+        builtin_resolver: BuiltinToolsetResolver | None = None,
+        platform_toolset: AgentPlatformToolsetBuilder | None = None,
     ) -> None:
         self._config_loader = config_loader
         self._config_store = config_store
@@ -84,27 +99,46 @@ class PersistentAgentRegistry(AgentRegistry):
         self._prompt_repository = prompt_repository
         self._model_repository = model_repository
         self._runner_freshness = runner_freshness
+        self._builtin_resolver = builtin_resolver
+        self._platform_toolset = platform_toolset or AgentPlatformToolsetBuilder()
         # CACHE-001: keyed by (user_id, agent_name).
         self._runners: dict[tuple[str, str], _CacheEntry] = {}
         self._lock = asyncio.Lock()
+        # REQ-040 degradation info of the LATEST builtin build (read right
+        # after the build through :meth:`degraded_capabilities`), LRU-bounded
+        # per user so the worker memory stays flat over time.
+        self._degraded: OrderedDict[str, list[dict]] = OrderedDict()
 
     async def get_runner(self, agent_name: str) -> AgentRunner:
         """Return a runner for the CURRENT user's agent, rebuilding when stale.
 
+        The built-in Composable AI Assistant follows a DELIBERATE REBUILD
+        strategy (REQ-032/REQ-038): its dynamic toolset (platform tools,
+        built-in MCP mounts, the running user's registered MCP servers,
+        ``create_pdf``) is resolved fresh on every construction in the
+        current user's context, and the resulting runner is never cached —
+        a registry mutation is reflected on the very next turn without any
+        restart and without cross-worker cache concerns.
+
         Args:
-            agent_name: Name of the agent.
+            agent_name: Name of the agent (or the built-in assistant name).
 
         Returns:
             AgentRunner ready for invocation, reflecting the latest committed
             dependency state (agent YAML revision, unpinned prompt Latest
-            version, model metadata).
+            version, model metadata) or the freshly resolved built-in
+            toolset.
 
         Raises:
             AgentNotFoundError: If no config exists for this user/agent.
             PromptNotFoundError / PromptVersionNotFoundError: If a referenced
                 prompt (or pinned version) is missing or inaccessible.
             ModelNotFoundError: If a referenced model is missing.
+            LlmNotConfiguredError: If the running user has no LLM credentials.
         """
+        if is_builtin_agent_name(agent_name):
+            return await self._build_builtin_runner()
+
         uid = current_user_id.get() or ""
         key = (uid, agent_name)
 
@@ -136,29 +170,14 @@ class PersistentAgentRegistry(AgentRegistry):
                 referenced_yaml = await self._config_store.get(name)
                 return self._config_loader.load_from_string(referenced_yaml)
 
-            graph, response_format_model = await create_agent_from_config(
+            # REQ-028: the declarative platform-tools selector ("mcp") swaps
+            # in the LangChain platform toolset for custom agents.
+            extra_tools, config = self._apply_platform_selector(config)
+
+            runner = await self._construct_runner(
                 config,
-                self._mcp_tool_loader,
                 config_resolver=config_resolver,
-                llm_credentials_resolver=self._llm_credentials_resolver,
-                prompt_resolver=self._build_prompt_resolver(),
-                model_resolver=self._build_model_resolver(),
-            )
-            # LLM-usage capture identity (dashboard spec §1): the resolved
-            # serving model name (AGT-003 precedence) and the user's configured
-            # provider label (fallback: the OpenAI-compatible serving chain).
-            model_name, _model_base_url = await resolve_model_identity(config, self._build_model_resolver())
-            provider = _DEFAULT_PROVIDER
-            if self._llm_provider_resolver is not None:
-                provider = await self._llm_provider_resolver(uid) or _DEFAULT_PROVIDER
-            runner = DeepAgentRunner(
-                graph,
-                tracing_provider=self._tracing_provider,
-                response_format_model=response_format_model,
-                stream_idle_timeout=self._stream_idle_timeout,
-                invoke_timeout=self._invoke_timeout,
-                model_name=model_name,
-                provider=provider,
+                extra_tools=extra_tools,
             )
             fingerprint = (
                 await self._runner_freshness.fingerprint(agent_name) if self._runner_freshness is not None else ""
@@ -166,6 +185,119 @@ class PersistentAgentRegistry(AgentRegistry):
             self._runners[key] = _CacheEntry(runner=runner, fingerprint=fingerprint)
             logger.info(LogMessage.AGENT_CACHED, agent_name)
             return runner
+
+    def _apply_platform_selector(self, config: AgentConfig) -> tuple[list, AgentConfig]:
+        """Swap the ``tools: ["mcp"]`` selector for the platform toolset.
+
+        The selector is NOT a module path; it must never reach the YAML tool
+        resolver. The platform tools (including the one-shot execution tool,
+        REQ-029-guarded) are injected as pre-resolved objects.
+
+        Returns:
+            ``(extra_tools, adjusted_config)``.
+        """
+        selector_hits = [t for t in config.tools if t == PLATFORM_TOOLS_SELECTOR]
+        if not selector_hits:
+            return [], config
+        remaining = [t for t in config.tools if t != PLATFORM_TOOLS_SELECTOR]
+        adjusted = config.model_copy(update={"tools": remaining})
+        tools = self._platform_toolset.build(include_run=True)
+        logger.info(LogMessage.AGENT_MCP_TOOLS_LOADED, len(tools), config.name)
+        return tools, adjusted
+
+    async def _build_builtin_runner(self) -> DeepAgentRunner:
+        """Resolve the built-in assistant dynamically and build a fresh runner.
+
+        The dynamic toolset is resolved in the CURRENT user's context: the
+        platform tools INCLUDING one-shot execution (REQ-011/036 — the
+        assistant may run OTHER user agents; self-invocation is refused by
+        the invocation chain and by the run tool itself, REQ-030), built-in
+        MCP mounts, every MCP server the user registered (per-server failure
+        isolation, REQ-040; deterministic collision namespacing, REQ-039),
+        the builtin ``create_pdf`` tool, and the standard non-sensitive
+        runtime tools supplied by the deep-agent framework.
+        """
+        uid = current_user_id.get() or ""
+        logger.info(LogMessage.BUILTIN_AGENT_RESOLVING, uid)
+        config = builtin_agent_config()
+
+        # Platform tools are built FIRST so their names are reserved BEFORE
+        # the dynamic MCP resolution: a registered server advertising a
+        # composable_* tool name is namespaced instead of shadowing it (I3).
+        platform_tools = self._platform_toolset.build(include_run=True)
+        reserved = frozenset(tool.name for tool in platform_tools)
+
+        dynamic_tools: list = []
+        degraded: list[dict] = []
+        if self._builtin_resolver is not None:
+            dynamic_tools, degraded = await self._builtin_resolver.resolve_dynamic_tools(reserved_names=reserved)
+        self._record_degraded_capabilities(uid, degraded)
+
+        runner = await self._construct_runner(
+            config,
+            config_resolver=None,
+            extra_tools=[*platform_tools, *dynamic_tools],
+            middleware=[BuiltInToolsetGuardMiddleware()],
+        )
+        logger.info(
+            LogMessage.BUILTIN_AGENT_TOOLS_RESOLVED, uid, len(platform_tools) + len(dynamic_tools), len(degraded)
+        )
+        return runner
+
+    def _record_degraded_capabilities(self, uid: str, degraded: list[dict]) -> None:
+        """Record one build's degradation with an LRU bound on the user set.
+
+        REQ-040: the one-shot use case reads this immediately after its build
+        in the same task. The dict is bounded (LRU eviction) so an
+        ever-growing user population cannot grow the worker's memory.
+        """
+        self._degraded[uid] = degraded
+        self._degraded.move_to_end(uid)
+        while len(self._degraded) > _DEGRADED_CACHE_MAX_USERS:
+            self._degraded.popitem(last=False)
+
+    async def _construct_runner(
+        self,
+        config: AgentConfig,
+        *,
+        config_resolver=None,
+        extra_tools: list | None = None,
+        middleware: list | None = None,
+    ) -> DeepAgentRunner:
+        """Build one DeepAgentRunner from a resolved configuration (shared path).
+
+        Centralizes graph creation, the model/credential resolution and the
+        LLM-usage identity so the cached custom-agent path and the fresh
+        built-in path stay behaviorally identical. ``agent_name``-scoped
+        logging happens at the call sites.
+        """
+        graph, response_format_model = await create_agent_from_config(
+            config,
+            self._mcp_tool_loader,
+            config_resolver=config_resolver,
+            llm_credentials_resolver=self._llm_credentials_resolver,
+            prompt_resolver=self._build_prompt_resolver(),
+            model_resolver=self._build_model_resolver(),
+            extra_tools=extra_tools,
+            middleware=middleware or (),
+        )
+        # LLM-usage capture identity (dashboard spec §1): the resolved
+        # serving model name (AGT-003 precedence) and the user's configured
+        # provider label (fallback: the OpenAI-compatible serving chain).
+        model_name, _model_base_url = await resolve_model_identity(config, self._build_model_resolver())
+        provider = _DEFAULT_PROVIDER
+        uid = current_user_id.get() or ""
+        if self._llm_provider_resolver is not None:
+            provider = await self._llm_provider_resolver(uid) or _DEFAULT_PROVIDER
+        return DeepAgentRunner(
+            graph,
+            tracing_provider=self._tracing_provider,
+            response_format_model=response_format_model,
+            stream_idle_timeout=self._stream_idle_timeout,
+            invoke_timeout=self._invoke_timeout,
+            model_name=model_name,
+            provider=provider,
+        )
 
     def _build_prompt_resolver(self):
         """Build the registry-backed ``prompt_ref`` resolver (AGT-002), or None."""
@@ -191,9 +323,29 @@ class PersistentAgentRegistry(AgentRegistry):
         return resolve
 
     async def list_agents(self) -> list[str]:
-        """List agent names from the metadata repository (current user)."""
+        """List agent names visible to the current user, built-in assistant first.
+
+        REQ-031: the virtual built-in assistant is part of every
+        authenticated user's catalog (registry discovery, thread creation,
+        one-shot execution) even with zero custom agents. It is NEVER a
+        persisted row and never duplicated by one.
+        """
         metadata_list = await self._config_repository.list_all()
-        return [m.name for m in metadata_list]
+        names = [m.name for m in metadata_list if not is_builtin_agent_name(m.name)]
+        return [BUILTIN_AGENT_NAME, *names]
+
+    def degraded_capabilities(self, agent_name: str) -> list[dict]:
+        """Return the degradation info of the LATEST build (REQ-040).
+
+        The agent registry records the optional-capability failures of its
+        most recent built-in assistant build; the one-shot use case forwards
+        them into the run result so an outage is surfaced as degraded
+        capability information, never a silent capability loss.
+        """
+        uid = current_user_id.get() or ""
+        if is_builtin_agent_name(agent_name):
+            return list(self._degraded.get(uid, []))
+        return []
 
     async def invalidate(self, agent_name: str) -> None:
         """Evict cached runners for the agent under the current user's scope.

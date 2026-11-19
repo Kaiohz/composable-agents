@@ -72,6 +72,10 @@ class StubLlmApp:
         self.requests: list[RecordedRequest] = []
         self.mode: str = "normal"
         self._usage: dict[str, int] | None = dict(_DEFAULT_USAGE)
+        # Scripted responses (additive, used ONLY by the composable-mcp suite):
+        # when non-empty, each next NON-STREAMING completion pops the next
+        # scripted assistant message instead of the default "stub-ok" reply.
+        self._script: list[dict[str, Any]] = []
         self._lock = asyncio.Lock()
 
     async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001
@@ -105,6 +109,14 @@ class StubLlmApp:
         if self.mode.startswith("slow:"):
             await asyncio.sleep(float(self.mode.split(":", 1)[1]))
 
+        # Scripted non-streaming completions (composable-mcp suite only):
+        # a streaming request deliberately falls through to the default path,
+        # so existing streaming behaviour is untouched.
+        if self._script and not payload.get("stream"):
+            await self._record(headers, payload)
+            await self._json(send, 200, self._scripted_completion(payload))
+            return
+
         await self._record(headers, payload)
 
         model = payload.get("model", "stub-model")
@@ -135,6 +147,37 @@ class StubLlmApp:
         if self._usage is not None:
             completion["usage"] = dict(self._usage)
         return completion
+
+    def _scripted_completion(self, payload: dict) -> dict:
+        """Build a completion from the next scripted assistant message."""
+        message = self._script.pop(0)
+        completion = {
+            "id": "chatcmpl-stub",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": payload.get("model", "stub-model"),
+            "choices": [
+                {
+                    "index": 0,
+                    "message": message,
+                    "finish_reason": "tool_calls" if message.get("tool_calls") else "stop",
+                }
+            ],
+        }
+        if self._usage is not None:
+            completion["usage"] = dict(self._usage)
+        return completion
+
+    def script(self, *messages: dict[str, Any]) -> None:
+        """Queue scripted assistant messages for NON-streaming completions.
+
+        Each queued item is a raw OpenAI assistant message (``content`` and/or
+        ``tool_calls``); they are consumed in order, one per request. Calling
+        this method replaces the whole script. ``reset()`` clears it.
+
+        Streaming requests never consume scripts (default reply is sent).
+        """
+        self._script = list(messages)
 
     @staticmethod
     def _chunk(model: str, created: int, delta: dict, finish: str | None) -> str:
@@ -192,6 +235,7 @@ class StubLlmApp:
         """
         self.requests = []
         self.mode = mode
+        self._script = []
         if usage == "default":
             self._usage = dict(_DEFAULT_USAGE)
         else:
@@ -225,6 +269,15 @@ class StubLlmServer:
     def reset(self, mode: str = "normal", usage: dict[str, int] | None | str = "default") -> None:
         """Delegate to the in-process app reset (tests reset the server)."""
         self.app.reset(mode, usage)
+
+    def script(self, *messages: dict[str, Any]) -> None:
+        """Queue scripted assistant messages (delegates to the in-process app).
+
+        Used by the composable-mcp suite to drive agent runners with
+        deterministic tool-call/text sequences; consumed in order, one per
+        non-streaming completion (see :meth:`StubLlmApp.script`).
+        """
+        self.app.script(*messages)
 
     def stop(self) -> None:
         if self._server is not None:

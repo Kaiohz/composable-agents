@@ -35,9 +35,7 @@ def _reject_empty_hitl(decisions: list[HitlDecision] | None) -> None:
         raise ValueError("'decisions' must be a non-empty list.")
 
 
-def _reject_missing_hitl_details(
-    hitl_requested: bool, action: str | None, edits: dict | None
-) -> None:
+def _reject_missing_hitl_details(hitl_requested: bool, action: str | None, edits: dict | None) -> None:
     """Complete the legacy HITL contract: action and edit payloads."""
     if hitl_requested and action is None:
         raise ValueError("'action' is required for HITL decisions.")

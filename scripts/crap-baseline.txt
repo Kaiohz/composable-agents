@@ -1,0 +1,35 @@
+# CHANGE RISK ratchet baseline (unit-floor measurement 2026-11-19/20, feat-composable-mcp).
+# Format: src/path.py:function_name:<recorded CRAP> — keyed by NAME (line-stable).
+# Entries mark functions that ALREADY exceeded CRAP 30 BEFORE the feat-composable-mcp
+# review remediation; they are NOT charged to this change. The gate still fails when
+# one of them REGRESSES (score rises above the recorded value).
+# Prune an entry whenever the function drops below the threshold.
+src/application/routes/websocket.py:websocket_chat:99.69  # pre-existing (not charged to feat-composable-mcp)
+src/application/services/chat_attachments_service.py:prepare_for_request:159.79  # pre-existing (not charged to feat-composable-mcp)
+src/application/services/chat_attachments_service.py:_upload_document:42.48  # pre-existing (not charged to feat-composable-mcp)
+src/application/use_cases/cron/manage_crons.py:execute:67.92  # pre-existing (not charged to feat-composable-mcp)
+src/application/use_cases/cron/run_crons.py:_process_due:84.35  # pre-existing (not charged to feat-composable-mcp)
+src/application/use_cases/delete_thread.py:_cascade_delete_store_files:41.41  # pre-existing (not charged to feat-composable-mcp)
+src/application/use_cases/list_traces.py:decode_cursor:101.67  # pre-existing (not charged to feat-composable-mcp)
+src/config.py:_coerce_attachment_limit:33.00  # pre-existing (not charged to feat-composable-mcp)
+src/dependencies.py:_create_tracing_provider:35.36  # pre-existing (not charged to feat-composable-mcp)
+src/infrastructure/deepagent/adapter.py:_classify_tool_call_chunks:49.01  # pre-existing (not charged to feat-composable-mcp)
+src/infrastructure/deepagent/adapter.py:_build_llm_usage:48.30  # pre-existing (not charged to feat-composable-mcp)
+src/infrastructure/deepagent/adapter.py:_build_resume_decisions:30.59  # pre-existing (not charged to feat-composable-mcp)
+src/infrastructure/deepagent/adapter.py:_prepare_resume_input:32.04  # pre-existing (not charged to feat-composable-mcp)
+src/infrastructure/deepagent/factory.py:_resolve_referenced_subagent:36.55  # pre-existing (not charged to feat-composable-mcp)
+src/infrastructure/deepagent/pdf_renderer.py:render_table:34.31  # pre-existing (not charged to feat-composable-mcp)
+src/infrastructure/deepagent/pdf_renderer.py:_code_text:38.00  # pre-existing (not charged to feat-composable-mcp)
+src/infrastructure/deepagent/pdf_tools.py:_validate_filename:65.15  # pre-existing (not charged to feat-composable-mcp)
+src/infrastructure/mcp/files_client.py:_parse_structured_payload:50.94  # pre-existing (not charged to feat-composable-mcp)
+src/infrastructure/mcp/files_client.py:delete_temporary_documents:49.62  # pre-existing (not charged to feat-composable-mcp)
+src/infrastructure/postgres_cron/adapter.py:claim_scheduled:40.23  # pre-existing (not charged to feat-composable-mcp)
+src/infrastructure/postgres_model/adapter.py:delete:51.10  # pre-existing (not charged to feat-composable-mcp)
+src/infrastructure/postgres_prompt/adapter.py:delete:66.67  # pre-existing (not charged to feat-composable-mcp)
+src/infrastructure/postgres_prompt/adapter.py:add_version:39.23  # pre-existing (not charged to feat-composable-mcp)
+src/infrastructure/postgres_prompt/adapter.py:list_versions:39.23  # pre-existing (not charged to feat-composable-mcp)
+src/infrastructure/postgres_prompt/adapter.py:get_version:51.80  # pre-existing (not charged to feat-composable-mcp)
+src/infrastructure/postgres_trace/summary_repository.py:list_summaries:46.65  # pre-existing (not charged to feat-composable-mcp)
+src/infrastructure/postgres_trace/usage_repository.py:_clauses_sql:39.88  # pre-existing (not charged to feat-composable-mcp)
+src/infrastructure/postgres_trace/usage_repository.py:summarize_usage:48.74  # pre-existing (not charged to feat-composable-mcp)
+src/infrastructure/runner_freshness/adapter.py:fingerprint:66.19  # pre-existing (not charged to feat-composable-mcp)

@@ -64,6 +64,10 @@ dev = [
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=7.1.0",
+    # CHANGE RISK gate (change-risk-analysis / CRAP): pytest-crap implements
+    # ``pytest --crap`` on top of pytest-cov so the CI step can enforce
+    # CRAP <= 30 on every measured function (C2 remediation).
+    "pytest-crap>=0.3.0",
     "ruff>=0.15.0",
     "testcontainers[minio,postgres]>=4.13.0",
     "types-cachetools>=7.0.0.20260713",

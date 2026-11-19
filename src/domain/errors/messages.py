@@ -39,6 +39,14 @@ class ErrorMessage(StrEnum):
 
     # --- Agent ---
     AGENT_NOT_FOUND = "Agent not found: {name}"
+    AGENT_NAME_RESERVED = (
+        "Agent name '{name}' is reserved for the built-in Composable AI Assistant. "
+        "Choose another name to create a custom agent."
+    )
+    BUILTIN_AGENT_READ_ONLY = (
+        "Agent '{name}' is the read-only built-in Composable AI Assistant; its definition cannot be updated or deleted."
+    )
+    AGENT_INVOCATION_REJECTED = "Agent invocation rejected: {reason}"
     AGENT_CONFIG_NOT_FOUND = "Agent config metadata not found: {name}"
     AGENT_CONFIG_NOT_FOUND_IN_STORE = "Agent config not found in store: {name}"
     AGENT_CONFIG_ALREADY_EXISTS = "Agent config already exists: {name}"
@@ -106,6 +114,12 @@ class ErrorMessage(StrEnum):
     MCP_CONNECTION_ERROR = "Failed to connect to MCP servers: {error}"
     MCP_TOOL_LOAD_ERROR = "Failed to load MCP tools: {error}"
     MCP_TOOL_CALL_TIMEOUT = "MCP tool '{name}' timed out after {timeout}s"
+    MCP_REGISTRY_UNAVAILABLE = "MCP registry service is unavailable; please retry later."
+    MCP_REGISTRY_REQUEST_FAILED = "MCP registry request failed with status {status}."
+    MCP_REGISTRY_SERVER_NOT_FOUND = "Registered MCP server not found: {name}"
+    MCP_TOOL_MESSAGE_EMPTY = "message must be a non-empty string"
+    MCP_SKILL_NAME_INVALID = "Invalid skill name '{name}': use a plain directory name (no path separators, no '..')."
+    MCP_MEMORY_NAME_INVALID = "Invalid memory filename '{name}': use a plain file name (no path separators, no '..')."
 
     # --- Prompt management (Phoenix, removed) ---
     # Legacy Phoenix prompt templates removed with the Phoenix prompt path.
@@ -153,6 +167,7 @@ class ErrorMessage(StrEnum):
     CRON_RUN_NOT_CREATED = "Failed to create cron run for cron {cron_id}: {error}"
     CRON_RUN_NOT_UPDATED = "Failed to update cron run {run_id}: {error}"
     CRON_RUN_LIST_FAILED = "Failed to list runs for cron {cron_id}: {error}"
+    CRON_RUN_LIMIT_INVALID = "limit must be between 1 and 200"
     CRON_RUN_AGENT_MISSING = "Cron agent no longer available: {agent_name}"
     CRON_RUN_INVOCATION_FAILED = "Cron run invocation failed: {error}"
     CRON_RUN_STALE_RECLAIMED = (

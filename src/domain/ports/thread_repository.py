@@ -7,14 +7,22 @@ class ThreadRepository(ABC):
     @abstractmethod
     async def create(
         self,
-        agent_name: str,
+        agent_name: str | Thread,
         source: ThreadSource = ThreadSource.CHAT,
     ) -> Thread:
         """Cree un nouveau thread de conversation.
 
-        The thread source is immutable after insert (SRC-001): public/chat
-        creation always receives ``chat``; only the trusted cron execution
-        path requests ``cron``.
+        Two accepted shapes (additive, SRC-001 trusted-source split):
+
+        * ``create("agent-name")`` / ``create("agent-name", source)`` — the
+          legacy name-based creation (chat default; the trusted cron path
+          passes ``cron`` and the trusted one-shot MCP path passes ``mcp``);
+        * ``create(thread_entity)`` — persist from a pre-built domain Thread:
+          its ``agent_name`` and ``source`` are used verbatim so the caller
+          decides the immutable origin (repository round-trip contract),
+          while the id/timestamps/owner plumbing stays repository-owned.
+
+        The thread source is immutable after insert (SRC-001).
         """
         ...
 
