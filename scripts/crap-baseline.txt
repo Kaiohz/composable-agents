@@ -33,3 +33,4 @@ src/infrastructure/postgres_trace/summary_repository.py:list_summaries:46.65  # 
 src/infrastructure/postgres_trace/usage_repository.py:_clauses_sql:39.88  # pre-existing (not charged to feat-composable-mcp)
 src/infrastructure/postgres_trace/usage_repository.py:summarize_usage:48.74  # pre-existing (not charged to feat-composable-mcp)
 src/infrastructure/runner_freshness/adapter.py:fingerprint:66.19  # pre-existing (not charged to feat-composable-mcp)
+src/alembic/versions/006_migrate_messages_to_trace_events.py:downgrade:54.04  # pre-existing (not charged to feat-composable-mcp)
