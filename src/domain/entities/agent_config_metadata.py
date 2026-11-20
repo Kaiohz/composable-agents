@@ -21,3 +21,7 @@ class AgentConfigMetadata(BaseModel):
     # ``current_user_id`` contextvar on save. Defaults to ``""`` so existing
     # constructions (no auth context) keep working.
     user_id: str = ""
+    # Overlay-computed marker (REQ-033): ``True`` only for the virtual built-in
+    # Composable AI Assistant resolved by the built-in overlay — never
+    # persisted and never restored as a database column.
+    is_builtin: bool = False

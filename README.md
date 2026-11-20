@@ -78,6 +78,60 @@ curl http://localhost:8000/api/v1/agents \
 
 ---
 
+## Composable MCP Control Plane
+
+The same app exposes an authenticated, streamable-HTTP MCP endpoint at:
+
+```text
+/mcp
+```
+
+It is not an agent-only wrapper. It is the platform control plane and exposes typed tools for
+
+- agent CRUD and one-shot execution (`composable_agents_*`);
+- the per-user MCP-server registry (`composable_mcp_servers_*`);
+- global skills and memories (`composable_skills_*`, `composable_memories_*`);
+- prompts and immutable versions (`composable_prompts_*`, `composable_prompt_versions_*`);
+- metadata-only model definitions (`composable_models_*`);
+- crons and cron-run history (`composable_crons_*`, `composable_cron_runs_list`);
+- thread history/traces (`composable_threads_*`, `composable_traces_*`);
+- and the current-user profile (`composable_users_me`).
+
+LLM settings, API keys, credential revelation, and cross-user administration are intentionally not exposed. Registry server list/get/create/update responses mask `auth_token`, `headers`, and `env`; secrets are write-only.
+
+Each `composable_agents_run` call is a one-shot task: it creates a trusted thread with `source="mcp"`, persists the normal agent trace, and returns the final message plus the thread ID. There is no caller-selected thread ID, implicit conversation continuity, or MCP HITL resume in this version. If the agent stops in HITL, the response reports `awaiting_hitl` and the thread can be resumed in the UI.
+
+### Connect an MCP client
+
+Any MCP-over-streamable-HTTP client can connect with the same credential used by REST:
+
+```json
+{
+  "mcpServers": {
+    "composable-platform": {
+      "url": "http://localhost:8000/mcp",
+      "headers": { "X-API-Key": "cpk_..." }
+    }
+  }
+}
+```
+
+Use the same `Authorization: Bearer <jwt>` header for JWT-based clients. An invalid presented JWT does not silently fall back to an API key.
+
+### Built-in assistant
+
+The virtual, centrally managed agent `composable-ai-assistant` is overlaid into every authenticated user's catalog. It is listed first, marked with `is_builtin=true`, and cannot be created, updated, or deleted by users. It is manually selectable in the UI, uses that user's LLM credentials, and dynamically aggregates:
+
+- the platform management/execution tools;
+- the built-in Files, Classical RAG, Web, and Memories MCP servers;
+- every MCP server registered by the current user;
+- `create_pdf`; and
+- the user's other composable agents through one-shot execution (excluding self-invocation).
+
+Its destructive delete tools are configured with HITL rules. Direct MCP management tool calls are explicit client commands and execute normally, subject to authorization.
+
+---
+
 ## Quickstart (5 minutes)
 
 ### Prerequisites

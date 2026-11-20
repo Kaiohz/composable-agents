@@ -63,6 +63,7 @@ from src.application.use_cases.prompt.manage_prompts import (
     ListPromptsUseCase,
     UpdatePromptUseCase,
 )
+from src.application.use_cases.run_agent_one_shot import RunAgentOneShotUseCase
 from src.application.use_cases.send_message import SendMessageUseCase
 from src.application.use_cases.stream_message import StreamMessageUseCase
 from src.application.use_cases.trace_usage import GetTopUsageRunsUseCase, GetTraceUsageUseCase
@@ -83,6 +84,7 @@ from src.domain.ports.auth.api_key_repository import ApiKeyRepository
 from src.domain.ports.cron_repository import CronRepository, CronRunRepository
 from src.domain.ports.files_mcp_client import FilesMcpClient
 from src.domain.ports.llm_price_repository import LlmPriceRepository
+from src.domain.ports.mcp_registry import McpRegistryClient
 from src.domain.ports.model_repository import ModelRepository
 from src.domain.ports.prompt_repository import PromptRepository
 from src.domain.ports.store_file_repository import StoreFileRepository
@@ -96,8 +98,10 @@ from src.domain.ports.user_llm_settings_repository import UserLlmSettingsReposit
 from src.infrastructure.auth.jwt_adapter import JwtAdapter
 from src.infrastructure.crypto.fernet_crypto import FernetCrypto
 from src.infrastructure.database.rls_context import current_auth_context, current_user_id
+from src.infrastructure.deepagent.builtin_resolution import BuiltinToolsetResolver
 from src.infrastructure.mcp.adapter import LangchainMcpToolLoader
 from src.infrastructure.mcp.files_client import McpFilesTemporaryCleaner, McpStreamableFilesClient
+from src.infrastructure.mcp_registry.adapter import HttpMcpRegistryClient
 from src.infrastructure.persistent_registry.adapter import PersistentAgentRegistry
 from src.infrastructure.postgres_api_key.adapter import PostgresApiKeyRepository
 from src.infrastructure.postgres_cron.adapter import PostgresCronRepository, PostgresCronRunRepository
@@ -173,6 +177,10 @@ agent_config_loader = YamlAgentConfigLoader()
 mcp_tool_loader = LangchainMcpToolLoader(tool_timeout=settings.mcp_tool_timeout)
 tracing_provider = _create_tracing_provider(settings)
 
+# Trusted MCP-registry client singleton (I2): created lazily by
+# ``get_mcp_registry_client()``, closed by ``close_persistence``.
+_mcp_registry_client: HttpMcpRegistryClient | None = None
+
 # Security instance shared across all routes (HTTP + WebSocket).
 security = ComposableAgentsSecurity(master_key=settings.api_key)
 
@@ -184,6 +192,24 @@ def get_security() -> ComposableAgentsSecurity:
     inherit router-level ``dependencies=[...]``.
     """
     return security
+
+
+from src.application.mcp.server import build_mcp_asgi_app as _build_mcp_asgi_app  # noqa: E402
+
+# ============= INBOUND MCP CONTROL PLANE (feat-composable-mcp) =============
+#
+# The guarded streamable-HTTP MCP ASGI app mounted at /mcp by src.main. Built
+# ONCE at import (like the other singletons) so uvicorn never imports the app
+# twice (Technical Notes: "avoid importing the app twice during startup").
+# Authentication runs through the SAME dual-auth security as REST: the guard
+# delegates to ``security.authenticate_headers`` (set_auth_service wires the
+# AuthService during init_persistence — exactly how verify_credentials works).
+try:
+    mcp_asgi_app, mcp_session_manager = _build_mcp_asgi_app(security.authenticate_headers)
+except Exception:  # pragma: no cover — construction failures surface at boot
+    logger.exception(LogMessage.MCP_SERVER_MOUNTED)
+    mcp_asgi_app = None
+    mcp_session_manager = None
 
 
 # ============= PERSISTENCE (initialized at startup) =============
@@ -356,6 +382,13 @@ async def init_persistence() -> None:
         prompt_repository=_root.prompt_repository,
         model_repository=_root.model_repository,
         runner_freshness=_root.runner_freshness,
+        # Built-in assistant dynamic capability resolution (REQ-036..040): the
+        # trusted registry client + the configured built-in MCP mount base URL.
+        builtin_resolver=BuiltinToolsetResolver(
+            mcp_tool_loader=mcp_tool_loader,
+            registry_client=get_mcp_registry_client(),
+            builtin_mcp_base_url_provider=lambda: settings.builtin_mcp_base_url,
+        ),
     )
 
     # Store file repository — reuse the singleton LangGraph BaseStore from the
@@ -429,6 +462,17 @@ async def close_persistence() -> None:
         await _root.jwt_adapter.close()
         _root.jwt_adapter = None
         logger.info(LogMessage.JWT_ADAPTER_CLOSED)
+
+    global _mcp_registry_client
+    if _mcp_registry_client is not None:
+        # Contained: a failing registry-client close must never block the
+        # remaining shutdown steps (same hygiene as the lifespan handlers).
+        try:
+            await _mcp_registry_client.aclose()
+            logger.info(LogMessage.MCP_REGISTRY_CLIENT_CLOSED)
+        except Exception:
+            logger.exception(LogMessage.MCP_REGISTRY_CLIENT_CLOSE_FAILED)
+        _mcp_registry_client = None
 
 
 def reset() -> None:
@@ -559,6 +603,20 @@ def _require_agent_registry() -> AgentRegistry:
     return _root.agent_registry
 
 
+def get_run_agent_one_shot_use_case() -> RunAgentOneShotUseCase:
+    """Provide a :class:`RunAgentOneShotUseCase` instance (one-shot execution).
+
+    Composes trusted ``mcp``-sourced thread creation with SendMessageUseCase;
+    the invocation-chain guards (self/cycle/depth) live inside the use case.
+    """
+    return RunAgentOneShotUseCase(
+        create_thread=get_create_thread_use_case(),
+        send_message=get_send_message_use_case(),
+        registry=_require_agent_registry(),
+        trace_repo=_require_trace_event_repository(),
+    )
+
+
 def get_send_message_use_case() -> SendMessageUseCase:
     """Provide a SendMessageUseCase instance."""
     return SendMessageUseCase(
@@ -589,6 +647,26 @@ def get_get_thread_history_use_case() -> GetThreadHistoryUseCase:
 def get_create_thread_use_case() -> CreateThreadUseCase:
     """Provide a CreateThreadUseCase instance."""
     return CreateThreadUseCase(_require_thread_repository(), _require_agent_registry())
+
+
+def get_mcp_registry_client() -> McpRegistryClient:
+    """Provide the trusted MCP-registry HTTP client (REQ-017) as a singleton.
+
+    ONE long-lived :class:`httpx.AsyncClient` serves every registry call —
+    including the built-in assistant's concurrent per-server resolutions —
+    instead of a fresh connection pool per call (I2). The base URL is read at
+    CALL time from the deployment configuration so tests (and any worker warm
+    reload) can retarget the seam without rebuilding the client; the adapter
+    forwards the originating credential from the RLS auth context. The
+    lifecycle is closed by :func:`close_persistence`.
+    """
+    global _mcp_registry_client
+    if _mcp_registry_client is None:
+        _mcp_registry_client = HttpMcpRegistryClient(
+            base_url_provider=lambda: settings.mcp_registry_base_url,
+            timeout=settings.mcp_tool_timeout,
+        )
+    return _mcp_registry_client
 
 
 def get_get_thread_use_case() -> GetThreadUseCase:

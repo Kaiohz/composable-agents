@@ -29,3 +29,21 @@ class AgentRegistry(ABC):
     async def close(self) -> None:
         """Libere les ressources des agents crees."""
         ...
+
+    def degraded_capabilities(self, agent_name: str) -> list[dict]:  # noqa: ARG002 — default carries no state
+        """Return degraded capability information from the LATEST agent build.
+
+        REQ-040: when optional capability sources (external MCP servers) fail
+        during runner construction, the failure is surfaced as degraded
+        capability information rather than silently swallowed. Implementations
+        record the information of their most recent build of ``agent_name``;
+        the default implementation assumes no degraded capabilities.
+
+        Args:
+            agent_name: The agent whose latest build's degradation is requested.
+
+        Returns:
+            A list of JSON-safe ``{"name", "reason"}`` entries (empty when the
+            latest build had no degradation).
+        """
+        return []

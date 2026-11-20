@@ -128,9 +128,7 @@ class ChatAttachmentsService:
         """
         if not attachments:
             return None
-        validated = decode_and_validate_attachments(
-            [att.model_dump() for att in attachments], self._limits
-        )
+        validated = decode_and_validate_attachments([att.model_dump() for att in attachments], self._limits)
         thread = await self._threads.get(thread_id)
         config = await self._load_agent_config(thread.agent_name)
 
@@ -165,9 +163,7 @@ class ChatAttachmentsService:
                 }
             )
             # REQ-012: standard multimodal image block.
-            blocks.append(
-                {"type": "image", "base64": att.content_base64, "mime_type": att.content_type}
-            )
+            blocks.append({"type": "image", "base64": att.content_base64, "mime_type": att.content_type})
             logger.info(LogMessage.CHAT_ATTACHMENTS_IMAGE_STORED, att.id, store_path, thread_id)
 
         for att in documents:
@@ -271,6 +267,16 @@ class ChatAttachmentsService:
         return TemporaryDocumentRef(attachment_id=att.id, filename=att.filename, object_path=object_path)
 
     async def _load_agent_config(self, agent_name: str) -> AgentConfig:
-        """Load the agent YAML through the same chain as the agents routes."""
+        """Load the agent YAML through the same chain as the agents routes.
+
+        The virtual built-in Composable AI Assistant has NO stored YAML
+        (REQ-032): it resolves to its centrally managed read-only definition
+        so attaching a file to a conversation with it behaves like any other
+        agent instead of a confusing not-found.
+        """
+        from src.application.services.builtin_agent import builtin_agent_config, is_builtin_agent_name
+
+        if is_builtin_agent_name(agent_name):
+            return builtin_agent_config()
         yaml_content = await self._config_store.get(agent_name)
         return self._config_loader.load_from_string(yaml_content)

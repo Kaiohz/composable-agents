@@ -178,15 +178,42 @@ class ComposableAgentsSecurity:
         if self._auth_service is None:
             raise RuntimeError("ComposableAgentsSecurity.verify_credentials called before set_auth_service")
 
-        authorization = request.headers.get("authorization")
-        api_key = request.headers.get("x-api-key")
-
-        ctx = await self._auth_service.authenticate(
-            authorization=authorization,
-            api_key=api_key,
+        ctx = await self.authenticate_headers(
+            request.headers.get("authorization"),
+            request.headers.get("x-api-key"),
         )
         if ctx is None:
             raise AuthenticationError(ErrorMessage.AUTH_INVALID_CREDENTIALS)
+        return ctx
+
+    async def authenticate_headers(
+        self,
+        authorization: str | None,
+        api_key: str | None,
+    ) -> AuthContext | None:
+        """Authenticate raw header values and wire the RLS contextvars.
+
+        Shared by the REST dependency (:meth:`verify_credentials`) and the
+        ``/mcp`` ASGI auth guard: the same precedence (a presented invalid
+        bearer JWT fails rather than falling back to the API key), the same
+        :class:`AuthService`, and the same contextvar wiring, so an
+        authenticated MCP request establishes the EXACT user, raw credential
+        and authentication context used by REST (REQ-004).
+
+        Args:
+            authorization: Raw ``Authorization`` header value or ``None``.
+            api_key: Raw ``X-API-Key`` header value or ``None``.
+
+        Returns:
+            The authenticated :class:`AuthContext`, or ``None`` when no
+            credential validates.
+        """
+        if self._auth_service is None:
+            raise RuntimeError("ComposableAgentsSecurity.authenticate_headers called before set_auth_service")
+
+        ctx = await self._auth_service.authenticate(authorization=authorization, api_key=api_key)
+        if ctx is None:
+            return None
 
         # Wire the RLS contextvars for downstream SQLAlchemy event listeners.
         current_user_id.set(ctx.user_id)

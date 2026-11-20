@@ -31,6 +31,9 @@ class LogMessage(StrEnum):
     APP_TRACING_SHUTDOWN_FAILED = "Error shutting down tracing provider"
     APP_MIGRATIONS_RUNNING = "Running database migrations..."
     APP_MIGRATIONS_DONE = "Database migrations completed"
+    APP_SCHEDULER_START_FAILED = (
+        "Cron scheduler loop failed to start (non-fatal): the tick will not run until the next process start"
+    )
     DEPENDENCIES_INITIALIZED = "Dependencies initialized"
 
     # --- Dependency wiring / persistence init ---
@@ -401,3 +404,32 @@ class LogMessage(StrEnum):
         "SECRET_ENCRYPTION_KEY is empty — generated a throwaway in-memory Fernet key. "
         "Set SECRET_ENCRYPTION_KEY in production to persist encrypted API keys across restarts."
     )
+
+    # --- Composable MCP control plane (feat-composable-mcp) ---
+    MCP_SERVER_MOUNTED = "Composable MCP control plane mounted at /mcp (streamable HTTP)"
+    MCP_SESSION_MANAGER_RUNNING = "Composable MCP session manager running"
+    MCP_SESSION_MANAGER_STOPPED = "Composable MCP session manager stopped"
+    MCP_REGISTRY_CLIENT_CLOSED = "Trusted MCP-registry HTTP client closed"
+    MCP_REGISTRY_CLIENT_CLOSE_FAILED = "Error closing the trusted MCP-registry HTTP client"
+    MCP_SESSION_MANAGER_ALREADY_RAN = (
+        "Composable MCP session manager already ran once in this process; skipping re-entry "
+        "(repeat-lifespan context, e.g. unit tests) — REST/SSE surfaces unaffected"
+    )
+    MCP_REQUEST_DENIED = "MCP request denied (missing or invalid credentials)"
+    MCP_TOOL_EXECUTED = "MCP tool executed (user=%s tool=%s duration=%.3fs ok=%s)"
+    MCP_TOOL_FAILED = "MCP tool failed (user=%s tool=%s error=%s)"
+    MCP_TOOL_FAILURE_TYPE = "MCP tool failed with exception type: %s"
+    MCP_REGISTRY_FORWARDING = "Registry request forwarded (method=%s path=%s)"
+    MCP_REGISTRY_FORWARD_FAILED = "Registry request failed (status=%s)"
+    BUILTIN_AGENT_RESOLVING = "Resolving built-in assistant definition (user=%s)"
+    BUILTIN_AGENT_TOOLS_RESOLVED = "Built-in assistant tools resolved (user=%s tools=%d degraded=%d)"
+    BUILTIN_AGENT_OPTIONAL_TOOL_FAILED = (
+        "Built-in assistant optional MCP source '%s' failed (%s); the toolset degrades without it"
+    )
+    BUILTIN_TOOLNAME_COLLISION = (
+        "Tool name collision on '%s' for MCP server '%s' — deterministically namespaced to '%s'"
+    )
+    AGENT_ONE_SHOT_STARTED = "One-shot agent run started (agent=%s source=mcp chain=%s)"
+    AGENT_ONE_SHOT_COMPLETED = "One-shot agent run completed (thread=%s agent=%s status=%s duration=%.3fs)"
+    AGENT_ONE_SHOT_REJECTED = "One-shot agent run rejected (agent=%s chain=%s reason=%s)"
+    LOG_BUILTIN_AGENT_READONLY = "Built-in agent definition is read-only: %s"

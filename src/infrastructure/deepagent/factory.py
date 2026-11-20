@@ -1,7 +1,7 @@
 import asyncio
 import importlib
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
 from deepagents import create_deep_agent
@@ -715,6 +715,8 @@ async def create_agent_from_config(
     llm_credentials_resolver: Callable[[str], Awaitable[tuple[str, str] | None]] | None = None,
     prompt_resolver: PromptResolver | None = None,
     model_resolver: ModelResolver | None = None,
+    extra_tools: list | None = None,
+    middleware: Sequence[Any] = (),
 ):
     """Create a compiled Deep Agent from configuration.
 
@@ -763,7 +765,7 @@ async def create_agent_from_config(
     # per-agent store_backend setting.
     store = await _get_shared_store()
 
-    all_tools = await _resolve_agent_tools(config, mcp_tool_loader)
+    all_tools = await _resolve_agent_tools(config, mcp_tool_loader, extra_tools)
     system_prompt = await _resolve_system_prompt(config, prompt_resolver)
     skills_source, memory_paths = await _resolve_skills_and_memory(store, config)
 
@@ -775,6 +777,11 @@ async def create_agent_from_config(
         "checkpointer": checkpointer,
         "store": store,
     }
+
+    if middleware:
+        # Agent-facing middleware hooks (e.g. the built-in assistant's toolset
+        # guard) — passthrough to deepagents' create_deep_agent.
+        kwargs["middleware"] = list(middleware)
 
     if skills_source:
         kwargs["skills"] = [skills_source]
@@ -834,12 +841,17 @@ async def _resolve_system_prompt(
 async def _resolve_agent_tools(
     config: AgentConfig,
     mcp_tool_loader: McpToolLoader | None,
+    extra_tools: list | None = None,
 ) -> list | None:
-    """Resolve an agent's combined local + MCP tools list.
+    """Resolve an agent's combined local + MCP + injected tool list.
 
     Args:
         config: The agent configuration.
         mcp_tool_loader: Optional MCP tool loader for remote tools.
+        extra_tools: Optional pre-resolved tool objects injected by the agent
+            registry — the built-in assistant's dynamic toolset (REQ-036) and
+            custom agents' platform toolset (REQ-028) arrive through this
+            parameter instead of module paths.
 
     Returns:
         Combined tools list or ``None`` when the agent has no tools.
@@ -850,7 +862,8 @@ async def _resolve_agent_tools(
         logger.info(LogMessage.AGENT_MCP_TOOLS_LOADING, config.name, len(config.mcp_servers))
         mcp_tools = await _load_mcp_tools_resilient(mcp_tool_loader, config.mcp_servers, config.name)
         logger.info(LogMessage.AGENT_MCP_TOOLS_LOADED, len(mcp_tools), config.name)
-    all_tools = (local_tools or []) + mcp_tools if (local_tools or mcp_tools) else None
+    combined = (local_tools or []) + mcp_tools + (list(extra_tools) if extra_tools else [])
+    all_tools = combined if combined else None
     logger.info(LogMessage.AGENT_TOOLS_TOTAL, config.name, len(all_tools) if all_tools else 0)
     return all_tools
 

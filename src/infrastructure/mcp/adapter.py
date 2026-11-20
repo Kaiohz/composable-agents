@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from collections import deque
 from typing import Any, cast
 
 from langchain_core.tools import BaseTool, StructuredTool, ToolException
@@ -26,7 +27,12 @@ class LangchainMcpToolLoader(McpToolLoader):
     """Adapter MCP utilisant langchain-mcp-adapters pour charger des outils."""
 
     def __init__(self, tool_timeout: float = 60.0) -> None:
-        self._clients: list[MultiServerMCPClient] = []
+        # Bounded reference list for the lifecycle sweep (close()). Since
+        # langchain-mcp-adapters >= 0.3 the per-call MultiServerMCPClient is
+        # STATELESS (sessions are created per call and close() is a no-op), so
+        # the accumulation is diagnostic only; the maxlen keeps a worker that
+        # rebuilds runners every turn (built-in assistant) at a flat memory.
+        self._clients: deque[MultiServerMCPClient] = deque(maxlen=64)
         # Per-call timeout for each MCP tool invocation. A hung tool is converted
         # to a ToolException -> ToolMessage(error) so the agent can recover
         # (retry/skip) instead of stalling or being killed.

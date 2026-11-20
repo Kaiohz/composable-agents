@@ -86,7 +86,9 @@ class TestPersistentAgentRegistry:
         result = await registry.list_agents()
 
         # Assert
-        assert result == ["agent-a", "agent-b"]
+        # feat-composable-mcp REQ-031: the virtual built-in assistant is
+        # overlaid FIRST in every user's catalog (never a stored row).
+        assert result == ["composable-ai-assistant", "agent-a", "agent-b"]
         mock_agent_config_repository.list_all.assert_awaited_once()
 
     @patch("src.infrastructure.persistent_registry.adapter.create_agent_from_config", new_callable=AsyncMock)

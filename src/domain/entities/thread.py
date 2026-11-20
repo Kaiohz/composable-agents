@@ -5,9 +5,10 @@ for a conversation. The legacy ``messages`` field is now a backward-compatible
 computed projection rebuilt from HUMAN_MESSAGE + AI_MESSAGE trace events.
 
 Each thread also carries an immutable ``source`` (spec §5.6 SRC-001): ``chat``
-for conversation-created threads and ``cron`` for scheduled/manual cron
-executions. The source is set at insert time by the trusted creation path,
-backfilled to ``chat`` for pre-existing rows, and never mutated afterwards.
+for conversation-created threads, ``cron`` for scheduled/manual cron
+executions and ``mcp`` for one-shot executions through the MCP control plane.
+The source is set at insert time by the trusted creation path, backfilled to
+``chat`` for pre-existing rows, and never mutated afterwards.
 """
 
 import uuid
@@ -21,10 +22,11 @@ from src.domain.entities.trace_event import TraceEvent, TraceEventType
 
 
 class ThreadSource(StrEnum):
-    """Immutable origin of a thread (SRC-001): chat or cron."""
+    """Immutable origin of a thread (SRC-001): chat, cron or mcp."""
 
     CHAT = "chat"
     CRON = "cron"
+    MCP = "mcp"
 
 
 class Thread(BaseModel):

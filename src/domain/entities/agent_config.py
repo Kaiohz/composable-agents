@@ -82,6 +82,12 @@ class AgentConfig(BaseModel):
     mcp_servers: list[McpServerConfig] = Field(default_factory=list)
     response_format: dict[str, Any] | None = None
     debug: bool = False
+    # Overlay-computed marker (REQ-033): ``True`` only when this configuration
+    # is the virtual built-in Composable AI Assistant resolved by the built-in
+    # overlay. Additive-only: never authored in agent YAML and never persisted
+    # (no ``is_builtin`` database column — that column was removed by
+    # migration 003 and must NOT be reintroduced).
+    is_builtin: bool = False
 
     @model_validator(mode="after")
     def check_prompt_exclusivity(self) -> Self:

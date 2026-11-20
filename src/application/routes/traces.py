@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, Query
 
 from src.application.responses.trace_usage import TopRunsResponse, TraceUsageResponse, UsageSeries
 from src.application.responses.traces import TraceListResponse
+from src.application.services.trace_series import usage_series
 from src.application.use_cases.list_traces import DEFAULT_LIMIT, MAX_LIMIT, ListTracesUseCase
 from src.application.use_cases.trace_usage import (
     DEFAULT_TOP_LIMIT,
@@ -40,11 +41,11 @@ router = APIRouter(prefix="/api/v1/traces", tags=["traces"])
 def _utc_bound(value: datetime | None) -> datetime | None:
     """Normalize a window bound to UTC (the DB stores ``timestamptz``).
 
-    FastAPI parses the ``from``/``to`` ISO parameters into ``datetime``; a
+    Shared boundary helper (REQ-007): the MCP usage tools apply the exact
+    same normalization through ``application/services/route_validation``; a
     naive value (no offset) bound against a ``timestamptz`` column would be
     interpreted in the DATABASE session timezone — silently shifting the
-    window by the server's UTC offset. Naive bounds are therefore treated as
-    UTC at the boundary (ISO datetimes without a ``Z``/offset mean UTC).
+    window. Naive bounds are therefore treated as UTC at the boundary.
 
     Args:
         value: The parsed bound (or ``None``).
@@ -84,23 +85,8 @@ async def list_traces(
 
 
 def _usage_series(summary: LlmUsageSummary, group_by: Literal["agent", "model"] | None) -> UsageSeries:
-    """Build the ``series`` DTO for the requested group-by narrowing.
-
-    Args:
-        summary: The aggregated usage summary (both breakdowns populated).
-        group_by: ``agent`` / ``model`` narrowing, or ``None`` for both.
-
-    Returns:
-        A :class:`UsageSeries` carrying only the requested breakdown; the
-        unrequested one stays ``None`` (dropped from the serialized payload).
-    """
-    match group_by:
-        case "agent":
-            return UsageSeries(by_agent=summary.series_by_agent, by_model=None)
-        case "model":
-            return UsageSeries(by_agent=None, by_model=summary.series_by_model)
-        case _:
-            return UsageSeries(by_agent=summary.series_by_agent, by_model=summary.series_by_model)
+    """Build the ``series`` DTO (delegates to the shared service projection)."""
+    return usage_series(summary, group_by)
 
 
 @router.get("/usage", response_model_exclude_none=True)

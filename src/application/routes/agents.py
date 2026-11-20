@@ -1,9 +1,16 @@
 import logging
-import re
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, UploadFile, status
 
+from src.application.services.builtin_agent import (
+    builtin_agent_config,
+    builtin_agent_metadata,
+    ensure_custom_agent_name,
+    ensure_not_builtin,
+    is_builtin_agent_name,
+)
+from src.application.services.route_validation import read_yaml_bytes, validate_agent_name
 from src.application.use_cases.create_agent_config import CreateAgentConfigUseCase
 from src.application.use_cases.delete_agent_config import DeleteAgentConfigUseCase
 from src.application.use_cases.get_agent_config import GetAgentConfigUseCase
@@ -18,43 +25,42 @@ from src.dependencies import (
 )
 from src.domain.entities.agent_config import AgentConfig
 from src.domain.entities.agent_config_metadata import AgentConfigMetadata
-from src.domain.errors.config import ConfigError
-from src.domain.errors.messages import ErrorMessage
 from src.domain.logging.messages import LogMessage
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/agents", tags=["agents"])
 
-AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,98}[a-zA-Z0-9]$")
-MAX_UPLOAD_SIZE = 1024 * 1024  # 1 MB
 
+async def _reject_builtin_update(agent_name: str) -> None:
+    """Route-level guard resolving BEFORE the multipart body (REQ-034).
 
-def _validate_agent_name(name: str) -> None:
-    if not AGENT_NAME_PATTERN.match(name):
-        raise ConfigError(
-            ErrorMessage.INVALID_AGENT_NAME.format(name=name),
-        )
+    The built-in assistant is read-only: refusing the request in a
+    dependency (instead of the handler) keeps the 403 semantics intact even
+    when the caller sends no YAML body at all.
+    """
+    ensure_not_builtin(agent_name)
 
 
 async def _read_yaml_upload(file: UploadFile) -> str:
+    """Read, size-check and UTF-8-decode an uploaded YAML (shared with MCP)."""
     data = await file.read()
-    if len(data) > MAX_UPLOAD_SIZE:
-        raise ConfigError(ErrorMessage.FILE_TOO_LARGE.format(max_size=MAX_UPLOAD_SIZE))
-    try:
-        return data.decode("utf-8")
-    except UnicodeDecodeError as e:
-        raise ConfigError(ErrorMessage.FILE_NOT_UTF8) from e
+    return read_yaml_bytes(data)
 
 
 @router.get("")
 async def list_agents(
     use_case: Annotated[ListAgentConfigsUseCase, Depends(get_list_agent_configs_use_case)],
 ) -> list[AgentConfigMetadata]:
-    """List all agent configuration metadata."""
+    """List agent configuration metadata — the built-in assistant first.
+
+    REQ-031/033/045: the virtual built-in Composable AI Assistant is overlaid
+    before the custom agents with ``is_builtin=True``; custom agents carry
+    ``is_builtin=False`` computed by the overlay, never a stored column.
+    """
     agents = await use_case.execute()
-    logger.info(LogMessage.AGENT_CONFIG_LISTED, len(agents))
-    return agents
+    logger.info(LogMessage.AGENT_CONFIG_LISTED, len(agents) + 1)
+    return [builtin_agent_metadata(), *agents]
 
 
 @router.get("/{agent_name}")
@@ -62,9 +68,16 @@ async def get_agent(
     agent_name: str,
     use_case: Annotated[GetAgentConfigUseCase, Depends(get_get_agent_config_use_case)],
 ) -> AgentConfig:
-    """Retrieve a single agent configuration by name."""
-    _validate_agent_name(agent_name)
+    """Retrieve a single agent configuration by name.
+
+    The built-in assistant resolves to its virtual read-only definition
+    (REQ-031/034) with ``is_builtin=True``; custom agents flow through the
+    existing use case unchanged.
+    """
+    validate_agent_name(agent_name)
     logger.info(LogMessage.AGENT_CONFIG_GET, agent_name)
+    if is_builtin_agent_name(agent_name):
+        return builtin_agent_config()
     return await use_case.execute(name=agent_name)
 
 
@@ -74,8 +87,14 @@ async def create_agent(
     agent_name: Annotated[str, Form(...)],
     file: Annotated[UploadFile, File(...)],
 ) -> AgentConfig:
-    """Create a new agent configuration from an uploaded YAML file."""
-    _validate_agent_name(agent_name)
+    """Create a new agent configuration from an uploaded YAML file.
+
+    Raises:
+        AgentConfigAlreadyExistsError: An agent with this name already exists,
+            INCLUDING the reserved built-in assistant name (REQ-034).
+    """
+    validate_agent_name(agent_name)
+    ensure_custom_agent_name(agent_name)
     yaml_content = await _read_yaml_upload(file)
     logger.info(LogMessage.AGENT_CONFIG_CREATING, agent_name)
     result = await use_case.execute(name=agent_name, yaml_content=yaml_content)
@@ -83,14 +102,24 @@ async def create_agent(
     return result
 
 
-@router.put("/{agent_name}")
+@router.put("/{agent_name}", dependencies=[Depends(_reject_builtin_update)])
 async def update_agent(
     agent_name: str,
     use_case: Annotated[UpdateAgentConfigUseCase, Depends(get_update_agent_config_use_case)],
     file: Annotated[UploadFile, File(...)],
 ) -> AgentConfig:
-    """Update an existing agent configuration from an uploaded YAML file."""
-    _validate_agent_name(agent_name)
+    """Update an existing agent configuration from an uploaded YAML file.
+
+    The built-in assistant's definition is read-only (REQ-034): the
+    route-level guard resolves before the multipart body and returns the
+    read-only built-in error (403) even without a YAML payload.
+
+    Raises:
+        BuiltinAgentError: The built-in assistant's definition is read-only
+            (REQ-034).
+    """
+    validate_agent_name(agent_name)
+    ensure_not_builtin(agent_name)
     yaml_content = await _read_yaml_upload(file)
     logger.info(LogMessage.AGENT_CONFIG_UPDATING, agent_name)
     result = await use_case.execute(name=agent_name, yaml_content=yaml_content)
@@ -103,8 +132,14 @@ async def delete_agent(
     agent_name: str,
     use_case: Annotated[DeleteAgentConfigUseCase, Depends(get_delete_agent_config_use_case)],
 ) -> None:
-    """Delete an agent configuration."""
-    _validate_agent_name(agent_name)
+    """Delete an agent configuration.
+
+    Raises:
+        BuiltinAgentError: The built-in assistant's definition is read-only
+            (REQ-034).
+    """
+    validate_agent_name(agent_name)
+    ensure_not_builtin(agent_name)
     logger.info(LogMessage.AGENT_CONFIG_DELETING, agent_name)
     await use_case.execute(name=agent_name)
     logger.info(LogMessage.AGENT_CONFIG_DELETED, agent_name)
