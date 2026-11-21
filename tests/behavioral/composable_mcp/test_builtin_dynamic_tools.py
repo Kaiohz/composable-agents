@@ -1,10 +1,11 @@
 """Behavioral tests — built-in assistant dynamic capability resolution
-(REQ-036..REQ-041).
+(REQ-036..REQ-041 + REQ-BUILTIN-003 selective mounting).
 
 The assistant's toolset is resolved fresh per turn in the RUNNING user's
-context: built-in MCP mounts, every MCP server that user registered (real
-local streamable-HTTP MCP servers here), platform tools and ``create_pdf``
-— while settings/API-key/reveal and self-invocation stay excluded.
+context: built-in MCP mounts, ONLY the MCP servers that user EXPLICITLY
+SELECTED via the ``mcp_refs`` customization (real local streamable-HTTP MCP
+servers here), platform tools and ``create_pdf`` — while
+settings/API-key/reveal and self-invocation stay excluded.
 
 The LLM boundary is scripted (``stub_llm.script``) to make the assistant
 actually CALL a specific tool, so resolution is observed through real
@@ -24,6 +25,31 @@ from tests.behavioral.conftest import configure_llm_credentials
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 BUILTIN_NAME = "composable-ai-assistant"
+
+
+async def _select_builtin_refs(client, users, refs: list[str]) -> None:
+    """Personalize the built-in with an explicit MCP selection (REQ-BUILTIN-002).
+
+    Selected mounting replaces the legacy auto-mounted-user-registry behavior:
+    a registered server is reachable only when its identity is selected.
+    """
+    lines = [
+        f"name: {BUILTIN_NAME}",
+        "model: personalized-model",
+        'description: "Personalized built-in assistant."',
+        'system_prompt: "Personalized built-in assistant."',
+        "tools: []",
+        "debug: false",
+    ]
+    if refs is not None:
+        lines.append("mcp_refs:")
+        lines.extend(f"  - {ref}" for ref in refs)
+    updated = await client.put(
+        f"/api/v1/agents/{BUILTIN_NAME}",
+        headers=users["a"]["headers"],
+        files={"file": ("builtin.yaml", "\n".join(lines).encode(), "text/yaml")},
+    )
+    assert updated.status_code == 200, updated.text
 
 
 async def _run_assistant(mcp_base_url, users, message: str = "do work") -> dict:
@@ -51,12 +77,13 @@ class TestDynamicResolution:
     async def test_user_registered_mcp_server_tools_are_callable(
         self, mcp_base_url, client, users, stub_llm, stub_registry
     ):
-        """REQ-036: every supported MCP server registered by the current user is
-        available to the assistant in that user's context."""
+        """REQ-036 + REQ-BUILTIN-003: an explicitly SELECTED registered MCP server
+        is available to the assistant in that user's context."""
         await configure_llm_credentials(client, users["a"]["headers"])
         server = StubMcpServer("alpha-tools", tool_name="ping", tool_result="pong-alpha").start()
         try:
             await _register_user_server(mcp_base_url, users, stub_registry, "alpha-tools", server.url)
+            await _select_builtin_refs(client, users, ["alpha-tools"])
             stub_llm.script(
                 assistant_tool_call("ping", {}),
                 assistant_text("used the registered server"),
@@ -152,6 +179,7 @@ class TestDegradationIsolation:
             await _register_user_server(mcp_base_url, users, stub_registry, "healthy", healthy.url)
             # "dead" points at a closed port — resolution of THIS server fails.
             await _register_user_server(mcp_base_url, users, stub_registry, "dead", "http://127.0.0.1:59996/mcp")
+            await _select_builtin_refs(client, users, ["healthy", "dead"])
 
             stub_llm.script(
                 assistant_tool_call("composable_skills_list", {}),
@@ -181,6 +209,7 @@ class TestCollisionSafety:
         try:
             await _register_user_server(mcp_base_url, users, stub_registry, "first", first.url)
             await _register_user_server(mcp_base_url, users, stub_registry, "second", second.url)
+            await _select_builtin_refs(client, users, ["first", "second"])
 
             stub_llm.script(assistant_tool_call("ping", {}), assistant_text("done"))
             run_one = await _run_assistant(mcp_base_url, users)
@@ -214,6 +243,7 @@ class TestRegistryFreshness:
         server = StubMcpServer("ephemeral", tool_name="ping", tool_result="pong-ephemeral").start()
         try:
             await _register_user_server(mcp_base_url, users, stub_registry, "ephemeral", server.url)
+            await _select_builtin_refs(client, users, ["ephemeral"])
 
             stub_llm.script(assistant_tool_call("ping", {}), assistant_text("used ephemeral"))
             before = await _run_assistant(mcp_base_url, users)

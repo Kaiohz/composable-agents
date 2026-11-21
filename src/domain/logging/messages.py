@@ -207,6 +207,29 @@ class LogMessage(StrEnum):
     TOOL_FORMAT_INVALID = "Invalid tool format '%s'"
     TOOL_MODULE_NOT_FOUND = "Module not found for tool '%s'"
     TOOL_ATTRIBUTE_NOT_FOUND = "Attribute '%s' not found in '%s'"
+
+    # --- MCP reference resolution (resource-only agents, REQ-MCP-003) ---
+    AGENT_MCP_REFS_RESOLVING = "Resolving MCP registry references for agent '%s' (%d refs)"
+    AGENT_MCP_REFS_RESOLVED = "Resolved %d MCP registry configs (%d refs requested)"
+
+    # --- Builtin selective MCP mounting (REQ-BUILTIN-003) ---
+    BUILTIN_MCP_SELECTION_APPLIED = (
+        "Built-in assistant mounts %d selected user MCP server(s) (user=%s)"
+    )
+
+    # --- Agent import (create-time YAML materialization, spec agent-resource-import) ---
+    AGENT_IMPORT_PREVALIDATION_FAILED = "Agent import prevalidation failed (agent=%s): %s"
+    AGENT_IMPORT_RESOURCE_CREATED = "Agent import materialized %s '%s' (agent=%s)"
+    AGENT_IMPORT_COMPLETED = "Agent import completed (agent=%s, resources=%d)"
+    AGENT_IMPORT_COMPENSATION_STARTED = "Agent import compensation started (agent=%s)"
+    AGENT_IMPORT_COMPENSATED = "Agent import compensated %s '%s' (agent=%s)"
+    AGENT_IMPORT_COMPENSATION_FAILED = "Agent import compensation failed for %s '%s' (agent=%s): %s"
+    AGENT_IMPORT_UPDATE_REFUSED = "Agent update refused (agent=%s): %s"
+    AGENT_IMPORT_MCP_CREATED = "Agent import registered MCP server '%s' (agent=%s)"
+    AGENT_IMPORT_MCP_VALIDATED = "Agent import validated MCP candidate '%s' with the registry"
+
+    # --- Cron unattended-safety scan ---
+    CRON_UNATTENDED_SCAN = "Unattended-safety scan for agent '%s': %d placeholder source(s)"
     SUBAGENT_PROMPT_LOAD_FAILED = (
         "Could not load system prompt for sub-agent '%s' from Phoenix, using YAML instructions if available."
     )

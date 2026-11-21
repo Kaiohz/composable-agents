@@ -28,6 +28,7 @@ import re
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from src.application.services.cron_unattended import find_user_placeholder_sources
 from src.domain.entities.cron import Cron
 from src.domain.entities.cron_run import CronRun, CronRunStatus, CronTrigger
 from src.domain.entities.thread import ThreadSource
@@ -37,6 +38,7 @@ from src.domain.logging.messages import LogMessage
 from src.domain.ports.agent_config_store import AgentConfigStore
 from src.domain.ports.agent_registry import AgentRegistry
 from src.domain.ports.cron_repository import CronRepository, CronRunRepository
+from src.domain.ports.mcp_registry import McpRegistryClient
 from src.domain.ports.thread_repository import ThreadRepository
 from src.domain.ports.trace_event_repository import TraceEventRepository
 from src.domain.services.cron_schedule import latest_due_occurrence, next_occurrence
@@ -86,6 +88,7 @@ class ExecuteCronRunUseCase:
         trace_repository: TraceEventRepository,
         agent_registry: AgentRegistry,
         config_store: AgentConfigStore,
+        mcp_registry: McpRegistryClient | None = None,
     ) -> None:
         self._cron_repository = cron_repository
         self._run_repository = run_repository
@@ -93,6 +96,7 @@ class ExecuteCronRunUseCase:
         self._trace_repository = trace_repository
         self._agent_registry = agent_registry
         self._config_store = config_store
+        self._mcp_registry = mcp_registry
 
     async def execute(self, cron: Cron, run_id: str, trigger: CronTrigger) -> None:
         """Run one accepted execution attempt to a terminal state.
@@ -113,9 +117,12 @@ class ExecuteCronRunUseCase:
                 # agent edited to require ${USER_JWT}/${USER_API_KEY} fails
                 # without borrowing interactive credentials (§9).
                 yaml_text = await self._config_store.get(cron.agent_name)
-                if re.search(r"\$\{(?:USER_JWT|USER_API_KEY)\}", yaml_text):
+                sources = await find_user_placeholder_sources(yaml_text, self._mcp_registry, cron.agent_name)
+                if sources:
                     raise RuntimeError(
-                        ErrorMessage.CRON_AGENT_UNATTENDED_PLACEHOLDER.format(agent_name=cron.agent_name)
+                        ErrorMessage.CRON_AGENT_UNATTENDED_PLACEHOLDER.format(
+                            agent_name=f"{cron.agent_name} ({', '.join(sources)})"
+                        )
                     )
                 runner = await self._agent_registry.get_runner(cron.agent_name)
                 turn_id = str(uuid.uuid4())

@@ -15,6 +15,7 @@ import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 
 from tests.behavioral.conftest import (
@@ -260,27 +261,49 @@ class TestFailurePolicy:
         runs_after_second = await _scheduled_runs(client, users["a"]["headers"], cron_id)
         assert len(runs_after_second) == 1, f"Failed occurrence must not be retried: {runs_after_second}"
 
-    async def test_agent_gaining_user_placeholder_fails_run_explicitly(self, stack, client, users, stub_llm):
+    async def test_agent_gaining_user_placeholder_fails_run_explicitly(self, stack, client, users, stub_llm, stub_registry):
         """§10.13 / §9: an agent edited LATER to require ${USER_JWT} must fail
         its next accepted run explicitly — never borrowing the interactive
-        user's JWT/API key."""
+        user's JWT/API key. Under the resource-only regime the edit registers
+        the credential-hungry MCP server in the registry and selects it via
+        ``mcp_refs``; the unattended-safety scan resolves the selection through
+        the trusted path and fails the run BEFORE any LLM call."""
+        async with httpx.AsyncClient() as http:
+            registered = await http.post(
+                f"{stub_registry.base_url}/api/v1/mcp/servers",
+                headers=users["a"]["headers"],
+                json={
+                    "name": "cred-server",
+                    "transport": "http",
+                    "url": "http://127.0.0.1:59998/mcp",
+                    "env": {"CREDENTIAL": "${USER_JWT}"},
+                },
+            )
+        assert registered.status_code == 201, registered.text
+
         cron = await _scheduled_cron(client, users)
         cron_id = cron["id"]
         agent_name = cron["agent_name"]
 
-        # Later edit: the agent now requires the interactive user's JWT.
+        # Later edit: the agent now requires the interactive user's JWT via
+        # the selected registry server (connection data stays in the registry).
+        # The resource-only update boundary (REQ-LEGACY-003) means model and
+        # prompt must keep their registered references.
+        current = await client.get(f"/api/v1/agents/{agent_name}", headers=users["a"]["headers"])
+        assert current.status_code == 200, current.text
+        model_id = current.json()["model_ref"]
+        prompt_id = current.json()["prompt_ref"]["id"]
         yaml_with_placeholder = (
             f"name: {agent_name}\n"
-            "model: stub-model\n"
-            'system_prompt: "Now credential-hungry."\n'
+            "description: \"Now credential-hungry.\"\n"
             "tools: []\n"
             "debug: false\n"
-            "mcp_servers:\n"
-            "  - name: cred-server\n"
-            "    transport: http\n"
-            "    url: http://127.0.0.1:59998/mcp\n"
-            "    env:\n"
-            '      CREDENTIAL: "${USER_JWT}"\n'
+            "mcp_refs:\n"
+            "  - cred-server\n"
+            "prompt_ref:\n"
+            f"  id: {prompt_id}\n"
+            "model_ref:\n"
+            f"  {model_id}\n"
         )
         resp = await client.put(
             f"/api/v1/agents/{agent_name}",

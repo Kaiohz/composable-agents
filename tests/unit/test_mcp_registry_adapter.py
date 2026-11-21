@@ -132,7 +132,7 @@ class TestGetExecutionConfig:
 
     async def test_failing_status_only_surfaces_the_code(self):
         def handler(request: httpx.Request) -> httpx.Response:  # noqa: ARG001 — transport contract
-            return httpx.Response(502, json={"detail": "registry stack trace with secrets"})
+            return httpx.Response(400, json={"detail": "registry stack trace with secrets"})
 
         client = _client_for(handler)
         try:
@@ -140,7 +140,95 @@ class TestGetExecutionConfig:
                 await client.get_execution_config("alpha")
         finally:
             await client.aclose()
-        assert str(exc_info.value.detail) == ErrorMessage.MCP_REGISTRY_REQUEST_FAILED.format(status=502)
+        assert str(exc_info.value.detail) == ErrorMessage.MCP_REGISTRY_REQUEST_FAILED.format(status=400)
+
+    async def test_registry_5xx_answer_is_safe_and_retryable(self):
+        """REQ-TX-003: a registry 502/503/504 IS an availability signal."""
+        def handler(request: httpx.Request) -> httpx.Response:  # noqa: ARG001 — transport contract
+            return httpx.Response(503, json={"detail": "registry unavailable body"})
+
+        client = _client_for(handler)
+        try:
+            with pytest.raises(McpRegistryUnavailableError) as exc_info:
+                await client.get_execution_config("alpha")
+        finally:
+            await client.aclose()
+        assert str(exc_info.value.detail) == ErrorMessage.MCP_REGISTRY_UNAVAILABLE
+
+    async def test_registration_conflict_surfaces_as_safe_conflict(self):
+        """REQ-TX-002: a 409 from a creation surfaces as a conflict error whose
+        detail names the candidate server, never the registry body."""
+        from src.domain.entities.registered_mcp_server import McpServerWrite
+        from src.domain.errors.mcp import McpRegistryConflictError
+
+        def handler(request: httpx.Request) -> httpx.Response:  # noqa: ARG001 — transport contract
+            return httpx.Response(409, json={"detail": "body must never be echoed"})
+
+        client = _client_for(handler)
+        try:
+            with pytest.raises(McpRegistryConflictError) as exc_info:
+                await client.create_server(
+                    McpServerWrite(name="taken", transport="http", url="http://x/mcp")
+                )
+        finally:
+            await client.aclose()
+        assert "already registered" in str(exc_info.value.detail)
+        assert "body must never be echoed" not in str(exc_info.value.detail)
+
+
+class TestValidateServer:
+    async def test_real_registry_payload_parses_as_a_validated_candidate(self):
+        """BUG-001: the deployed mcp-raganything registry answers
+        `McpServerValidateResponse{tool_count}` (200) for a VALIDATED
+        candidate — it carries neither `name` nor `valid`; the adapter must
+        parse it (never raise a raw ValidationError) and treat it as valid."""
+        from src.domain.entities.registered_mcp_server import McpServerWrite
+
+        client = _client_for(_respond({"tool_count": 1}))
+        try:
+            report = await client.validate_server(McpServerWrite(name="s", transport="http", url="http://x/mcp"))
+        finally:
+            await client.aclose()
+        assert report.valid is True, "a 200 answer is a validated candidate"
+        assert report.tool_count == 1
+
+    async def test_full_report_payload_still_parses(self):
+        """Fuller deployments may answer the whole report shape: the adapter
+        still surfaces an EXPLICIT invalid verdict."""
+        from src.domain.entities.registered_mcp_server import McpServerWrite
+
+        client = _client_for(_respond({"name": "s", "valid": False, "tool_count": 0, "errors": ["bad url"]}))
+        try:
+            report = await client.validate_server(McpServerWrite(name="s", transport="http", url="http://x/mcp"))
+        finally:
+            await client.aclose()
+        assert report.valid is False
+        assert report.errors == ["bad url"]
+
+    async def test_payload_drift_is_a_controlled_error_never_a_raw_500(self):
+        """A registry contract drift (unparseable answer) surfaces as a
+        controlled McpRegistryRequestError — never as an escaping pydantic
+        ValidationError (which would reach the client as a 500)."""
+        from src.domain.entities.registered_mcp_server import McpServerWrite
+        from src.domain.errors.mcp import McpRegistryRequestError
+
+        client = _client_for(_respond({"tool_count": "not-an-int"}))
+        try:
+            with pytest.raises(McpRegistryRequestError):
+                await client.validate_server(McpServerWrite(name="s", transport="http", url="http://x/mcp"))
+        finally:
+            await client.aclose()
+
+    async def test_non_dict_payload_is_an_unusable_answer(self):
+        from src.domain.entities.registered_mcp_server import McpServerWrite
+        from src.domain.errors.mcp import McpRegistryRequestError
+
+        client = _client_for(_respond(["not", "a", "dict"]))
+        try:
+            with pytest.raises(McpRegistryRequestError):
+                await client.validate_server(McpServerWrite(name="s", transport="http", url="http://x/mcp"))
+        finally:
+            await client.aclose()
 
     async def test_uses_the_originating_api_key_credential(self):
         """REQ-025: the ORIGINATING credential header rides every registry call."""
@@ -234,9 +322,7 @@ class TestProjectionHelpers:
         malformed source as degraded capability info (REQ-040) instead of
         booting a tool with an unusable connection.
         """
-        import pytest as _pytest
-
-        with _pytest.raises(Exception):  # noqa: B017,BLE001 — any validation failure isolates the source
+        with pytest.raises(ValueError):
             _to_execution_config({}, "malformed")
 
     def test_non_string_scalar_values_are_coerced(self):
@@ -245,3 +331,19 @@ class TestProjectionHelpers:
         )
         assert config.headers == {"X-Count": "3"}
         assert config.env == {"RETRIES": "5"}
+
+    async def test_non_json_body_is_a_controlled_error_never_a_raw_500(self):
+        """A non-JSON registry answer is the same contract-drift class as an
+        unparseable payload: controlled McpRegistryRequestError (status-only
+        detail), never an escaping raw parse error."""
+        from src.domain.errors.mcp import McpRegistryRequestError
+
+        def handler(request: httpx.Request) -> httpx.Response:  # noqa: ARG001 — transport contract
+            return httpx.Response(200, text="<html>registry hiccup</html>")
+
+        client = _client_for(handler)
+        try:
+            with pytest.raises(McpRegistryRequestError):
+                await client.list_servers()
+        finally:
+            await client.aclose()

@@ -9,9 +9,9 @@ operations; disabled crons carry a ``None`` frontier.
 """
 
 import logging
-import re
 from datetime import UTC, datetime
 
+from src.application.services.cron_unattended import find_user_placeholder_sources
 from src.domain.entities.cron import Cron
 from src.domain.errors.cron import CronValidationError
 from src.domain.errors.messages import ErrorMessage
@@ -19,6 +19,7 @@ from src.domain.logging.messages import LogMessage
 from src.domain.ports.agent_config_repository import AgentConfigRepository
 from src.domain.ports.agent_config_store import AgentConfigStore
 from src.domain.ports.cron_repository import CronRepository
+from src.domain.ports.mcp_registry import McpRegistryClient
 from src.domain.services.cron_schedule import (
     next_occurrence,
     validate_expression,
@@ -26,11 +27,6 @@ from src.domain.services.cron_schedule import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Unattended-run rejection: the agent resolution must never borrow an
-# interactive user's JWT/API key (CRN-002, §9).
-_USER_PLACEHOLDER_PATTERN = re.compile(r"\$\{(?:USER_JWT|USER_API_KEY)\}")
-
 
 def compute_next_run(cron_expression: str, timezone: str, enabled: bool, now: datetime) -> datetime | None:
     """Frontier for a definition state: ``None`` when disabled, else the next occurrence."""
@@ -43,13 +39,20 @@ async def assert_agent_unattended_safe(
     agent_name: str,
     agent_config_repository: AgentConfigRepository,
     config_store: AgentConfigStore,
+    mcp_registry: McpRegistryClient | None = None,
 ) -> str:
     """Validate that the agent exists, is owned and runs unattended (CRN-002).
+
+    The scan covers BOTH the stored YAML (legacy inline values) and the
+    agent's ``mcp_refs`` selection resolved through the trusted registry
+    execution-config path (resource-only agents keep their MCP selection in
+    the registry).
 
     Args:
         agent_name: Exact agent name reference.
         agent_config_repository: Metadata repository (ownership via context).
         config_store: YAML store — scanned for user-credential placeholders.
+        mcp_registry: Trusted registry client (resolves ``mcp_refs``).
 
     Returns:
         The raw agent YAML text (reused by callers when handy).
@@ -66,9 +69,12 @@ async def assert_agent_unattended_safe(
         raise CronValidationError(ErrorMessage.CRON_AGENT_NAME_REQUIRED)
     await agent_config_repository.get(agent_name)
     yaml_text = await config_store.get(agent_name)
-    if _USER_PLACEHOLDER_PATTERN.search(yaml_text):
+    sources = await find_user_placeholder_sources(yaml_text, mcp_registry, agent_name)
+    if sources:
         raise CronValidationError(
-            ErrorMessage.CRON_AGENT_UNATTENDED_PLACEHOLDER.format(agent_name=agent_name)
+            ErrorMessage.CRON_AGENT_UNATTENDED_PLACEHOLDER.format(
+                agent_name=f"{agent_name} ({', '.join(sources)})"
+            )
         )
     return yaml_text
 
@@ -81,10 +87,12 @@ class CreateCronUseCase:
         cron_repository: CronRepository,
         agent_config_repository: AgentConfigRepository,
         config_store: AgentConfigStore,
+        mcp_registry: McpRegistryClient | None = None,
     ) -> None:
         self._cron_repository = cron_repository
         self._agent_config_repository = agent_config_repository
         self._config_store = config_store
+        self._mcp_registry = mcp_registry
 
     async def execute(
         self,
@@ -104,7 +112,9 @@ class CreateCronUseCase:
         """
         validate_expression(cron_expression)
         validate_timezone(timezone)
-        await assert_agent_unattended_safe(agent_name, self._agent_config_repository, self._config_store)
+        await assert_agent_unattended_safe(
+            agent_name, self._agent_config_repository, self._config_store, self._mcp_registry
+        )
 
         now = datetime.now(UTC)
         cron = Cron(
@@ -148,10 +158,12 @@ class UpdateCronUseCase:
         cron_repository: CronRepository,
         agent_config_repository: AgentConfigRepository,
         config_store: AgentConfigStore,
+        mcp_registry: McpRegistryClient | None = None,
     ) -> None:
         self._cron_repository = cron_repository
         self._agent_config_repository = agent_config_repository
         self._config_store = config_store
+        self._mcp_registry = mcp_registry
 
     async def execute(self, cron_id: str, changes: dict) -> Cron:
         """Apply provided fields; revalidate what changed.
@@ -186,7 +198,7 @@ class UpdateCronUseCase:
             validate_timezone(merged["timezone"])
         if "agent_name" in changes:
             await assert_agent_unattended_safe(
-                merged["agent_name"], self._agent_config_repository, self._config_store
+                merged["agent_name"], self._agent_config_repository, self._config_store, self._mcp_registry
             )
 
         if not schedule_changed:

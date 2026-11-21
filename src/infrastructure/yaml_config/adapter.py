@@ -8,6 +8,7 @@ from src.domain.errors.config import ConfigError, ConfigNotFoundError, ConfigVal
 from src.domain.errors.messages import ErrorMessage
 from src.domain.logging.messages import LogMessage
 from src.domain.ports.agent_config_loader import AgentConfigLoader
+from src.domain.services.agent_import_plan import DEPRECATED_AGENT_FIELDS
 
 logger = logging.getLogger(__name__)
 
@@ -16,10 +17,12 @@ class YamlAgentConfigLoader(AgentConfigLoader):
     """Charge et valide une configuration d'agent depuis un fichier YAML."""
 
     # Fields removed from AgentConfig that may still exist in stored YAMLs.
-    # They are stripped before validation to maintain backward compatibility.
-    # ``is_builtin`` / ``is_customized`` are OVERLAY-COMPUTED (REQ-033):
-    # stripping them prevents any authorable YAML from drifting the markers.
-    _DEPRECATED_FIELDS = {"middleware", "is_builtin", "is_customized"}
+    # They are stripped before validation to maintain backward compatibility;
+    # the set is the single-source domain constant shared with the import
+    # planning (``is_builtin`` / ``is_customized`` are OVERLAY-COMPUTED
+    # (REQ-033): stripping them prevents any authorable YAML from drifting
+    # the markers).
+    _DEPRECATED_FIELDS = DEPRECATED_AGENT_FIELDS
     _DEPRECATED_BACKEND_FIELDS = {"root_dir", "store_backend"}
     _DEPRECATED_BACKEND_TYPES = {"state"}
 
