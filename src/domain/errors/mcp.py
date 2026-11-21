@@ -52,3 +52,15 @@ class McpRegistryNotFoundError(McpRegistryError):
     """Registered MCP server not found (non-enumerating not-found)."""
 
     status_code = ErrorCode.NOT_FOUND
+
+
+class McpRegistryConflictError(McpRegistryError):
+    """The registry refused a creation that would overwrite an existing server.
+
+    The import contract turns registration conflicts into explicit, safe
+    errors (REQ-TX-002): the existing resource is never overwritten, renamed
+    or silently reused. The detail names the candidate server only — the
+    registry response body (which may carry secrets) is never reflected.
+    """
+
+    status_code = ErrorCode.CONFLICT

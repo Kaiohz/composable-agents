@@ -134,9 +134,12 @@ class TestCreateCron:
             resp = await _create_cron(client, users["a"]["headers"], agent, **payload_override)
             assert resp.status_code in VALIDATION_CODES, payload_override
 
-    async def test_agent_requiring_user_jwt_rejected(self, client, users):
+    async def test_agent_requiring_user_jwt_rejected(self, client, users, stub_registry):
         """CRN-002: agent config requiring ${USER_JWT} is unsuitable for
-        unattended execution — creation must fail explicitly."""
+        unattended execution — creation must fail explicitly. Under the
+        resource-only regime the placeholder lives in the REGISTRY entry
+        materialized by the import (mcp_refs), so the unattended-safety scan
+        resolves the agent's MCP selection through the trusted path."""
         placeholder_yaml_extra = (
             "mcp_servers:\n"
             "  - name: cred-server\n"
@@ -149,7 +152,7 @@ class TestCreateCron:
         resp = await _create_cron(client, users["a"]["headers"], agent)
         assert resp.status_code in PLACEHOLDER_REJECT_CODES, resp.text
 
-    async def test_agent_requiring_user_api_key_rejected(self, client, users):
+    async def test_agent_requiring_user_api_key_rejected(self, client, users, stub_registry):
         placeholder_yaml_extra = (
             "mcp_servers:\n"
             "  - name: cred-server\n"

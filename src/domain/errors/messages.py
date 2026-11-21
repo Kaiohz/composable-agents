@@ -85,6 +85,91 @@ class ErrorMessage(StrEnum):
     )
     AGENT_INVOKE_TIMEOUT = "Agent invoke timed out after {timeout}s (thread={thread_id})"
 
+    # --- Agent resource import (create-time YAML materialization) ---
+    AGENT_IMPORT_MISSING_MODEL = (
+        "A new custom agent must declare a model source: set `model` (materialized into the model catalog) "
+        "or `model_ref` (an existing catalog model id). Agent '{name}' declares neither."
+    )
+    AGENT_IMPORT_MISSING_PROMPT = (
+        "A new custom agent must declare a prompt source: set `system_prompt` (materialized into the prompt "
+        "registry) or `prompt_ref` (an existing registry prompt id). Agent '{name}' declares neither."
+    )
+    AGENT_IMPORT_EXCLUSIVE_SOURCES = (
+        "Agent '{name}' cannot declare {first} and {second} together: the sources are mutually exclusive."
+    )
+    AGENT_IMPORT_MODEL_DECLARATION_INVALID = "The inline model declaration must be a non-empty string (agent '{name}')."
+    AGENT_IMPORT_MCP_DUPLICATE = (
+        "Duplicate MCP server name '{name}' in mcp_servers: each server name must be unique within the import."
+    )
+    AGENT_IMPORT_MCP_REF_CONFLICT = (
+        "MCP server name '{name}' appears as a reference (mcp_refs) and an inline definition (mcp_servers): "
+        "a reference is never materialized again."
+    )
+    AGENT_IMPORT_MCP_ENTRY_INVALID = "Invalid inline MCP server definition (mcp_servers): {reason}"
+    AGENT_IMPORT_MCP_REF_NOT_REGISTERED = (
+        "MCP server(s) not registered for your account: {names}. Register them in the MCP Registry first."
+    )
+    AGENT_IMPORT_MCP_CONFLICT = (
+        "MCP server '{name}' (mcp_servers) is already registered: the import never overwrites an existing "
+        "registration. Rename the inline definition or reuse the registered one."
+    )
+    AGENT_IMPORT_SUBAGENT_CYCLE = (
+        "Circular sub-agent reference (cycle) detected before any creation: {names}"
+    )
+    AGENT_IMPORT_SUBAGENT_SELF_REFERENCE = (
+        "Sub-agent '{name}' references its own agent '{agent}' (self-reference is not allowed)."
+    )
+    AGENT_IMPORT_SUBAGENT_MUST_DECLARE = "Inline sub-agent '{name}' must declare '{field}'."
+    AGENT_IMPORT_SUBAGENT_NAME_CONFLICT = (
+        "An agent named '{name}' already exists: refusing to create the inline sub-agent (no overwrite)."
+    )
+    AGENT_IMPORT_SUBAGENT_NAME_RESERVED = "Sub-agent name '{name}' is reserved for the built-in assistant."
+    AGENT_IMPORT_SKILL_PATH_INVALID = "Invalid skill entry ('{path}'): {reason}"
+    AGENT_IMPORT_MEMORY_PATH_INVALID = "Invalid memory entry ('{path}'): {reason}"
+    AGENT_IMPORT_SKILL_FIELD_UNEXPECTED = (
+        "Inline skill definition accepts exactly `path` and `content`: unexpected field(s) {fields}."
+    )
+    AGENT_IMPORT_MEMORY_FIELD_UNEXPECTED = (
+        "Inline memory definition accepts exactly `path` and `content`: unexpected field(s) {fields}."
+    )
+    AGENT_IMPORT_FILE_SHAPE_INVALID = (
+        "Each inline {kind} definition must be a {{path, content}} object or an existing textual path reference."
+    )
+    AGENT_IMPORT_SKILL_EXISTS = (
+        "A skill file already exists at '{path}': an inline skill definition must create a new skill (no overwrite)."
+    )
+    AGENT_IMPORT_MEMORY_EXISTS = (
+        "A memory file already exists at '{path}': an inline memory definition must create a new memory (no overwrite)."
+    )
+    AGENT_IMPORT_SKILL_REF_MISSING = (
+        "Skill reference '{path}' was not found in your store: create the skill before referencing it."
+    )
+    AGENT_IMPORT_MEMORY_REF_MISSING = (
+        "Memory reference '{path}' was not found in your store: create the memory file before referencing it."
+    )
+    AGENT_IMPORT_UPDATE_INLINE_FORBIDDEN = (
+        "Update refused for agent '{name}': the YAML introduces a new inline {field} definition, "
+        "but automatic materialization is only supported at creation time. Reference registered resources "
+        "instead ({alternatives})."
+    )
+    AGENT_IMPORT_TARGET_INVALID = "The imported agent configuration is invalid after materialization: {reason}"
+    AGENT_IMPORT_RESOURCE_NAME_CONFLICT = (
+        "A {kind} named '{name}' already exists for your account: the import never overwrites or duplicates "
+        "an existing resource (REQ-TX-002). Rename the agent or reuse the registered resource."
+    )
+    AGENT_IMPORT_SUBAGENT_NAME_DUPLICATE = (
+        "Duplicate sub-agent name '{name}' in subagents: each sub-agent name must be unique within the import."
+    )
+    AGENT_IMPORT_SUBAGENT_REF_FIELD_FORBIDDEN = (
+        "Referenced sub-agent '{name}' must not declare an inline '{field}': a reference owns its own "
+        "resources (it reuses the referenced agent's model, prompt and MCP selection)."
+    )
+    AGENT_IMPORT_MCP_VALIDATION_FAILED = (
+        "MCP server '{name}' (mcp_servers) was rejected by the registry validation: the import refuses "
+        "to persist an unvalidated server."
+    )
+    AGENT_UPDATE_REGISTRY_NOT_WIRED = "Agent '{name}' sets mcp_refs but no MCP registry is wired."
+
     # --- Thread ---
     THREAD_NOT_FOUND = "Thread not found: {thread_id}"
     THREAD_FAILED_CREATE = "Failed to create thread: {error}"

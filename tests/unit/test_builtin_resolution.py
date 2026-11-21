@@ -118,26 +118,30 @@ class TestFailureIsolation:
         assert all(d["reason"] for d in degraded)
 
     async def test_registry_outage_degrades_without_raising(self):
+        """REQ-040 on the SELECTED refs (REQ-BUILTIN-003): a failing registry
+        resolution degrades the selected source — never raises, never bricks
+        the build; with NO selection nothing is resolved at all."""
         class _BrokenRegistry:
-            async def list_servers(self):
+            async def get_execution_config(self, name):
                 raise McpRegistryRequestError(ErrorMessage.MCP_REGISTRY_UNAVAILABLE)
-
-            async def get_execution_config(self, name):  # pragma: no cover — unreachable
-                raise AssertionError("not reached")
 
             async def aclose(self):  # pragma: no cover — unused lifecycle hook
                 return None
 
         loader = _LoaderStub({})
-        tools, degraded = await _resolver(loader, _BrokenRegistry()).resolve_dynamic_tools()
+        tools, degraded = await _resolver(loader, _BrokenRegistry()).resolve_dynamic_tools(
+            selected_refs=["alpha"]
+        )
         assert [t.name for t in tools] == ["create_pdf"]
-        assert degraded == [{"name": "mcp-registry", "reason": ErrorMessage.MCP_REGISTRY_UNAVAILABLE}]
+        assert degraded == [{"name": "alpha", "reason": ErrorMessage.MCP_REGISTRY_UNAVAILABLE}]
+
+        no_selection_loader = _LoaderStub({})
+        _, empty_degraded = await _resolver(no_selection_loader, _BrokenRegistry()).resolve_dynamic_tools()
+        assert empty_degraded == []
+        assert no_selection_loader.calls == [], "without a selection no registry resolution may happen"
 
     async def test_malformed_single_registry_entry_degrades_that_server_only(self):
         class _PartiallyBrokenRegistry:
-            async def list_servers(self):
-                return [_config("healthy"), _config("broken")]
-
             async def get_execution_config(self, name: str) -> McpServerConfig:
                 if name == "broken":
                     raise McpRegistryRequestError(ErrorMessage.MCP_REGISTRY_REQUEST_FAILED.format(status="shape"))
@@ -147,7 +151,10 @@ class TestFailureIsolation:
                 return None
 
         loader = _LoaderStub({"healthy": [_ResolvedTool("ping")]})
-        tools, degraded = await _resolver(loader, _PartiallyBrokenRegistry()).resolve_dynamic_tools()
+        tools, degraded = await _resolver(loader, _PartiallyBrokenRegistry()).resolve_dynamic_tools(
+            selected_refs=["healthy", "broken"]
+        )
+        assert tools is not None
         assert sorted(t.name for t in tools) == ["create_pdf", "ping"]
         assert [d["name"] for d in degraded] == ["broken"]
 

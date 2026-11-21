@@ -20,6 +20,7 @@ ToolMessages the LLM can react to (and the one-shot use case scans for the
 invocation rejection marker — see ``run_agent_one_shot``).
 """
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -812,6 +813,9 @@ class AgentPlatformToolsetBuilder:
 
         async def composable_users_me() -> str:
             """Return the authenticated user's non-sensitive profile."""
+            # The user payload is a synchronous projection, but LangChain
+            # StructuredTool expects an async coroutine; yield cooperatively.
+            await asyncio.sleep(0)
             auth_context = deps_lazy().get_current_auth_context()
             profile = deps_lazy().get_get_current_user_use_case().execute(auth_context)
             return _json(_data(profile))

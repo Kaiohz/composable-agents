@@ -6,15 +6,24 @@ PostgreSQL/MinIO + real auth chain) and adds:
 
 * ``mcp_files`` — the in-process REAL FastMCP stub server standing in for the
   external ``/files/mcp`` RAGAnything server (see ``mcp_files_stub.py``).
+* a session registry REST boundary (``StubRegistryServer``, same convention as
+  the composable_mcp suite): since the resource-only import materializes
+  declared inline MCP servers into the registry (spec agent-resource-import),
+  an agent import now REQUIRES a reachable registry; the external registry is
+  the mocked boundary here.
 * helpers to build attachable agents, threads and attachment payloads.
 """
 
 import base64
+import os
+import threading
 from typing import Any
 
+import pytest
 import pytest_asyncio
 
 from tests.behavioral.chat_attachments.mcp_files_stub import McpFilesStubServer
+from tests.behavioral.composable_mcp.conftest import MCP_REGISTRY_BASE_URL_ENV, StubRegistryServer
 from tests.behavioral.conftest import configure_llm_credentials, create_agent_yaml, create_thread
 
 PNG_1PX_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
@@ -48,6 +57,39 @@ def mcp_files_stub() -> McpFilesStubServer:
 
 
 _STUB_SERVER: McpFilesStubServer | None = None
+
+
+# ---------------------------------------------------------------------------
+# Import registry boundary mock (spec agent-resource-import): declared inline
+# MCP servers are materialized in the user's registry at agent creation, so
+# every attachment-suite import needs a reachable registry REST boundary.
+# ---------------------------------------------------------------------------
+_registry_server: StubRegistryServer | None = None
+_registry_lock = threading.Lock()
+
+
+def import_registry_stub() -> StubRegistryServer:
+    """Session-wide registry REST boundary mock, started on first use."""
+    global _registry_server
+    with _registry_lock:
+        if _registry_server is None:
+            _registry_server = StubRegistryServer()
+            _registry_server.start()
+        return _registry_server
+
+
+@pytest.fixture(autouse=True)
+def stub_import_registry():
+    """Point the production registry seam at a fresh (empty) mock per test."""
+    stub = import_registry_stub()
+    stub.reset(seed={})
+
+    os.environ[MCP_REGISTRY_BASE_URL_ENV] = stub.base_url
+    import src.dependencies as deps
+
+    deps.settings.mcp_registry_base_url = stub.base_url
+    yield stub
+    stub.reset(seed={})
 
 
 @pytest_asyncio.fixture(loop_scope="session")
