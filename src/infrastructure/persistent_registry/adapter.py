@@ -20,6 +20,7 @@ In-flight runs keep their snapshot: the fingerprint is read once per
 import asyncio
 import logging
 from collections import OrderedDict
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -60,6 +61,26 @@ _DEGRADED_CACHE_MAX_USERS = 256
 
 
 @dataclass
+class LlmRuntimeDependencies:
+    """Optional per-user LLM resolution collaborators."""
+
+    credentials_resolver: Callable[[str], Awaitable[tuple[str, str] | None]] | None = None
+    provider_resolver: Callable[[str], Awaitable[str | None]] | None = None
+
+
+@dataclass
+class BuiltinRuntimeDependencies:
+    """Optional built-in assistant runtime collaborators.
+
+    Grouping them keeps the registry constructor below Sonar's parameter
+    threshold while making the built-in resolution path explicit.
+    """
+
+    resolver: BuiltinToolsetResolver | None = None
+    config_provider: Callable[[], Awaitable[AgentConfig]] | None = None
+
+
+@dataclass
 class _CacheEntry:
     """A cached runner plus the dependency fingerprint it was built against."""
 
@@ -79,12 +100,11 @@ class PersistentAgentRegistry(AgentRegistry):
         tracing_provider: TracingProvider | None = None,
         stream_idle_timeout: float = 120.0,
         invoke_timeout: float = 120.0,
-        llm_credentials_resolver=None,
-        llm_provider_resolver=None,
+        llm_runtime: LlmRuntimeDependencies | None = None,
         prompt_repository: PromptRepository | None = None,
         model_repository: ModelRepository | None = None,
         runner_freshness: RunnerFreshness | None = None,
-        builtin_resolver: BuiltinToolsetResolver | None = None,
+        builtin_runtime: BuiltinRuntimeDependencies | None = None,
         platform_toolset: AgentPlatformToolsetBuilder | None = None,
     ) -> None:
         self._config_loader = config_loader
@@ -94,12 +114,13 @@ class PersistentAgentRegistry(AgentRegistry):
         self._tracing_provider = tracing_provider
         self._stream_idle_timeout = stream_idle_timeout
         self._invoke_timeout = invoke_timeout
-        self._llm_credentials_resolver = llm_credentials_resolver
-        self._llm_provider_resolver = llm_provider_resolver
+        self._llm_credentials_resolver = llm_runtime.credentials_resolver if llm_runtime else None
+        self._llm_provider_resolver = llm_runtime.provider_resolver if llm_runtime else None
         self._prompt_repository = prompt_repository
         self._model_repository = model_repository
         self._runner_freshness = runner_freshness
-        self._builtin_resolver = builtin_resolver
+        self._builtin_resolver = builtin_runtime.resolver if builtin_runtime else None
+        self._builtin_config_provider = builtin_runtime.config_provider if builtin_runtime else None
         self._platform_toolset = platform_toolset or AgentPlatformToolsetBuilder()
         # CACHE-001: keyed by (user_id, agent_name).
         self._runners: dict[tuple[str, str], _CacheEntry] = {}
@@ -219,7 +240,10 @@ class PersistentAgentRegistry(AgentRegistry):
         """
         uid = current_user_id.get() or ""
         logger.info(LogMessage.BUILTIN_AGENT_RESOLVING, uid)
-        config = builtin_agent_config()
+        if self._builtin_config_provider is not None:
+            config = await self._builtin_config_provider()
+        else:
+            config = builtin_agent_config()
 
         # Platform tools are built FIRST so their names are reserved BEFORE
         # the dynamic MCP resolution: a registered server advertising a

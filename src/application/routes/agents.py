@@ -4,8 +4,6 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, Form, UploadFile, status
 
 from src.application.services.builtin_agent import (
-    builtin_agent_config,
-    builtin_agent_metadata,
     ensure_custom_agent_name,
     ensure_not_builtin,
     is_builtin_agent_name,
@@ -19,27 +17,20 @@ from src.application.use_cases.update_agent_config import UpdateAgentConfigUseCa
 from src.dependencies import (
     get_create_agent_config_use_case,
     get_delete_agent_config_use_case,
+    get_effective_builtin_agent_service,
     get_get_agent_config_use_case,
     get_list_agent_configs_use_case,
     get_update_agent_config_use_case,
 )
 from src.domain.entities.agent_config import AgentConfig
 from src.domain.entities.agent_config_metadata import AgentConfigMetadata
+from src.domain.errors.agent import AgentNotFoundError
+from src.domain.errors.messages import ErrorMessage
 from src.domain.logging.messages import LogMessage
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/agents", tags=["agents"])
-
-
-async def _reject_builtin_update(agent_name: str) -> None:
-    """Route-level guard resolving BEFORE the multipart body (REQ-034).
-
-    The built-in assistant is read-only: refusing the request in a
-    dependency (instead of the handler) keeps the 403 semantics intact even
-    when the caller sends no YAML body at all.
-    """
-    ensure_not_builtin(agent_name)
 
 
 async def _read_yaml_upload(file: UploadFile) -> str:
@@ -59,8 +50,9 @@ async def list_agents(
     ``is_builtin=False`` computed by the overlay, never a stored column.
     """
     agents = await use_case.execute()
+    effective_builtin = await get_effective_builtin_agent_service().get_effective_metadata()
     logger.info(LogMessage.AGENT_CONFIG_LISTED, len(agents) + 1)
-    return [builtin_agent_metadata(), *agents]
+    return [effective_builtin, *agents]
 
 
 @router.get("/{agent_name}")
@@ -77,7 +69,7 @@ async def get_agent(
     validate_agent_name(agent_name)
     logger.info(LogMessage.AGENT_CONFIG_GET, agent_name)
     if is_builtin_agent_name(agent_name):
-        return builtin_agent_config()
+        return await get_effective_builtin_agent_service().get_effective_config()
     return await use_case.execute(name=agent_name)
 
 
@@ -102,29 +94,41 @@ async def create_agent(
     return result
 
 
-@router.put("/{agent_name}", dependencies=[Depends(_reject_builtin_update)])
+@router.put("/{agent_name}")
 async def update_agent(
     agent_name: str,
     use_case: Annotated[UpdateAgentConfigUseCase, Depends(get_update_agent_config_use_case)],
     file: Annotated[UploadFile, File(...)],
 ) -> AgentConfig:
-    """Update an existing agent configuration from an uploaded YAML file.
+    """Update an agent configuration, or the user's built-in customization.
 
-    The built-in assistant's definition is read-only (REQ-034): the
-    route-level guard resolves before the multipart body and returns the
-    read-only built-in error (403) even without a YAML payload.
-
-    Raises:
-        BuiltinAgentError: The built-in assistant's definition is read-only
-            (REQ-034).
+    The built-in assistant accepts a per-user customization snapshot through
+    the same multipart contract; its dynamic toolset and HITL floor remain
+    server-managed. Custom agents keep the existing stored-YAML update path.
     """
     validate_agent_name(agent_name)
-    ensure_not_builtin(agent_name)
     yaml_content = await _read_yaml_upload(file)
+    if is_builtin_agent_name(agent_name):
+        return await get_effective_builtin_agent_service().update(agent_name, yaml_content)
+
     logger.info(LogMessage.AGENT_CONFIG_UPDATING, agent_name)
     result = await use_case.execute(name=agent_name, yaml_content=yaml_content)
     logger.info(LogMessage.AGENT_CONFIG_UPDATED, agent_name)
     return result
+
+
+@router.delete("/{agent_name}/customization", status_code=status.HTTP_204_NO_CONTENT)
+async def reset_builtin_customization(agent_name: str) -> None:
+    """Reset the current user's built-in assistant customization.
+
+    The reset deletes the override without loading it, so a corrupt snapshot
+    is recoverable. Only the reserved built-in assistant has a customization;
+    every other agent name is not found.
+    """
+    validate_agent_name(agent_name)
+    if not is_builtin_agent_name(agent_name):
+        raise AgentNotFoundError(ErrorMessage.AGENT_NOT_FOUND.format(name=agent_name))
+    await get_effective_builtin_agent_service().reset()
 
 
 @router.delete("/{agent_name}", status_code=status.HTTP_204_NO_CONTENT)

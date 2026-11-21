@@ -10,6 +10,7 @@ from miniopy_async.api import Minio
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import AsyncAdaptedQueuePool
 
+from src.application.services.effective_builtin_agent import EffectiveBuiltinAgentService
 from src.application.use_cases.api_key.create_api_key import CreateApiKeyUseCase
 from src.application.use_cases.api_key.list_api_keys import ListApiKeysUseCase
 from src.application.use_cases.api_key.revoke_api_key import RevokeApiKeyUseCase
@@ -81,6 +82,7 @@ from src.domain.errors.storage import StorageError
 from src.domain.logging.messages import LogMessage
 from src.domain.ports.agent_registry import AgentRegistry
 from src.domain.ports.auth.api_key_repository import ApiKeyRepository
+from src.domain.ports.builtin_agent_override_store import BuiltinAgentOverrideStore
 from src.domain.ports.cron_repository import CronRepository, CronRunRepository
 from src.domain.ports.files_mcp_client import FilesMcpClient
 from src.domain.ports.llm_price_repository import LlmPriceRepository
@@ -102,8 +104,13 @@ from src.infrastructure.deepagent.builtin_resolution import BuiltinToolsetResolv
 from src.infrastructure.mcp.adapter import LangchainMcpToolLoader
 from src.infrastructure.mcp.files_client import McpFilesTemporaryCleaner, McpStreamableFilesClient
 from src.infrastructure.mcp_registry.adapter import HttpMcpRegistryClient
-from src.infrastructure.persistent_registry.adapter import PersistentAgentRegistry
+from src.infrastructure.persistent_registry.adapter import (
+    BuiltinRuntimeDependencies,
+    LlmRuntimeDependencies,
+    PersistentAgentRegistry,
+)
 from src.infrastructure.postgres_api_key.adapter import PostgresApiKeyRepository
+from src.infrastructure.postgres_builtin_override.adapter import PostgresBuiltinAgentOverrideStore
 from src.infrastructure.postgres_cron.adapter import PostgresCronRepository, PostgresCronRunRepository
 from src.infrastructure.postgres_llm_prices.adapter import PostgresLlmPriceRepository
 from src.infrastructure.postgres_model.adapter import PostgresModelRepository
@@ -231,6 +238,8 @@ class CompositionRoot:
     user_llm_settings_repository: UserLlmSettingsRepository | None = None
     prompt_repository: PromptRepository | None = None
     model_repository: ModelRepository | None = None
+    builtin_agent_override_store: BuiltinAgentOverrideStore | None = None
+    effective_builtin_agent: EffectiveBuiltinAgentService | None = None
     cron_repository: CronRepository | None = None
     cron_run_repository: CronRunRepository | None = None
     trace_usage_repository: TraceUsageRepository | None = None
@@ -311,6 +320,13 @@ async def init_persistence() -> None:
     _root.api_key_repository = PostgresApiKeyRepository(engine=_root.async_engine)
     _root.prompt_repository = PostgresPromptRepository(engine=_root.async_engine)
     _root.model_repository = PostgresModelRepository(engine=_root.async_engine)
+    _root.builtin_agent_override_store = PostgresBuiltinAgentOverrideStore(engine=_root.async_engine)
+    _root.effective_builtin_agent = EffectiveBuiltinAgentService(
+        config_loader=agent_config_loader,
+        override_store=_root.builtin_agent_override_store,
+        prompt_repository=_root.prompt_repository,
+        model_repository=_root.model_repository,
+    )
     _root.cron_repository = PostgresCronRepository(engine=_root.async_engine)
     _root.cron_run_repository = PostgresCronRunRepository(engine=_root.async_engine)
     _root.trace_usage_repository = PostgresTraceUsageRepository(engine=_root.async_engine)
@@ -369,6 +385,8 @@ async def init_persistence() -> None:
     await _root.rustfs_store.ensure_bucket()
     logger.info(LogMessage.RUSTFS_STORE_INITIALIZED, settings.minio_bucket)
 
+    effective_builtin = _root.effective_builtin_agent
+    assert effective_builtin is not None
     _root.agent_registry = PersistentAgentRegistry(
         config_loader=agent_config_loader,
         config_store=_root.rustfs_store,
@@ -377,17 +395,22 @@ async def init_persistence() -> None:
         tracing_provider=tracing_provider,
         stream_idle_timeout=settings.agent_stream_idle_timeout,
         invoke_timeout=settings.agent_invoke_timeout,
-        llm_credentials_resolver=get_llm_credentials_resolver(),
-        llm_provider_resolver=get_llm_provider_resolver(),
+        llm_runtime=LlmRuntimeDependencies(
+            credentials_resolver=get_llm_credentials_resolver(),
+            provider_resolver=get_llm_provider_resolver(),
+        ),
         prompt_repository=_root.prompt_repository,
         model_repository=_root.model_repository,
         runner_freshness=_root.runner_freshness,
         # Built-in assistant dynamic capability resolution (REQ-036..040): the
         # trusted registry client + the configured built-in MCP mount base URL.
-        builtin_resolver=BuiltinToolsetResolver(
-            mcp_tool_loader=mcp_tool_loader,
-            registry_client=get_mcp_registry_client(),
-            builtin_mcp_base_url_provider=lambda: settings.builtin_mcp_base_url,
+        builtin_runtime=BuiltinRuntimeDependencies(
+            resolver=BuiltinToolsetResolver(
+                mcp_tool_loader=mcp_tool_loader,
+                registry_client=get_mcp_registry_client(),
+                builtin_mcp_base_url_provider=lambda: settings.builtin_mcp_base_url,
+            ),
+            config_provider=effective_builtin.get_effective_config,
         ),
     )
 
@@ -491,6 +514,8 @@ def reset() -> None:
     _root.user_llm_settings_repository = None
     _root.prompt_repository = None
     _root.model_repository = None
+    _root.builtin_agent_override_store = None
+    _root.effective_builtin_agent = None
     _root.cron_repository = None
     _root.cron_run_repository = None
     _root.runner_freshness = None
@@ -568,6 +593,7 @@ def get_chat_attachments_service():
             store_files=_require_store_file_repository(),
             files_client=get_files_mcp_client(),
             limits=get_attachment_limits(),
+            builtin_config_provider=get_effective_builtin_agent_service().get_effective_config,
         )
     except StorageError:
         logger.exception(LogMessage.CHAT_ATTACHMENTS_UNAVAILABLE)
@@ -704,6 +730,18 @@ def _require_persistence() -> tuple[RustfsAgentConfigStore, PostgresAgentConfigR
     if _root.rustfs_store is None or _root.pg_repository is None:
         raise StorageError(ErrorMessage.STORAGE_PERSISTENCE_NOT_INITIALIZED)
     return _root.rustfs_store, _root.pg_repository
+
+
+def _require_effective_builtin_agent() -> EffectiveBuiltinAgentService:
+    """Return the effective built-in service or raise StorageError."""
+    if _root.effective_builtin_agent is None:
+        raise StorageError(ErrorMessage.STORAGE_PERSISTENCE_NOT_INITIALIZED)
+    return _root.effective_builtin_agent
+
+
+def get_effective_builtin_agent_service() -> EffectiveBuiltinAgentService:
+    """Provide the per-user built-in resolution/customization service."""
+    return _require_effective_builtin_agent()
 
 
 def get_create_agent_config_use_case() -> CreateAgentConfigUseCase:

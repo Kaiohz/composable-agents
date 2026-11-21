@@ -105,11 +105,53 @@ class TestBuiltinNameReserved:
         blob = str(result["result"]).lower()
         assert "builtin" in blob or "reserved" in blob or "conflict" in blob
 
-    async def test_builtin_update_refused_rest(self, client, users):
+    async def test_builtin_update_without_yaml_returns_validation_error(self, client, users):
         resp = await client.put(f"/api/v1/agents/{BUILTIN_NAME}", headers=users["a"]["headers"])
-        assert resp.status_code in READ_ONLY_ERROR_STATUSES, (
-            f"built-in update must be refused with a read-only built-in error, got {resp.status_code}: {resp.text}"
+        assert resp.status_code == 422, (
+            f"the built-in update must use the standard missing-file validation, got {resp.status_code}: {resp.text}"
         )
+
+    async def test_builtin_update_customizes_only_the_running_user(self, client, users):
+        updated = await client.put(
+            f"/api/v1/agents/{BUILTIN_NAME}",
+            headers=users["a"]["headers"],
+            files={
+                "file": (
+                    "builtin.yaml",
+                    agent_yaml(BUILTIN_NAME).encode(),
+                    "text/yaml",
+                )
+            },
+        )
+        assert updated.status_code == 200, (
+            f"the running user's built-in customization must be accepted, got {updated.status_code}: {updated.text}"
+        )
+        assert updated.json()["is_builtin"] is True
+        assert updated.json()["is_customized"] is True
+
+        got_a = await client.get(f"/api/v1/agents/{BUILTIN_NAME}", headers=users["a"]["headers"])
+        got_b = await client.get(f"/api/v1/agents/{BUILTIN_NAME}", headers=users["b"]["headers"])
+        assert got_a.json()["is_customized"] is True
+        assert got_b.json()["is_customized"] is False
+
+    async def test_builtin_reset_restores_default(self, mcp_base_url, client, users):
+        updated = await client.put(
+            f"/api/v1/agents/{BUILTIN_NAME}",
+            headers=users["a"]["headers"],
+            files={"file": ("builtin.yaml", agent_yaml(BUILTIN_NAME).encode(), "text/yaml")},
+        )
+        assert updated.status_code == 200
+
+        result = await call_mcp_tool(
+            mcp_base_url,
+            users["a"]["headers"],
+            "composable_agents_reset_customization",
+            {"agent_name": BUILTIN_NAME},
+        )
+        assert result["ok"], f"the built-in reset must be callable through MCP: {result}"
+
+        got = await client.get(f"/api/v1/agents/{BUILTIN_NAME}", headers=users["a"]["headers"])
+        assert got.json()["is_customized"] is False
 
     async def test_builtin_delete_refused_rest(self, client, users):
         resp = await client.delete(f"/api/v1/agents/{BUILTIN_NAME}", headers=headers_of(users, "a"))
@@ -117,16 +159,39 @@ class TestBuiltinNameReserved:
             f"built-in delete must be refused with a read-only built-in error, got {resp.status_code}: {resp.text}"
         )
 
-    async def test_builtin_update_refused_mcp(self, mcp_base_url, users):
+    async def test_builtin_update_customizes_running_user_mcp(self, mcp_base_url, client, users):
         result = await call_mcp_tool(
             mcp_base_url,
             users["a"]["headers"],
             "composable_agents_update",
             {"agent_name": BUILTIN_NAME, "yaml": agent_yaml(BUILTIN_NAME)},
         )
-        assert not result["ok"], str(result)
-        blob = str(result["result"]).lower()
-        assert "builtin" in blob or "read-only" in blob or "read only" in blob
+        assert result["ok"], f"the built-in customization must be accepted through MCP: {result}"
+
+        got_a = await client.get(f"/api/v1/agents/{BUILTIN_NAME}", headers=users["a"]["headers"])
+        got_b = await client.get(f"/api/v1/agents/{BUILTIN_NAME}", headers=users["b"]["headers"])
+        assert got_a.json()["is_customized"] is True
+        assert got_b.json()["is_customized"] is False
+
+    async def test_builtin_reset_customization_mcp(self, mcp_base_url, client, users):
+        updated = await call_mcp_tool(
+            mcp_base_url,
+            users["a"]["headers"],
+            "composable_agents_update",
+            {"agent_name": BUILTIN_NAME, "yaml": agent_yaml(BUILTIN_NAME)},
+        )
+        assert updated["ok"], str(updated)
+
+        result = await call_mcp_tool(
+            mcp_base_url,
+            users["a"]["headers"],
+            "composable_agents_reset_customization",
+            {"agent_name": BUILTIN_NAME},
+        )
+        assert result["ok"], f"the reset must mirror REST through MCP: {result}"
+
+        got = await client.get(f"/api/v1/agents/{BUILTIN_NAME}", headers=users["a"]["headers"])
+        assert got.json()["is_customized"] is False
 
     async def test_builtin_delete_refused_mcp(self, mcp_base_url, users):
         result = await call_mcp_tool(
@@ -137,7 +202,9 @@ class TestBuiltinNameReserved:
         )
         assert not result["ok"], str(result)
         blob = str(result["result"]).lower()
-        assert "builtin" in blob or "read-only" in blob or "read only" in blob
+        assert "built-in" in blob or "cannot be deleted" in blob, (
+            f"the protected built-in deletion must carry an actionable marker: {result}"
+        )
 
     async def test_readonly_means_definition_only(self, client, users, stub_llm):
         """REQ-044: read-only definition does NOT block the assistant from doing work

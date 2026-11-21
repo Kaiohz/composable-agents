@@ -88,6 +88,9 @@ class AgentConfig(BaseModel):
     # (no ``is_builtin`` database column — that column was removed by
     # migration 003 and must NOT be reintroduced).
     is_builtin: bool = False
+    # Overlay-computed per-user marker: ``True`` only when this effective
+    # built-in definition is the owning user's customization snapshot.
+    is_customized: bool = False
 
     @model_validator(mode="after")
     def check_prompt_exclusivity(self) -> Self:
