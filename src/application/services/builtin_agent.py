@@ -89,6 +89,7 @@ def builtin_agent_metadata() -> AgentConfigMetadata:
         created_at=now,
         updated_at=now,
         is_builtin=True,
+        is_customized=False,
     )
 
 
@@ -109,6 +110,7 @@ def builtin_agent_config() -> AgentConfig:
         description=_builtin_description(),
         hitl=HITLConfig(rules=dict.fromkeys(BUILTIN_HITL_DELETE_TOOLS, True)),
         is_builtin=True,
+        is_customized=False,
     )
 
 

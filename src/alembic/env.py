@@ -12,6 +12,7 @@ from src.config import Settings
 from src.infrastructure.database.models.agent_config import AgentConfigModel  # noqa: F401
 from src.infrastructure.database.models.api_key import ApiKeyModel  # noqa: F401
 from src.infrastructure.database.models.base import Base
+from src.infrastructure.database.models.builtin_agent_override import BuiltinAgentOverrideModel  # noqa: F401
 from src.infrastructure.database.models.cron import CronModel, CronRunModel  # noqa: F401
 from src.infrastructure.database.models.model_config import ModelConfigModel  # noqa: F401
 from src.infrastructure.database.models.prompt import PromptModel, PromptVersionModel  # noqa: F401

@@ -44,8 +44,16 @@ class ErrorMessage(StrEnum):
         "Choose another name to create a custom agent."
     )
     BUILTIN_AGENT_READ_ONLY = (
-        "Agent '{name}' is the read-only built-in Composable AI Assistant; its definition cannot be updated or deleted."
+        "Agent '{name}' is the built-in Composable AI Assistant and cannot be deleted. "
+        "Personalize it with Update or restore its default definition with Reset."
     )
+    BUILTIN_CUSTOMIZATION_FIELD_FORBIDDEN = (
+        "The built-in assistant's '{field}' capability is managed by the platform and cannot be customized."
+    )
+    BUILTIN_CUSTOMIZATION_HITL_FLOOR = (
+        "The built-in assistant's HITL rule '{tool}' must stay enabled because it protects a destructive delete."
+    )
+    BUILTIN_CUSTOMIZATION_USER_REQUIRED = "A built-in assistant customization requires an authenticated user context."
     AGENT_INVOCATION_REJECTED = "Agent invocation rejected: {reason}"
     AGENT_CONFIG_NOT_FOUND = "Agent config metadata not found: {name}"
     AGENT_CONFIG_NOT_FOUND_IN_STORE = "Agent config not found in store: {name}"
@@ -104,6 +112,9 @@ class ErrorMessage(StrEnum):
     STORAGE_FAILED_LIST_AGENT_CONFIG = "Failed to list agent config metadata: {error}"
     STORAGE_FAILED_DELETE_AGENT_CONFIG = "Failed to delete agent config metadata '{name}': {error}"
     STORAGE_FAILED_EXISTS_AGENT_CONFIG = "Failed to check existence of agent config '{name}': {error}"
+    STORAGE_FAILED_GET_BUILTIN_OVERRIDE = "Failed to get the built-in assistant customization: {error}"
+    STORAGE_FAILED_SAVE_BUILTIN_OVERRIDE = "Failed to save the built-in assistant customization: {error}"
+    STORAGE_FAILED_DELETE_BUILTIN_OVERRIDE = "Failed to reset the built-in assistant customization: {error}"
     STORAGE_FAILED_PERSIST_STREAM = "Failed to persist AI message after stream: {error}"
     STORAGE_FAILED_API_KEY_OP = "Failed to perform API key operation: {error}"
 

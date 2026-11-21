@@ -52,6 +52,7 @@ dependencies = [
     "starlette>=1.3.1",
     "urllib3>=2.8.0",
     "croniter>=6.0.0",
+    "wcmatch>=11.2",
     # --- Builtin create_pdf tool: Markdown → PDF rendering (chat-pdf-attachments) ---
     "fpdf2>=2.8.5",
     "mistletoe>=1.4.0",

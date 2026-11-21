@@ -48,7 +48,7 @@ from src.application.responses.prompt import PromptResponse, PromptVersionRespon
 from src.application.responses.thread_history import ThreadHistory
 from src.application.responses.trace_usage import TopRunsResponse, TraceUsageResponse
 from src.application.responses.traces import TraceListResponse
-from src.application.services.builtin_agent import builtin_agent_config, builtin_agent_metadata, is_builtin_agent_name
+from src.application.services.builtin_agent import is_builtin_agent_name
 from src.application.services.route_validation import (
     list_skill_usage_agent_names,
     memories_prefix,
@@ -66,6 +66,7 @@ from src.domain.entities.agent_config import AgentConfig
 from src.domain.entities.model_metadata import ModelMetadata
 from src.domain.entities.registered_mcp_server import McpServerWrite, RegisteredMcpServer
 from src.domain.entities.user.user_profile import UserProfile
+from src.domain.errors.agent import AgentNotFoundError
 from src.domain.errors.config import ConfigError
 from src.domain.errors.messages import ErrorMessage
 from src.domain.logging.messages import LogMessage
@@ -133,19 +134,20 @@ def _register_agents_family(mcp, safe_mcp_call) -> None:
     async def composable_agents_list() -> McpAgentsList:
         """List the current user's agents (built-in assistant first, with is_builtin)."""
         agents = await _deps().get_list_agent_configs_use_case().execute()
-        return McpAgentsList(agents=[builtin_agent_metadata(), *agents])
+        effective_builtin = await _deps().get_effective_builtin_agent_service().get_effective_metadata()
+        return McpAgentsList(agents=[effective_builtin, *agents])
 
     @mcp.tool(name="composable_agents_get", annotations=READONLY())
     @safe_mcp_call
     async def composable_agents_get(agent_name: str) -> AgentConfig:
         """Get one visible agent's validated configuration by exact name.
 
-        The built-in assistant resolves to its virtual read-only definition
+        The built-in assistant resolves to its effective per-user definition
         with ``is_builtin=true`` at the top level.
         """
         validate_agent_name(agent_name)
         if is_builtin_agent_name(agent_name):
-            return builtin_agent_config()
+            return await _deps().get_effective_builtin_agent_service().get_effective_config()
         return await _deps().get_get_agent_config_use_case().execute(name=agent_name)
 
     @mcp.tool(name="composable_agents_create", annotations=MUTATING())
@@ -166,19 +168,28 @@ def _register_agents_family(mcp, safe_mcp_call) -> None:
     @mcp.tool(name="composable_agents_update", annotations=MUTATING())
     @safe_mcp_call
     async def composable_agents_update(agent_name: str, yaml: str) -> AgentConfig:
-        """Replace an existing custom agent's YAML document (built-in is read-only)."""
-        from src.application.services.builtin_agent import ensure_not_builtin
-
+        """Replace a custom agent's YAML, or the user's built-in customization."""
         validate_agent_name(agent_name)
-        ensure_not_builtin(agent_name)
         yaml_content = read_yaml_bytes(yaml.encode("utf-8"))
+        if is_builtin_agent_name(agent_name):
+            return await _deps().get_effective_builtin_agent_service().update(agent_name, yaml_content)
         logger.info(LogMessage.AGENT_CONFIG_UPDATING, agent_name)
         return await _deps().get_update_agent_config_use_case().execute(name=agent_name, yaml_content=yaml_content)
+
+    @mcp.tool(name="composable_agents_reset_customization", annotations=MUTATING())
+    @safe_mcp_call
+    async def composable_agents_reset_customization(agent_name: str) -> McpDeleteResult:
+        """Reset the current user's built-in assistant customization to its default."""
+        validate_agent_name(agent_name)
+        if not is_builtin_agent_name(agent_name):
+            raise AgentNotFoundError(ErrorMessage.AGENT_NOT_FOUND.format(name=agent_name))
+        await _deps().get_effective_builtin_agent_service().reset()
+        return McpDeleteResult(deleted=agent_name)
 
     @mcp.tool(name="composable_agents_delete", annotations=DESTRUCTIVE())
     @safe_mcp_call
     async def composable_agents_delete(agent_name: str) -> McpDeleteResult:
-        """Delete an existing custom agent (built-in is read-only)."""
+        """Delete an existing custom agent (the built-in assistant is protected)."""
         from src.application.services.builtin_agent import ensure_not_builtin
 
         validate_agent_name(agent_name)

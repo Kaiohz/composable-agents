@@ -120,7 +120,7 @@ Use the same `Authorization: Bearer <jwt>` header for JWT-based clients. An inva
 
 ### Built-in assistant
 
-The virtual, centrally managed agent `composable-ai-assistant` is overlaid into every authenticated user's catalog. It is listed first, marked with `is_builtin=true`, and cannot be created, updated, or deleted by users. It is manually selectable in the UI, uses that user's LLM credentials, and dynamically aggregates:
+The virtual, centrally managed agent `composable-ai-assistant` is overlaid into every authenticated user's catalog. It is listed first and marked with `is_builtin=true`. Its name is reserved, creation is refused, and deletion is unavailable. Each user can store a personal customization through `PUT /api/v1/agents/composable-ai-assistant`; the response and all effective reads carry `is_customized=true` while the override exists. `DELETE /api/v1/agents/composable-ai-assistant/customization` removes only that user's override and restores the default. The assistant is manually selectable in the UI, uses that user's LLM credentials, and dynamically aggregates:
 
 - the platform management/execution tools;
 - the built-in Files, Classical RAG, Web, and Memories MCP servers;
@@ -128,7 +128,7 @@ The virtual, centrally managed agent `composable-ai-assistant` is overlaid into 
 - `create_pdf`; and
 - the user's other composable agents through one-shot execution (excluding self-invocation).
 
-Its destructive delete tools are configured with HITL rules. Direct MCP management tool calls are explicit client commands and execute normally, subject to authorization.
+A built-in customization is a full snapshot, but server invariants are re-applied at write time and read time: `tools`, `subagents`, and `mcp_servers` are rejected/forced empty because the dynamic toolset is authoritative, and the destructive-delete HITL floor must stay enabled. Its destructive delete tools are configured with HITL rules. Direct MCP management tool calls are explicit client commands and execute normally, subject to authorization.
 
 ---
 
@@ -654,6 +654,10 @@ All endpoints are prefixed appropriately. The server runs on `http://localhost:8
 | `POST` | `/api/v1/chat/{thread_id}` | Submit a human-in-the-loop decision (approve/reject/edit, single or multi `decisions`) | `200` |
 | `GET` | `/api/v1/agents` | List all agent configs from `agents/` directory | `200` |
 | `GET` | `/api/v1/agents/{agent_name}` | Get a specific agent configuration | `200` |
+| `POST` | `/api/v1/agents` | Create a custom agent from multipart YAML (`agent_name` + `file`) | `201` |
+| `PUT` | `/api/v1/agents/{agent_name}` | Replace a custom agent, or store the user's built-in customization | `200` |
+| `DELETE` | `/api/v1/agents/{agent_name}` | Delete a custom agent (built-in returns `403`) | `204` |
+| `DELETE` | `/api/v1/agents/{agent_name}/customization` | Reset the current user's built-in customization (other names return `404`) | `204` |
 | `GET` | `/api/v1/store/files` | List file paths in the store (optional `prefix` query param) | `200` |
 | `GET` | `/api/v1/store/files/{path}` | Get a single file's content by path | `200` |
 | `PUT` | `/api/v1/store/files/{path}` | Create or replace a file in the store | `200` |
@@ -780,6 +784,50 @@ Response (`404`):
 ```json
 {"detail": "Fichier de configuration introuvable: agents/nonexistent.yaml"}
 ```
+
+### 3a. Personalize and reset the built-in assistant
+
+Store (or replace) the authenticated user's built-in customization:
+
+```bash
+cat > composable-ai-assistant.yaml <<'EOF'
+name: composable-ai-assistant
+model: openai:gpt-4o
+description: "My personal platform assistant"
+system_prompt: "You are my personal Composable assistant."
+tools: []
+debug: false
+EOF
+
+curl -X PUT http://localhost:8000/api/v1/agents/composable-ai-assistant \
+  -H "X-API-Key: <API_KEY>" \
+  -F "file=@composable-ai-assistant.yaml;type=text/yaml"
+```
+
+Response (`200`):
+
+```json
+{
+  "name": "composable-ai-assistant",
+  "model": "openai:gpt-4o",
+  "description": "My personal platform assistant",
+  "system_prompt": "You are my personal Composable assistant.",
+  "tools": [],
+  "is_builtin": true,
+  "is_customized": true
+}
+```
+
+Reset only the current user's customization (idempotent):
+
+```bash
+curl -X DELETE http://localhost:8000/api/v1/agents/composable-ai-assistant/customization \
+  -H "X-API-Key: <API_KEY>"
+```
+
+Response: `204 No Content`.
+
+Server-managed built-in fields are rejected or forced: non-empty `tools`, `subagents`, or `mcp_servers` return `422`, and disabling a destructive-delete HITL rule returns `422`. Deleting the assistant itself returns `403`.
 
 ### 4. Create a Thread
 

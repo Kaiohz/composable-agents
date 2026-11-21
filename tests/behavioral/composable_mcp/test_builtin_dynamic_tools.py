@@ -82,6 +82,37 @@ class TestDynamicResolution:
         blob = str(result["result"]).lower()
         assert "skills" in blob, f"platform tool did not execute: {blob[:400]}"
 
+    async def test_platform_tools_reflect_the_user_customization(
+        self, mcp_base_url, client, users, stub_llm, stub_registry
+    ):
+        """The in-agent platform tools mirror REST/MCP: the running user's
+        effective built-in configuration is returned, while the dynamic
+        toolset keeps working."""
+        updated = await client.put(
+            f"/api/v1/agents/{BUILTIN_NAME}",
+            headers=users["a"]["headers"],
+            files={
+                "file": (
+                    "builtin.yaml",
+                    b"name: composable-ai-assistant\nmodel: custom-platform-model\n"
+                    b'system_prompt: "CUSTOM_PLATFORM_PROMPT"\ntools: []\ndebug: false\n',
+                )
+            },
+        )
+        assert updated.status_code == 200, updated.text
+
+        await configure_llm_credentials(client, users["a"]["headers"])
+        stub_llm.script(
+            assistant_tool_call("composable_agents_get", {"agent_name": BUILTIN_NAME}),
+            assistant_text("read the customized assistant"),
+        )
+        result = await _run_assistant(mcp_base_url, users)
+        assert result["ok"], f"the platform tool must execute against the customized built-in: {result}"
+        blob = str(result["result"])
+        assert "CUSTOM_PLATFORM_PROMPT" in blob, (
+            f"the in-agent platform tool must mirror the user's effective config: {blob[:400]}"
+        )
+
     async def test_excluded_capabilities_absent_from_assistant_resolution(
         self, mcp_base_url, client, users, stub_llm, stub_registry
     ):

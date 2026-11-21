@@ -34,12 +34,13 @@ class AgentConfigReferenceError(DomainError):
 
 
 class BuiltinAgentError(DomainError):
-    """Read-only built-in agent definition violation (REQ-034).
+    """Protected built-in agent definition violation (REQ-034).
 
-    The built-in Composable AI Assistant's definition is centrally managed:
-    updating or deleting it is refused (HTTP 403). Its name is reserved for
-    the overlay; creating a custom agent with that name raises
-    :class:`AgentConfigAlreadyExistsError` instead.
+    The built-in Composable AI Assistant's name is reserved and its global
+    definition is never deleted. Each user may store a personal customization
+    through the dedicated update/reset surfaces; deleting the assistant itself
+    is refused with this error (HTTP 403). Creating a custom agent with its
+    name raises :class:`AgentConfigAlreadyExistsError` instead.
     """
 
     status_code = ErrorCode.FORBIDDEN

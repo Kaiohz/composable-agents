@@ -72,6 +72,11 @@ class LogMessage(StrEnum):
     AGENT_CONFIG_METADATA_SAVED = "Saved agent config metadata '%s'"
     AGENT_CONFIG_METADATA_DELETED = "Deleted agent config metadata '%s'"
     AGENT_CONFIG_LOADED_FROM_STORE = "Loaded agent config '%s' from store"
+    BUILTIN_AGENT_RESOLVED = "Resolved built-in assistant definition (user=%s customized=%s)"
+    BUILTIN_CUSTOMIZATION_UPDATING = "Updating built-in assistant customization (user=%s)"
+    BUILTIN_CUSTOMIZATION_UPDATED = "Updated built-in assistant customization (user=%s)"
+    BUILTIN_CUSTOMIZATION_RESETTING = "Resetting built-in assistant customization (user=%s)"
+    BUILTIN_CUSTOMIZATION_RESET = "Reset built-in assistant customization (user=%s)"
 
     # --- Chat / messaging ---
     CHAT_RECEIVE = "[thread=%s] POST /chat - message=%s"

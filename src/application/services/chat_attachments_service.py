@@ -17,6 +17,7 @@ always builds the temporary prefix from the ``current_user_id`` contextvar
 """
 
 import logging
+from collections.abc import Awaitable, Callable
 
 from src.application.requests.chat import ChatAttachmentIn
 from src.domain.entities.agent_config import AgentConfig
@@ -82,6 +83,7 @@ class ChatAttachmentsService:
         store_files: StoreFileRepository,
         files_client: FilesMcpClient,
         limits: AttachmentLimits,
+        builtin_config_provider: Callable[[], Awaitable[AgentConfig]] | None = None,
     ) -> None:
         """Wire the ports (no per-request state).
 
@@ -99,6 +101,7 @@ class ChatAttachmentsService:
         self._store_files = store_files
         self._files_client = files_client
         self._limits = limits
+        self._builtin_config_provider = builtin_config_provider
 
     async def prepare_for_request(
         self,
@@ -277,6 +280,8 @@ class ChatAttachmentsService:
         from src.application.services.builtin_agent import builtin_agent_config, is_builtin_agent_name
 
         if is_builtin_agent_name(agent_name):
+            if self._builtin_config_provider is not None:
+                return await self._builtin_config_provider()
             return builtin_agent_config()
         yaml_content = await self._config_store.get(agent_name)
         return self._config_loader.load_from_string(yaml_content)

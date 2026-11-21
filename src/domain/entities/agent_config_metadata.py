@@ -25,3 +25,6 @@ class AgentConfigMetadata(BaseModel):
     # Composable AI Assistant resolved by the built-in overlay — never
     # persisted and never restored as a database column.
     is_builtin: bool = False
+    # Overlay-computed per-user marker: ``True`` only when the built-in
+    # assistant resolves to the current user's customization snapshot.
+    is_customized: bool = False

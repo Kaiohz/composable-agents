@@ -268,21 +268,21 @@ class AgentPlatformToolsetBuilder:
             """List the current user's agent metadata (built-in assistant included).
 
             REQ-011: the projection mirrors REST/MCP exactly — the built-in
-            assistant is overlaid first with ``is_builtin=true``.
+            assistant is overlaid first with its effective per-user metadata.
             """
-            from src.application.services.builtin_agent import builtin_agent_metadata
-
             deps = deps_lazy()
             agents = await deps.get_list_agent_configs_use_case().execute()
-            return _json([_data(builtin_agent_metadata()), *(_data(agent) for agent in agents)])
+            effective_builtin = await deps.get_effective_builtin_agent_service().get_effective_metadata()
+            return _json([_data(effective_builtin), *(_data(agent) for agent in agents)])
 
         async def composable_agents_get(agent_name: str) -> str:
             """Get one agent's validated configuration by exact name."""
-            from src.application.services.builtin_agent import builtin_agent_config, is_builtin_agent_name
+            from src.application.services.builtin_agent import is_builtin_agent_name
 
             deps = deps_lazy()
             if is_builtin_agent_name(agent_name):
-                return _json(_data(builtin_agent_config()))
+                effective = await deps.get_effective_builtin_agent_service().get_effective_config()
+                return _json(_data(effective))
             config = await deps.get_get_agent_config_use_case().execute(name=agent_name)
             return _json(_data(config))
 
@@ -299,19 +299,35 @@ class AgentPlatformToolsetBuilder:
             return _json(_data(config))
 
         async def composable_agents_update(agent_name: str, yaml: str) -> str:
-            """Replace an existing custom agent's YAML document."""
-            from src.application.services.builtin_agent import ensure_not_builtin
+            """Replace a custom agent's YAML, or the user's built-in customization."""
+            from src.application.services.builtin_agent import is_builtin_agent_name
             from src.application.services.route_validation import read_yaml_bytes, validate_agent_name
 
             deps = deps_lazy()
             validate_agent_name(agent_name)
-            ensure_not_builtin(agent_name)
             yaml_content = read_yaml_bytes(yaml.encode("utf-8"))
+            if is_builtin_agent_name(agent_name):
+                config = await deps.get_effective_builtin_agent_service().update(agent_name, yaml_content)
+                return _json(_data(config))
             config = await deps.get_update_agent_config_use_case().execute(name=agent_name, yaml_content=yaml_content)
             return _json(_data(config))
 
+        async def composable_agents_reset_customization(agent_name: str) -> str:
+            """Reset the user's built-in assistant customization to its default."""
+            from src.application.services.builtin_agent import is_builtin_agent_name
+            from src.application.services.route_validation import validate_agent_name
+            from src.domain.errors.agent import AgentNotFoundError
+            from src.domain.errors.messages import ErrorMessage
+
+            deps = deps_lazy()
+            validate_agent_name(agent_name)
+            if not is_builtin_agent_name(agent_name):
+                raise AgentNotFoundError(ErrorMessage.AGENT_NOT_FOUND.format(name=agent_name))
+            await deps.get_effective_builtin_agent_service().reset()
+            return _json({"reset": agent_name})
+
         async def composable_agents_delete(agent_name: str) -> str:
-            """Delete an existing custom agent (destructive, requires care)."""
+            """Delete an existing custom agent (the built-in assistant is protected)."""
             from src.application.services.builtin_agent import ensure_not_builtin
 
             deps = deps_lazy()
@@ -324,6 +340,7 @@ class AgentPlatformToolsetBuilder:
             self._tool(composable_agents_get, AgentNameArgs),
             self._tool(composable_agents_create, AgentYamlArgs),
             self._tool(composable_agents_update, AgentYamlArgs),
+            self._tool(composable_agents_reset_customization, AgentNameArgs),
             self._tool(composable_agents_delete, AgentNameArgs),
         ]
 
