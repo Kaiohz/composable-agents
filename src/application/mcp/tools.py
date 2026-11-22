@@ -543,45 +543,40 @@ def _register_prompts_family(mcp, safe_mcp_call) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Models family (REQ-015)
+# Models family (MODEL-007: same two-field business contract as REST)
 # ---------------------------------------------------------------------------
 def _register_models_family(mcp, safe_mcp_call) -> None:
     @mcp.tool(name="composable_models_list", annotations=READONLY())
     @safe_mcp_call
     async def composable_models_list() -> McpModelsList:
-        """List metadata-only model definitions."""
+        """List identity-only model definitions."""
         models = await _deps().get_list_models_use_case().execute()
         return McpModelsList(models=list(models))
 
     @mcp.tool(name="composable_models_get", annotations=READONLY())
     @safe_mcp_call
     async def composable_models_get(model_id: str) -> ModelMetadata:
-        """Get one model definition (metadata only)."""
+        """Get one model definition (identity only)."""
         return await _deps().get_get_model_use_case().execute(model_id)
 
     @mcp.tool(name="composable_models_create", annotations=MUTATING())
     @safe_mcp_call
     async def composable_models_create(args: CreateModelRequest) -> ModelMetadata:
-        """Create a model definition (metadata only; credential fields rejected)."""
+        """Create a model identity (name + provider_model; nothing else accepted)."""
         return (
             await _deps()
             .get_create_model_use_case()
             .execute(
                 name=args.name,
-                provider=args.provider,
                 provider_model=args.provider_model,
-                base_url=str(args.base_url) if args.base_url else None,
             )
         )
 
     @mcp.tool(name="composable_models_update", annotations=MUTATING())
     @safe_mcp_call
     async def composable_models_update(model_id: str, args: UpdateModelRequest) -> ModelMetadata:
-        """Update model metadata (explicit nullable semantics preserved)."""
-        changes = args.model_dump(exclude_unset=True)
-        if "base_url" in changes and changes["base_url"] is not None:
-            changes["base_url"] = str(changes["base_url"])
-        return await _deps().get_update_model_use_case().execute(model_id, changes)
+        """Update model identity fields (provided fields only)."""
+        return await _deps().get_update_model_use_case().execute(model_id, args.model_dump(exclude_unset=True))
 
     @mcp.tool(name="composable_models_delete", annotations=DESTRUCTIVE())
     @safe_mcp_call

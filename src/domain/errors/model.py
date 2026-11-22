@@ -17,6 +17,6 @@ class ModelNotFoundError(ModelError):
 
 
 class ModelInUseError(ModelError):
-    """The model is referenced by at least one agent and cannot be deleted (MDL-004)."""
+    """The model is referenced by at least one agent and cannot be deleted (MODEL-008)."""
 
     status_code = ErrorCode.CONFLICT

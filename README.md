@@ -663,11 +663,11 @@ All endpoints are prefixed appropriately. The server runs on `http://localhost:8
 | `PUT` | `/api/v1/store/files/{path}` | Create or replace a file in the store | `200` |
 | `DELETE` | `/api/v1/store/files/{path}` | Delete a file from the store | `204` |
 | `WS` | `/api/v1/ws/{thread_id}` | WebSocket endpoint for streaming chat | -- |
-| `GET` | `/api/v1/models` | List the authenticated user's reusable model metadata | `200` |
-| `POST` | `/api/v1/models` | Create a metadata-only model definition | `201` |
-| `GET` | `/api/v1/models/{id}` | Get a reusable model definition | `200` |
-| `PATCH` | `/api/v1/models/{id}` | Edit model metadata (`base_url: null` clears it) | `200` |
-| `DELETE` | `/api/v1/models/{id}` | Delete an unreferenced model definition (in-use returns `409`) | `204` |
+| `GET` | `/api/v1/models` | List the authenticated user's identity-only model catalog entries | `200` |
+| `POST` | `/api/v1/models` | Create an identity-only model entry (`name` + `provider_model`) | `201` |
+| `GET` | `/api/v1/models/{id}` | Get a reusable model entry | `200` |
+| `PATCH` | `/api/v1/models/{id}` | Edit `name` and/or `provider_model` | `200` |
+| `DELETE` | `/api/v1/models/{id}` | Delete an unreferenced model entry (in-use returns `409`; malformed IDs return `404`) | `204` |
 | `GET` | `/api/v1/prompts` | List the authenticated user's prompts | `200` |
 | `POST` | `/api/v1/prompts` | Create a prompt (creates immutable version 1) | `201` |
 | `GET` | `/api/v1/prompts/{id}` | Get prompt metadata | `200` |
@@ -1265,9 +1265,9 @@ curl -X DELETE http://localhost:8000/api/v1/prompts/7e6a56fd-83e7-46a1-a2f2-f5c5
 
 Success: `204`. A referenced prompt returns `409`.
 
-### 15. Model Catalog (metadata-only)
+### 15. Model Catalog (identity-only)
 
-Models are reusable, per-user configuration records. They contain **no API keys or other credentials**; runtime credential resolution is unchanged.
+Models are reusable, per-user identity records: a display name plus the `provider_model` identifier to execute. The provider connection (`provider`, `base_url`, and `api_key`) is owned exclusively by [Per-User LLM Settings](#per-user-llm-settings). Model records contain **no provider endpoints, API keys, or other credentials**.
 
 #### 15.1 Create a Model
 
@@ -1276,14 +1276,12 @@ curl -X POST http://localhost:8000/api/v1/models \
   -H "Content-Type: application/json" \
   -H "X-API-Key: <API_KEY>" \
   -d '{
-    "name": "Sonnet via OpenRouter",
-    "provider": "openai",
-    "provider_model": "anthropic/claude-sonnet-4",
-    "base_url": "https://openrouter.ai/api/v1"
+    "name": "GLM Flash via OpenRouter",
+    "provider_model": "z-ai/glm-5.3-flash:nitro"
   }'
 ```
 
-`base_url` is optional. The response exposes only `id`, `name`, `provider`, `provider_model`, `base_url`, `created_at`, and `updated_at`.
+Unknown or removed fields such as `provider` and `base_url` are rejected with `422`. The response exposes only `id`, `name`, `provider_model`, `created_at`, and `updated_at`.
 
 #### 15.2 Edit a Model
 
@@ -1291,10 +1289,10 @@ curl -X POST http://localhost:8000/api/v1/models \
 curl -X PATCH http://localhost:8000/api/v1/models/<model_id> \
   -H "Content-Type: application/json" \
   -H "X-API-Key: <API_KEY>" \
-  -d '{"provider_model": "anthropic/claude-sonnet-4-5"}'
+  -d '{"provider_model": "z-ai/glm-5.3-flash"}'
 ```
 
-`{"base_url": null}` clears the optional base URL. Editing metadata affects referencing agents on their next invocation.
+Send at least one editable field; omitted fields keep their current value. Editing `provider_model` affects referencing agents on their next invocation.
 
 #### 15.3 Reference a Model from Agent YAML
 
@@ -2231,7 +2229,7 @@ The database uses a flat normalized schema. Thread persistence relies on a singl
 | `user_llm_settings` | Per-user LLM provider settings (Fernet-encrypted `api_key_encrypted`). PK is `user_id` — one configured provider per user. | ✅ |
 | `prompts` | Per-user prompt metadata. Columns: `id` (UUID PK), `user_id`, `name`, `description`, `latest_version`, timestamps. | ✅ |
 | `prompt_versions` | Immutable prompt versions. Columns: `prompt_id` (FK), `version`, `content`, `created_at`, `user_id`. Unique `(prompt_id, version)`. | ✅ |
-| `models` | Metadata-only per-user model catalog. Columns: `id` (UUID PK), `user_id`, `name`, `provider`, `provider_model`, nullable `base_url`, timestamps. Unique `(user_id, name)`. Stores no credentials. | ✅ |
+| `models` | Identity-only per-user model catalog. Columns: `id` (UUID PK), `user_id`, `name`, `provider_model`, timestamps. Unique `(user_id, name)`. Provider/base URL/API key are owned by `user_llm_settings`, not by this table; it stores no credentials. | ✅ |
 | `crons` | Per-user cron definitions. Columns: `id` (UUID PK), `user_id`, `name`, `agent_name`, `message`, `cron_expression`, `timezone`, `enabled`, scheduling/timestamp fields. | ✅ |
 | `cron_runs` | Durable run history. Columns: `id` (UUID PK), `user_id`, `cron_id` (FK), `trigger`, `status`, `occurrence_at`, `thread_id`, timestamps, safe `error`. | ✅ |
 
@@ -2265,6 +2263,7 @@ Relevant migrations:
 | `017_create_crons_and_cron_runs_tables` | Creates `crons` and `cron_runs`, CHECK constraints, run-history/due-scan indexes, forced per-user RLS, and the scheduled-occurrence uniqueness index. |
 | `018_make_legacy_rls_policies_bypass_aware` | Makes legacy per-user policies honor the explicit `app.bypass_rls` context for migrations and scheduler system operations. |
 | `019_create_cron_runs_single_active_index` | Adds DB-level uniqueness for at most one active run per cron and idempotent skipped occurrence records. |
+| `024_drop_models_connection_columns` | Reduces the model catalog to its identity fields by dropping `models.provider` and `models.base_url`; Settings remains the single owner of the LLM connection. |
 
 > The `mcp_servers` table is **not** managed here. It is owned by mcp-raganything's Alembic migration `001_create_mcp_servers_table` (tracked in the `raganything_alembic_version` table).
 
@@ -2323,7 +2322,11 @@ Prompt storage, listing, versioning, and agent lookup no longer use Phoenix. The
 
 ### Local prompts and metadata-only models
 
-`AgentConfig` accepts optional `prompt_ref` / `model_ref`. `prompt_ref` is mutually exclusive with `system_prompt` / `system_prompt_file`. `model_ref` takes precedence over legacy `model` and stores no credential data. Existing YAML without these references remains valid.
+`AgentConfig` accepts optional `prompt_ref` / `model_ref`. `prompt_ref` is mutually exclusive with `system_prompt` / `system_prompt_file`. `model_ref` takes precedence over legacy `model`, selects the catalog's `provider_model`, and stores no credential or connection data. Existing YAML without these references remains valid.
+
+### Model catalog is identity-only
+
+`models.provider` and `models.base_url` were removed (migration `024`). `POST` / `PATCH /api/v1/models` now accept only the editable fields `name` and `provider_model`; `provider`, `base_url`, and `base_url: null` are rejected with `422`. The user's LLM Settings is the **single source** of the provider connection (`provider`, `base_url`, `api_key`), so a Model can no longer override the Settings endpoint at runtime.
 
 ### Immutable thread source
 

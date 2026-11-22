@@ -2,7 +2,8 @@
 
 The PATCH DTOs of the feature registries follow *field-presence* semantics: an
 absent field is untouched, and for the fields the spec declares **nullable**
-(``description`` on prompts, ``base_url`` on models) an explicit ``null`` clears
+(exactly ``description`` on prompts — Models no longer carry a clearable field,
+their editable fields are required on every write) an explicit ``null`` clears
 the stored value. An explicit ``null`` for every other field is a malformed body
 and must be rejected at the request boundary with a clean 422 — never allowed to
 reach the database (where a NOT NULL violation would surface as a 5xx with

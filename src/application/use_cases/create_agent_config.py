@@ -49,7 +49,7 @@ async def validate_registry_refs(
             await prompt_repository.get_version(str(config.prompt_ref.id), config.prompt_ref.version)
     if config.model_ref is not None:
         if model_repository is None:
-            raise ConfigError(f"Agent '{config.name}' sets model_ref but no model repository is wired.")
+            raise ConfigError(ErrorMessage.MODEL_REPOSITORY_NOT_WIRED.format(name=config.name))
         await model_repository.get(str(config.model_ref))
 
 

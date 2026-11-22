@@ -885,7 +885,7 @@ def get_get_prompt_version_use_case() -> GetPromptVersionUseCase:
 
 
 def get_create_model_use_case() -> CreateModelUseCase:
-    """Provide a CreateModelUseCase instance (metadata-only, MDL-001)."""
+    """Provide a CreateModelUseCase instance (identity-only, MODEL-002)."""
     return CreateModelUseCase(_require_model_repository())
 
 
@@ -905,7 +905,7 @@ def get_update_model_use_case() -> UpdateModelUseCase:
 
 
 def get_delete_model_use_case() -> DeleteModelUseCase:
-    """Provide a DeleteModelUseCase instance (reference-safe, MDL-004)."""
+    """Provide a DeleteModelUseCase instance (reference-safe, MODEL-008)."""
     return DeleteModelUseCase(_require_model_repository())
 
 

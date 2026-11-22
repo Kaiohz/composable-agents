@@ -27,6 +27,7 @@ from typing import Any
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
+from src.application.requests.model import CreateModelRequest, UpdateModelRequest
 from src.domain.logging.messages import LogMessage
 
 logger = logging.getLogger(__name__)
@@ -147,19 +148,31 @@ class ModelIdArgs(BaseModel):
     model_id: str = Field(..., min_length=1)
 
 
-class ModelCreateArgs(BaseModel):
-    name: str = Field(..., min_length=1)
-    provider: str = Field(..., min_length=1)
-    provider_model: str = Field(..., min_length=1)
-    base_url: str | None = None
+class ModelCreateArgs(CreateModelRequest):
+    """Agent-facing create args — inherits the REST contract (MODEL-007).
+
+    Deriving from the application DTO (the single source of truth shared with
+    REST and the MCP control plane) makes drift structurally impossible:
+    ``extra="forbid"`` rejects removed/unknown fields and both values are
+    trimmed and non-empty after trim.
+
+    The tool coroutine takes the SCHEMA FIELDS as flat arguments: the runner's
+    tool invocation expands the validated ``args_schema`` into kwargs (schemas
+    are the validation surface, never the call surface).
+    """
 
 
-class ModelPatchArgs(BaseModel):
+class ModelPatchArgs(UpdateModelRequest):
+    """Agent-facing patch args — the REST contract plus the ``model_id`` target.
+
+    Inheriting :class:`UpdateModelRequest` keeps the exact PATCH semantics:
+    an unknown/removed field is rejected, provided values are non-null and
+    non-empty after trim, and an empty patch (only ``model_id``) is rejected.
+    The tool coroutine mirrors these fields as flat arguments (see
+    :class:`ModelCreateArgs`).
+    """
+
     model_id: str = Field(..., min_length=1)
-    name: str | None = None
-    provider: str | None = None
-    provider_model: str | None = None
-    base_url: str | None = None
 
 
 class CronIdArgs(BaseModel):
@@ -598,7 +611,7 @@ class AgentPlatformToolsetBuilder:
         deps_lazy = self._deps
 
         async def composable_models_list() -> str:
-            """List metadata-only model definitions."""
+            """List identity-only model definitions."""
             models = await deps_lazy().get_list_models_use_case().execute()
             return _json([_data(model) for model in models])
 
@@ -607,29 +620,27 @@ class AgentPlatformToolsetBuilder:
             model = await deps_lazy().get_get_model_use_case().execute(model_id)
             return _json(_data(model))
 
-        async def composable_models_create(args: ModelCreateArgs) -> str:
-            """Create a model definition (metadata only — never credentials)."""
-            model = (
-                await deps_lazy()
-                .get_create_model_use_case()
-                .execute(
-                    name=args.name, provider=args.provider, provider_model=args.provider_model, base_url=args.base_url
-                )
-            )
+        async def composable_models_create(name: str, provider_model: str) -> str:
+            """Create a model identity (name + provider_model only)."""
+            model = await deps_lazy().get_create_model_use_case().execute(name=name, provider_model=provider_model)
             return _json(_data(model))
 
-        async def composable_models_update(args: ModelPatchArgs) -> str:
-            """Update model metadata fields."""
+        async def composable_models_update(
+            model_id: str,
+            name: str | None = None,
+            provider_model: str | None = None,
+        ) -> str:
+            """Update model identity fields (REST-validated presence semantics)."""
+            # ``args_schema`` (ModelPatchArgs) already applied the REST rules:
+            # unknown/removed fields rejected, explicit nulls rejected and
+            # provided values trimmed — an argument of ``None`` here therefore
+            # always means "field absent from the call" (presence semantics).
             changes: dict[str, Any] = {}
-            if args.name is not None:
-                changes["name"] = args.name
-            if args.provider is not None:
-                changes["provider"] = args.provider
-            if args.provider_model is not None:
-                changes["provider_model"] = args.provider_model
-            if args.base_url is not None:
-                changes["base_url"] = args.base_url
-            model = await deps_lazy().get_update_model_use_case().execute(args.model_id, changes)
+            if name is not None:
+                changes["name"] = name
+            if provider_model is not None:
+                changes["provider_model"] = provider_model
+            model = await deps_lazy().get_update_model_use_case().execute(model_id, changes)
             return _json(_data(model))
 
         async def composable_models_delete(model_id: str) -> str:
