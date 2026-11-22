@@ -88,7 +88,9 @@ class TestLatestVsPinnedResolution:
             )
 
         # --- Add version 2 (CACHE-002: new prompt content version) ---
-        v2 = await client.post(f"/api/v1/prompts/{pid}/versions", headers=users["a"]["headers"], json={"content": "LATEST_MARKER_V2"})
+        v2 = await client.post(
+            f"/api/v1/prompts/{pid}/versions", headers=users["a"]["headers"], json={"content": "LATEST_MARKER_V2"}
+        )
         assert v2.status_code == 201
 
         # Latest agent must resolve v2 on next invocation…
@@ -96,7 +98,9 @@ class TestLatestVsPinnedResolution:
         assert resp.status_code == 200
         latest_records = stub_llm.app.requests[before_count:]
         assert len(latest_records) == 1
-        assert "LATEST_MARKER_V2" in "".join(latest_records[0].system_messages), "Latest agent did not pick up the new version"
+        assert "LATEST_MARKER_V2" in "".join(latest_records[0].system_messages), (
+            "Latest agent did not pick up the new version"
+        )
 
         # …while the pinned agent keeps resolving exactly v1.
         count = len(stub_llm.app.requests)
@@ -104,7 +108,9 @@ class TestLatestVsPinnedResolution:
         assert resp.status_code == 200
         pinned_records = stub_llm.app.requests[count:]
         assert len(pinned_records) == 1
-        assert "LATEST_MARKER_V1" in "".join(pinned_records[0].system_messages), "Pinned agent lost its immutable version"
+        assert "LATEST_MARKER_V1" in "".join(pinned_records[0].system_messages), (
+            "Pinned agent lost its immutable version"
+        )
 
     async def test_metadata_only_prompt_edit_does_not_change_content(self, client, users, stub_llm):
         """CACHE-002: prompt metadata-only edit → no prompt-content rebuild."""
@@ -151,21 +157,18 @@ class TestModelResolution:
     async def test_catalog_model_ref_used_for_metadata_on_invocation(self, client, users, stub_llm):
         """E2E-02: an agent with model_ref resolves the catalog model metadata
         (stub observes the effective model name == provider_model, not the
-        legacy YAML model string)."""
+        legacy YAML model string). The creation payload follows the new
+        identity-only contract of model-catalog-settings-only.md §B."""
         model = await client.post(
             "/api/v1/models",
             headers=users["a"]["headers"],
-            json={"name": f"m-{uuid.uuid4().hex[:6]}", "provider": "stub", "provider_model": "catalog-gpt-a"},
+            json={"name": f"m-{uuid.uuid4().hex[:6]}", "provider_model": "catalog-gpt-a"},
         )
         assert model.status_code == 201
         model_id = model.json()["id"]
 
         name = f"agent-{uuid.uuid4().hex[:6]}"
-        yaml_text = (
-            f"name: {name}\ntools: []\ndebug: false\n"
-            f"model_ref: {model_id}\n"
-            "model: legacy-should-be-ignored\n"
-        )
+        yaml_text = f"name: {name}\ntools: []\ndebug: false\nmodel_ref: {model_id}\nmodel: legacy-should-be-ignored\n"
         thread = await _configured_stack(client, users, yaml_text, name)
         resp = await invoke_agent(client, users["a"]["headers"], thread["id"])
         assert resp.status_code == 200, resp.text
@@ -173,14 +176,51 @@ class TestModelResolution:
             f"Catalog model_ref not used for invocation: {stub_llm.app.requests[0].model}"
         )
 
-    async def test_model_metadata_edit_applies_on_next_invocation(self, client, users, stub_llm):
-        """CACHE-002: model metadata edit → rebuild/invalidate referencing
-        agents; success criterion 2.5."""
+    async def test_model_ref_connection_comes_only_from_llm_settings(self, client, users, stub_llm):
+        """RUNTIME-003/004: with ``model_ref``, the LLM connection (base URL and
+        API key) must come exclusively from the user's LLM Settings resolver —
+        the request reaches the Settings-configured stub endpoint carrying the
+        Settings API key, while the model name is the catalog's
+        ``provider_model``."""
         model = await client.post(
             "/api/v1/models",
             headers=users["a"]["headers"],
-            json={"name": f"m-{uuid.uuid4().hex[:6]}", "provider": "stub", "provider_model": "catalog-v1-model"},
+            json={"name": f"m-{uuid.uuid4().hex[:6]}", "provider_model": "settings-only-model"},
         )
+        assert model.status_code == 201, model.text
+        model_id = model.json()["id"]
+
+        name = f"agent-{uuid.uuid4().hex[:6]}"
+        yaml_text = f"name: {name}\ntools: []\ndebug: false\nmodel_ref: {model_id}\n"
+        await configure_llm_credentials(client, users["a"]["headers"], api_key="sk-settings-only-key")
+
+        _, created = await create_agent_yaml(client, users["a"]["headers"], yaml_text, name)
+        assert created.status_code == 201, created.text
+        thread = await create_thread(client, users["a"]["headers"], name)
+        assert thread.status_code == 201, thread.text
+
+        resp = await invoke_agent(client, users["a"]["headers"], thread.json()["id"])
+        assert resp.status_code == 200, resp.text
+
+        record = stub_llm.app.requests[-1]
+        # The request landed on the stub LLM (the ONLY endpoint configured via
+        # PUT /api/v1/settings/llm) with the Settings-managed key…
+        assert record.auth_header == "Bearer sk-settings-only-key", (
+            f"the model_ref agent must authenticate with the Settings key, got: {record.auth_header!r}"
+        )
+        # …and executed the catalog's provider_model.
+        assert record.model == "settings-only-model", record.model
+
+    async def test_model_metadata_edit_applies_on_next_invocation(self, client, users, stub_llm):
+        """CACHE-002: model metadata edit → rebuild/invalidate referencing
+        agents; success criterion 2.5. The PATCH follows the new contract:
+        only ``provider_model`` is sent."""
+        model = await client.post(
+            "/api/v1/models",
+            headers=users["a"]["headers"],
+            json={"name": f"m-{uuid.uuid4().hex[:6]}", "provider_model": "catalog-v1-model"},
+        )
+        assert model.status_code == 201, model.text
         model_id = model.json()["id"]
         name = f"agent-{uuid.uuid4().hex[:6]}"
         thread = await _configured_stack(client, users, yaml_model_ref(name, model_id), name)
@@ -192,7 +232,7 @@ class TestModelResolution:
         patched = await client.patch(
             f"/api/v1/models/{model_id}",
             headers=users["a"]["headers"],
-            json={"provider": "stub", "provider_model": "catalog-v2-model"},
+            json={"provider_model": "catalog-v2-model"},
         )
         assert patched.status_code == 200
 

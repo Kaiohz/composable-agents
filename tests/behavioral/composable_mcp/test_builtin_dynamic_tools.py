@@ -25,6 +25,11 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 BUILTIN_NAME = "composable-ai-assistant"
 
+# MODEL-001 — the identity field set of a Model resource; the Settings-owned
+# connection fields ``provider``/``base_url`` are removed from the contract.
+MODEL_IDENTITY_FIELDS = {"id", "name", "provider_model", "created_at", "updated_at"}
+REMOVED_MODEL_FIELDS = ("provider", "base_url")
+
 
 async def _run_assistant(mcp_base_url, users, message: str = "do work") -> dict:
     return await call_mcp_tool(
@@ -279,4 +284,138 @@ class TestAssistantRunsAgents:
         )
         assert "completed" not in blob.split('"status": "')[1][:40] if '"status": "' in blob else True, (
             "a refused self-invocation must not be reported as the final completed state"
+        )
+
+
+class TestPlatformModelTools:
+    """MODEL-007 through a REAL agent run (the agent-facing platform toolset):
+    the LLM-driven Model create/update tools follow the REST two-field contract
+    — same fields, removed (Settings-owned) fields rejected/exposed nowhere and
+    the same trim/non-empty rules (review C1: this is the surface that could
+    previously persist a blank ``name`` through ``model_copy``)."""
+
+    async def _create_model_via_mcp(
+        self, mcp_base_url, users, name: str = "Toolset Base", provider_model: str = "toolset-base-x"
+    ) -> dict:
+        created = await call_mcp_tool(
+            mcp_base_url,
+            users["a"]["headers"],
+            "composable_models_create",
+            {"args": {"name": name, "provider_model": provider_model}},
+        )
+        assert created["ok"], f"setting up the model through MCP failed: {created}"
+        return created["result"]
+
+    async def test_bound_update_schema_carries_the_rest_contract(
+        self, mcp_base_url, client, users, stub_llm, stub_registry
+    ):
+        """What the LLM actually receives: ``composable_models_update``'s bound
+        schema must carry the REST fields and never the removed ones."""
+        await configure_llm_credentials(client, users["a"]["headers"])
+        stub_llm.script(assistant_text("no tool"))
+        run = await _run_assistant(mcp_base_url, users)
+        assert run["ok"], f"assistant run failed: {run}"
+        tools = stub_llm.app.requests[0].body.get("tools", [])
+        binding = next((t for t in tools if t.get("function", {}).get("name") == "composable_models_update"), None)
+        assert binding is not None, "the platform toolset must expose composable_models_update to the assistant"
+        props = set(binding["function"]["parameters"].get("properties", {}))
+        assert props == {"model_id", "name", "provider_model"}, f"bound update schema fields: {sorted(props)}"
+        for removed in REMOVED_MODEL_FIELDS:
+            assert removed not in props, f"removed field '{removed}' is bound to the LLM-visible tool schema"
+
+    async def test_agent_facing_update_rejects_a_blank_name(self, mcp_base_url, client, users, stub_llm, stub_registry):
+        """Review C1: a whitespace-only ``name`` issued by the LLM must be
+        rejected (DTO trim rule) and must NOT be persisted."""
+        model = await self._create_model_via_mcp(mcp_base_url, users)
+        await configure_llm_credentials(client, users["a"]["headers"])
+        stub_llm.script(
+            assistant_tool_call("composable_models_update", {"model_id": model["id"], "name": "   "}),
+            assistant_text("self-corrected"),
+        )
+        result = await _run_assistant(mcp_base_url, users, "rename the model")
+        assert len(stub_llm.app.requests) >= 2, (
+            f"the tool call round must execute and surface the validation error: {result}"
+        )
+        got = await client.get(f"/api/v1/models/{model['id']}", headers=users["a"]["headers"])
+        assert got.status_code == 200, got.text
+        assert got.json()["name"] == model["name"], "the blank name must not be persisted"
+        assert got.json()["provider_model"] == model["provider_model"]
+
+    async def test_agent_facing_update_rejects_a_removed_field_argument(
+        self, mcp_base_url, client, users, stub_llm, stub_registry
+    ):
+        """A Settings-owned field in the tool call is an unknown field: rejected
+        by ``extra="forbid"``, persisted nowhere."""
+        model = await self._create_model_via_mcp(mcp_base_url, users)
+        await configure_llm_credentials(client, users["a"]["headers"])
+        stub_llm.script(
+            assistant_tool_call(
+                "composable_models_update",
+                {"model_id": model["id"], "name": "Hijack", "provider": "openai"},
+            ),
+            assistant_text("self-corrected"),
+        )
+        result = await _run_assistant(mcp_base_url, users, "update the model")
+        assert len(stub_llm.app.requests) >= 2, f"the tool call round must execute: {result}"
+        got = await client.get(f"/api/v1/models/{model['id']}", headers=users["a"]["headers"])
+        assert got.status_code == 200, got.text
+        assert got.json()["name"] == model["name"], "the invalid update must not be applied"
+        assert got.json()["provider_model"] == model["provider_model"]
+
+    async def test_agent_facing_partial_update_is_trimmed_and_keeps_the_omitted_field(
+        self, mcp_base_url, client, users, stub_llm, stub_registry
+    ):
+        """The DTO-derived schema applies the REST semantics through the real
+        agent run: presence-based subset, trimmed values, omitted field kept."""
+        model = await self._create_model_via_mcp(mcp_base_url, users)
+        await configure_llm_credentials(client, users["a"]["headers"])
+        stub_llm.script(
+            assistant_tool_call("composable_models_update", {"model_id": model["id"], "name": "  Renamed  "}),
+            assistant_text("renamed"),
+        )
+        result = await _run_assistant(mcp_base_url, users, "rename the model")
+        assert result["ok"], f"the valid update must succeed: {result}"
+        got = await client.get(f"/api/v1/models/{model['id']}", headers=users["a"]["headers"])
+        assert got.status_code == 200, got.text
+        assert got.json()["name"] == "Renamed", "the trimmed name must be persisted"
+        assert got.json()["provider_model"] == model["provider_model"], "the omitted field keeps its value"
+
+    async def test_agent_facing_create_is_identity_only(self, mcp_base_url, client, users, stub_llm, stub_registry):
+        """A valid two-field create through the toolset persists an identity-only
+        resource; a removed field cannot join the payload."""
+        await configure_llm_credentials(client, users["a"]["headers"])
+        stub_llm.script(
+            assistant_tool_call(
+                "composable_models_create", {"name": "  Agent Tool  ", "provider_model": "  agent-create-x  "}
+            ),
+            assistant_text("created"),
+        )
+        result = await _run_assistant(mcp_base_url, users, "create a model")
+        assert result["ok"], f"the valid create must succeed: {result}"
+        listed = await client.get("/api/v1/models", headers=users["a"]["headers"])
+        assert listed.status_code == 200, listed.text
+        items = listed.json()
+        assert len(items) == 1, f"exactly the tool-created model expected: {items}"
+        body = items[0]
+        assert set(body) == MODEL_IDENTITY_FIELDS, f"identity-only resource expected, got: {sorted(body)}"
+        for removed in REMOVED_MODEL_FIELDS:
+            assert removed not in body, f"removed field '{removed}' must not be persisted by the tool surface"
+        assert body["name"] == "Agent Tool" and body["provider_model"] == "agent-create-x"
+
+    async def test_agent_facing_create_rejects_a_removed_field_argument(
+        self, mcp_base_url, client, users, stub_llm, stub_registry
+    ):
+        """A Settings-owned field in a tool create call must persist nothing."""
+        await configure_llm_credentials(client, users["a"]["headers"])
+        stub_llm.script(
+            assistant_tool_call(
+                "composable_models_create", {"name": "Smuggled", "provider_model": "smuggled-x", "provider": "openai"}
+            ),
+            assistant_text("self-corrected"),
+        )
+        result = await _run_assistant(mcp_base_url, users, "create a model")
+        assert len(stub_llm.app.requests) >= 2, f"the tool call round must execute: {result}"
+        listed = await client.get("/api/v1/models", headers=users["a"]["headers"])
+        assert listed.status_code == 200 and listed.json() == [], (
+            f"the rejected create must persist nothing: {listed.json()}"
         )

@@ -1,8 +1,8 @@
-"""Model catalog CRUD use cases (spec §5.2 MDL-001…MDL-004).
+"""Model catalog CRUD use cases (spec §B MODEL-001…008).
 
-Models are metadata-only: UUID, display name, provider, provider model
-identifier, optional base URL and timestamps. No credential fields exist and
-none are accepted anywhere in this catalog (MDL-002).
+Models are identity-only: UUID, display name, ``provider_model`` identifier
+and timestamps. No credential or Settings connection field exists and none are
+accepted anywhere in this catalog (MODEL-009).
 """
 
 import logging
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 class CreateModelUseCase:
-    """Create a user-owned model metadata configuration."""
+    """Create a user-owned model identity."""
 
     def __init__(self, model_repository: ModelRepository) -> None:
         self._model_repository = model_repository
@@ -24,12 +24,10 @@ class CreateModelUseCase:
     async def execute(
         self,
         name: str,
-        provider: str,
         provider_model: str,
-        base_url: str | None = None,
     ) -> ModelMetadata:
-        """Persist the metadata configuration and return it (MDL-001)."""
-        model = ModelMetadata(name=name, provider=provider, provider_model=provider_model, base_url=base_url)
+        """Persist the identity configuration and return it (MODEL-002)."""
+        model = ModelMetadata(name=name, provider_model=provider_model)
         created = await self._model_repository.create(model)
         logger.info(LogMessage.MODEL_CREATED, created.id)
         return created
@@ -53,7 +51,7 @@ class GetModelUseCase:
 
 
 class ListModelsUseCase:
-    """List all model metadata owned by the current user."""
+    """List all model identities owned by the current user."""
 
     def __init__(self, model_repository: ModelRepository) -> None:
         self._model_repository = model_repository
@@ -63,27 +61,29 @@ class ListModelsUseCase:
 
 
 class UpdateModelUseCase:
-    """Edit provider, provider model identifier, base URL or display name.
+    """Edit the display name or the ``provider_model`` identifier.
 
     Only explicitly-provided fields are applied (``exclude_unset`` semantics),
-    so an omitted ``base_url`` leaves it untouched while an explicit ``null``
-    clears it.
+    so an omitted field keeps its current value (MODEL-006).
+
+    Referencing agents observe the edit on their next invocation.
     """
 
     def __init__(self, model_repository: ModelRepository) -> None:
         self._model_repository = model_repository
 
     async def execute(self, model_id: str, changes: dict[str, Any]) -> ModelMetadata:
-        """Apply the metadata edit and return the updated configuration.
-
-        Referencing agents observe the edit on their next invocation
-        (CACHE-002 fingerprint).
+        """Apply the identity edit and return the updated configuration.
 
         Raises:
             ModelNotFoundError: Missing or foreign model.
         """
         current = await self._model_repository.get(model_id)
-        updated = current.model_copy(update=changes)
+        # Re-validate through the entity: ``model_copy(update=...)`` SKIPS the
+        # Pydantic validators, so an unvalidated payload (e.g. an LLM-driven
+        # tool surface) could otherwise persist a blank name/provider_model
+        # (MODEL-002/004: non-empty after trim is a domain invariant).
+        updated = ModelMetadata.model_validate({**current.model_dump(), **changes})
         saved = await self._model_repository.update(updated)
         logger.info(LogMessage.MODEL_UPDATED, saved.id)
         return saved
@@ -96,11 +96,11 @@ class DeleteModelUseCase:
         self._model_repository = model_repository
 
     async def execute(self, model_id: str) -> None:
-        """Delete the metadata row.
+        """Delete the identity row.
 
         Raises:
             ModelNotFoundError: Missing or foreign model.
-            ModelInUseError: Referenced by at least one agent (MDL-004).
+            ModelInUseError: Referenced by at least one agent (MODEL-008).
         """
         await self._model_repository.delete(model_id)
         logger.info(LogMessage.MODEL_DELETED, model_id)

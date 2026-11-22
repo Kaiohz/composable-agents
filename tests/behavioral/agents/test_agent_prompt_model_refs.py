@@ -47,9 +47,7 @@ def yaml_model_ref(name: str, model_id: str, legacy_model: str | None = None) ->
 
 
 async def _create_prompt(client, headers, content="prompt content"):
-    resp = await client.post(
-        "/api/v1/prompts", headers=headers, json={"name": f"p-{_uuid()[:8]}", "content": content}
-    )
+    resp = await client.post("/api/v1/prompts", headers=headers, json={"name": f"p-{_uuid()[:8]}", "content": content})
     assert resp.status_code == 201
     return resp.json()
 
@@ -58,9 +56,7 @@ class TestPromptRefAccepted:
     async def test_latest_ref_saved_and_preserved(self, client, users):
         prompt = await _create_prompt(client, users["a"]["headers"])
         name = f"agent-{uuid.uuid4().hex[:8]}"
-        _, resp = await create_agent_yaml(
-            client, users["a"]["headers"], yaml_prompt_ref(name, prompt["id"]), name
-        )
+        _, resp = await create_agent_yaml(client, users["a"]["headers"], yaml_prompt_ref(name, prompt["id"]), name)
         assert resp.status_code == 201, resp.text
 
         got = await client.get(f"/api/v1/agents/{name}", headers=users["a"]["headers"])
@@ -82,14 +78,14 @@ class TestPromptRefAccepted:
     async def test_updating_to_inline_prompt_clears_ref(self, client, users):
         prompt = await _create_prompt(client, users["a"]["headers"])
         name = f"agent-{uuid.uuid4().hex[:8]}"
-        _, created = await create_agent_yaml(
-            client, users["a"]["headers"], yaml_prompt_ref(name, prompt["id"]), name
-        )
+        _, created = await create_agent_yaml(client, users["a"]["headers"], yaml_prompt_ref(name, prompt["id"]), name)
         assert created.status_code == 201
 
         yaml_legacy = f'name: {name}\nmodel: test-model\nsystem_prompt: "inline now"\ntools: []\ndebug: false\n'
         resp = await client.put(
-            f"/api/v1/agents/{name}", headers=users["a"]["headers"], files={"file": ("agent.yaml", yaml_legacy.encode(), "text/yaml")}
+            f"/api/v1/agents/{name}",
+            headers=users["a"]["headers"],
+            files={"file": ("agent.yaml", yaml_legacy.encode(), "text/yaml")},
         )
         assert resp.status_code == 200
         got = await client.get(f"/api/v1/agents/{name}", headers=users["a"]["headers"])
@@ -101,9 +97,7 @@ class TestPromptRefExclusivity:
     async def test_prompt_ref_with_inline_prompt_rejected(self, client, users):
         prompt = await _create_prompt(client, users["a"]["headers"])
         name = f"agent-{uuid.uuid4().hex[:8]}"
-        yaml_text = (
-            yaml_prompt_ref(name, prompt["id"], extra='system_prompt: "You are inline."\n')
-        )
+        yaml_text = yaml_prompt_ref(name, prompt["id"], extra='system_prompt: "You are inline."\n')
         _, resp = await create_agent_yaml(client, users["a"]["headers"], yaml_text, name)
         assert resp.status_code in VALIDATION_CODES
 
@@ -126,7 +120,7 @@ class TestPromptRefExclusivity:
     async def test_inline_plus_file_still_rejected(self, client, users):
         name = f"agent-{uuid.uuid4().hex[:8]}"
         yaml_text = (
-            f'name: {name}\nmodel: test-model\ntools: []\ndebug: false\n'
+            f"name: {name}\nmodel: test-model\ntools: []\ndebug: false\n"
             'system_prompt: "a"\nsystem_prompt_file: "b.txt"\n'
         )
         _, resp = await create_agent_yaml(client, users["a"]["headers"], yaml_text, name)
@@ -153,23 +147,19 @@ class TestPromptRefValidation:
 
     async def test_non_uuid_ref_rejected(self, client, users):
         name = f"agent-{uuid.uuid4().hex[:8]}"
-        _, resp = await create_agent_yaml(
-            client, users["a"]["headers"], yaml_prompt_ref(name, "not-a-uuid"), name
-        )
+        _, resp = await create_agent_yaml(client, users["a"]["headers"], yaml_prompt_ref(name, "not-a-uuid"), name)
         assert resp.status_code in VALIDATION_CODES
 
     async def test_missing_prompt_id_rejected(self, client, users):
         name = f"agent-{uuid.uuid4().hex[:8]}"
-        yaml_text = f'name: {name}\nmodel: test-model\ntools: []\nprompt_ref:\n  id: {_uuid()}\n'
+        yaml_text = f"name: {name}\nmodel: test-model\ntools: []\nprompt_ref:\n  id: {_uuid()}\n"
         _, resp = await create_agent_yaml(client, users["a"]["headers"], yaml_text, name)
         assert resp.status_code in UNAVAILABLE_CODES
 
     async def test_cross_user_prompt_ref_rejected_non_enumerating(self, client, users):
         a_prompt = await _create_prompt(client, users["a"]["headers"])
         name = f"agent-{uuid.uuid4().hex[:8]}"
-        _, resp = await create_agent_yaml(
-            client, users["b"]["headers"], yaml_prompt_ref(name, a_prompt["id"]), name
-        )
+        _, resp = await create_agent_yaml(client, users["b"]["headers"], yaml_prompt_ref(name, a_prompt["id"]), name)
         assert resp.status_code in UNAVAILABLE_CODES
 
     async def test_deleted_prompt_reference_rejected(self, client, users):
@@ -177,9 +167,7 @@ class TestPromptRefValidation:
         deleted = await client.delete(f"/api/v1/prompts/{prompt['id']}", headers=users["a"]["headers"])
         assert deleted.status_code == 204
         name = f"agent-{uuid.uuid4().hex[:8]}"
-        _, resp = await create_agent_yaml(
-            client, users["a"]["headers"], yaml_prompt_ref(name, prompt["id"]), name
-        )
+        _, resp = await create_agent_yaml(client, users["a"]["headers"], yaml_prompt_ref(name, prompt["id"]), name)
         assert resp.status_code in UNAVAILABLE_CODES
 
 
@@ -218,22 +206,20 @@ class TestModelRef:
     async def test_cross_user_model_ref_rejected(self, client, users):
         a_model = await _create_model(client, users["a"]["headers"])
         name = f"agent-{uuid.uuid4().hex[:8]}"
-        _, resp = await create_agent_yaml(
-            client, users["b"]["headers"], yaml_model_ref(name, a_model["id"]), name
-        )
+        _, resp = await create_agent_yaml(client, users["b"]["headers"], yaml_model_ref(name, a_model["id"]), name)
         assert resp.status_code in UNAVAILABLE_CODES
 
     async def test_removed_model_ref_on_update(self, client, users):
         model = await _create_model(client, users["a"]["headers"])
         name = f"agent-{uuid.uuid4().hex[:8]}"
-        _, created = await create_agent_yaml(
-            client, users["a"]["headers"], yaml_model_ref(name, model["id"]), name
-        )
+        _, created = await create_agent_yaml(client, users["a"]["headers"], yaml_model_ref(name, model["id"]), name)
         assert created.status_code == 201
 
         yaml_legacy = f'name: {name}\nmodel: back-to-legacy\nsystem_prompt: "s"\ntools: []\ndebug: false\n'
         resp = await client.put(
-            f"/api/v1/agents/{name}", headers=users["a"]["headers"], files={"file": ("agent.yaml", yaml_legacy.encode(), "text/yaml")}
+            f"/api/v1/agents/{name}",
+            headers=users["a"]["headers"],
+            files={"file": ("agent.yaml", yaml_legacy.encode(), "text/yaml")},
         )
         assert resp.status_code == 200
         got = await client.get(f"/api/v1/agents/{name}", headers=users["a"]["headers"])
@@ -260,9 +246,7 @@ class TestLegacyCompatibility:
         model = await _create_model(client, users["a"]["headers"])
         name = f"agent-{uuid.uuid4().hex[:8]}"
         yaml_text = (
-            f"name: {name}\ntools: []\ndebug: false\n"
-            f"prompt_ref:\n  id: {prompt['id']}\n"
-            f"model_ref: {model['id']}\n"
+            f"name: {name}\ntools: []\ndebug: false\nprompt_ref:\n  id: {prompt['id']}\nmodel_ref: {model['id']}\n"
         )
         _, resp = await create_agent_yaml(client, users["a"]["headers"], yaml_text, name)
         assert resp.status_code == 201
@@ -271,11 +255,14 @@ class TestLegacyCompatibility:
         assert got.json()["model_ref"] == model["id"]
 
 
-async def _create_model(client, headers, provider="openai", provider_model="catalog-model"):
+async def _create_model(client, headers, name: str | None = None, provider_model="catalog-model"):
+    """Create a Model through the REAL route, using the new identity-only
+    contract (exactly ``name`` + ``provider_model`` — no ``provider``,
+    no ``base_url``)."""
     resp = await client.post(
         "/api/v1/models",
         headers=headers,
-        json={"name": f"m-{uuid.uuid4().hex[:8]}", "provider": provider, "provider_model": provider_model},
+        json={"name": name or f"m-{uuid.uuid4().hex[:8]}", "provider_model": provider_model},
     )
     assert resp.status_code == 201
     return resp.json()

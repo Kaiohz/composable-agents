@@ -308,7 +308,7 @@ class PersistentAgentRegistry(AgentRegistry):
         # LLM-usage capture identity (dashboard spec §1): the resolved
         # serving model name (AGT-003 precedence) and the user's configured
         # provider label (fallback: the OpenAI-compatible serving chain).
-        model_name, _model_base_url = await resolve_model_identity(config, self._build_model_resolver())
+        model_name = await resolve_model_identity(config, self._build_model_resolver())
         provider = _DEFAULT_PROVIDER
         uid = current_user_id.get() or ""
         if self._llm_provider_resolver is not None:

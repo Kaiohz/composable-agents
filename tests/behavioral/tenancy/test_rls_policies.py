@@ -110,16 +110,12 @@ class TestUserScopedIsolation:
 
         with as_user("user-b"):
             async with engine.begin() as conn:
-                count_b = (
-                    await conn.execute(text(f"SELECT count(*) FROM {table}"))
-                ).scalar_one()
+                count_b = (await conn.execute(text(f"SELECT count(*) FROM {table}"))).scalar_one()
         assert count_b == 0, "user-b must not see user-a's prompt rows (RLS)"
 
         with as_user(owner_id):
             async with engine.begin() as conn:
-                count_a = (
-                    await conn.execute(text(f"SELECT count(*) FROM {table}"))
-                ).scalar_one()
+                count_a = (await conn.execute(text(f"SELECT count(*) FROM {table}"))).scalar_one()
         assert count_a == 1
 
     async def test_insert_with_foreign_user_id_rejected(self, engine, as_user):
@@ -147,8 +143,8 @@ class TestUserScopedIsolation:
             async with engine.begin() as conn:
                 await conn.execute(
                     text(
-                        f"INSERT INTO {table} (id, user_id, name, provider, provider_model, base_url, created_at, updated_at) "
-                        f"VALUES (:id, :user_id, 'm', 'openai', 'pm', NULL, now(), now())"
+                        f"INSERT INTO {table} (id, user_id, name, provider_model, created_at, updated_at) "
+                        f"VALUES (:id, :user_id, 'm', 'pm', now(), now())"
                     ),
                     {"id": str(uuid.uuid4()), "user_id": owner_id},
                 )
@@ -162,9 +158,7 @@ class TestUserScopedIsolation:
 class TestThreadSourceMigration:
     async def test_source_is_not_null_with_chat_default(self, engine):
         """§8: threads.source non-null, backfilled to 'chat'."""
-        row = (
-            await _raw_columns(engine, "threads")
-        )
+        row = await _raw_columns(engine, "threads")
         source = next((c for c in row if c["name"] == "source"), None)
         assert source is not None, "threads.source column is missing (migration not applied)"
         assert source["nullable"] is False, "threads.source must be NOT NULL"
