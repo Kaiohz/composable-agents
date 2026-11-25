@@ -14,6 +14,8 @@ Delegation contract pinned here:
 * a request whose Host is the production host succeeds (NO 421) — the
   production regression (Host `composables-agent.soludev.tech` rejected with
   421 by the SDK's local-only default list) is pinned;
+* the default-port Host forms (``host:443`` / ``host:80``, QA BUG-002) are
+  accepted for an allow-listed host and rejected for a foreign one;
 * a non-allowed Host still gets 421 (DNS-rebinding protection stays ENABLED);
 * an Origin from ``settings.allowed_origins`` is accepted, a foreign Origin is
   rejected with 403.
@@ -89,4 +91,70 @@ class TestTransportSecurityExplicitSettings:
         )
         assert resp.status_code == 403, (
             f"a foreign Origin must be rejected with 403, got {resp.status_code}: {resp.text}"
+        )
+
+
+class TestDefaultPortHostForms:
+    """QA BUG-002: the default-port Host forms must reach the MCP endpoint.
+
+    An ingress may forward the port the client dialed — ``Host:
+    composables-agent.soludev.tech:443`` is the SAME allow-listed endpoint
+    as the port-less form behind the TLS-terminating proxy. The SDK's exact
+    Host matcher used to 421 the port form; only the DEFAULT-port suffixes
+    (``:443`` https / ``:80`` http) are normalized, a still-foreign Host
+    keeps answering 421 with DNS-rebinding protection ENABLED (REQ-013).
+    """
+
+    async def test_allowed_host_with_https_default_port_is_accepted(self, mcp_base_url, users):
+        """QA curl [35]: the allow-listed Host with an explicit ``:443`` must
+        NOT 421 (initialize succeeds)."""
+        resp = await mcp_post_status(
+            mcp_base_url,
+            headers={"Host": f"{PROD_HOST}:443", **users["a"]["headers"]},
+            method="initialize",
+        )
+        assert resp.status_code == 200, (
+            f"Host {PROD_HOST}:443 is the allow-listed endpoint behind the TLS proxy — got "
+            f"{resp.status_code}: {resp.text}"
+        )
+
+    async def test_allowed_host_with_http_default_port_is_accepted(self, mcp_base_url, users):
+        """``:80`` is the plain-HTTP default port — normalized the same way."""
+        resp = await mcp_post_status(
+            mcp_base_url,
+            headers={"Host": f"{PROD_HOST}:80", **users["a"]["headers"]},
+            method="initialize",
+        )
+        assert resp.status_code == 200, (
+            f"Host {PROD_HOST}:80 is the same allow-listed endpoint — got {resp.status_code}: {resp.text}"
+        )
+
+    async def test_foreign_host_with_default_port_suffix_is_still_rejected(self, mcp_base_url, users):
+        """DNS-rebinding protection stays ENABLED (REQ-013): a foreign Host
+        with a default-port suffix is NOT smuggled through the normalization.
+        """
+        resp = await mcp_post_status(
+            mcp_base_url,
+            headers={"Host": f"{FOREIGN_HOST}:443", **users["a"]["headers"]},
+            method="initialize",
+        )
+        assert resp.status_code == 421, (
+            f"a foreign Host stays foreign with an explicit port — got {resp.status_code}: {resp.text}"
+        )
+
+    async def test_default_port_host_on_401_carries_the_discovery_challenge(self, mcp_base_url):
+        """QA curl [36]: without credentials AND with ``MCP_PUBLIC_BASE_URL``
+        unset, the ``Host: <allowed-host>:443`` form must still produce the
+        ``WWW-Authenticate`` discovery pointer (derived from the canonical,
+        port-less origin) instead of a header-less 401 that silently kills
+        the OAuth2 discovery chain."""
+        resp = await mcp_post_status(
+            mcp_base_url,
+            headers={"Host": f"{PROD_HOST}:443"},
+            method="initialize",
+        )
+        assert resp.status_code == 401, f"an unauthenticated request is expected to 401, got {resp.status_code}"
+        challenge = resp.headers.get("www-authenticate")
+        assert challenge == f'Bearer resource_metadata="https://{PROD_HOST}/.well-known/oauth-protected-resource"', (
+            f"the 401 on the default-port Host form must carry the discovery challenge, got: {challenge!r}"
         )

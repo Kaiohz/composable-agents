@@ -99,6 +99,14 @@ class Settings(BaseSettings):
     # when it matches the ``MCP_ALLOWED_HOSTS`` allow-list. The production
     # configmap sets it.
     mcp_public_base_url: str = ""
+    # Public OAuth2 authorization server advertised by the protected-resource
+    # metadata document (REQ-002; QA BUG-003): the issuer an MCP client can
+    # actually REACH. When unset it falls back to ``<logto_url>/oidc`` (the
+    # historical document value); when both are empty NOTHING is advertised
+    # (``authorization_servers: []`` — never an unreachable issuer). The
+    # production configmap sets it explicitly because LOGTO_URL doubles as
+    # the container-side JWKS base and may be an internal address.
+    mcp_authorization_server: str = ""
     secret_encryption_key: str = ""
     # --- Composable MCP control plane (feat-composable-mcp) ---
     # Trusted mcp-raganything registry service base URL (REQ-017 / Technical
@@ -227,6 +235,39 @@ class Settings(BaseSettings):
                 parsed.fragment,
             )
         )
+        return self
+
+    @field_validator("mcp_authorization_server", mode="before")
+    @classmethod
+    def _validate_mcp_authorization_server(cls, value: object) -> object:
+        """Reject a malformed explicit ``MCP_AUTHORIZATION_SERVER`` (startup).
+
+        A blank value means "unset" (the logto-issuer fallback applies); a
+        present-but-NON-absolute value would advertise a malformed issuer an
+        MCP client cannot fetch — the same present-but-invalid ⇒ refuse
+        startup rule the other configuration validators apply.
+        """
+        if isinstance(value, str):
+            value = value.strip()
+            if value and not value.startswith(("http://", "https://")):
+                raise ValueError(
+                    "mcp_authorization_server must be an absolute URL starting with https:// "
+                    "(e.g. 'https://logto.soludev.tech/oidc')"
+                )
+        return value
+
+    @model_validator(mode="after")
+    def resolve_mcp_authorization_server(self) -> "Settings":
+        """Fall back to ``<logto_url>/oidc`` when the setting is unset.
+
+        QA BUG-003: the advertised issuer used to be derived inline in the
+        well-known route from the raw ``LOGTO_URL`` — an internal (or empty)
+        address reached the public discovery document verbatim. The explicit
+        setting decouples the PUBLIC issuer from the container-side JWKS
+        base; when neither is configured nothing is advertised.
+        """
+        if not self.mcp_authorization_server and self.logto_url:
+            self.mcp_authorization_server = f"{self.logto_url.rstrip('/')}/oidc"
         return self
 
     @model_validator(mode="after")

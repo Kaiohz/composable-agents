@@ -161,6 +161,43 @@ class TestPublicDiscoveryOriginDerivation:
         assert challenge == f'Bearer resource_metadata="https://{PROD_HOST}/.well-known/oauth-protected-resource"'
 
 
+class TestDefaultPortHostNormalization:
+    """QA BUG-002: the default-port Host forms reach the derivation.
+
+    An ingress may forward the port the client dialed (``Host: <host>:443``);
+    behind the TLS-terminating proxy the port-less and default-port forms are
+    the SAME endpoint. Only the DEFAULT-port suffixes (``:443`` https /
+    ``:80`` http) are normalized — any other port still requires the
+    ``host:*`` wildcard and a foreign host keeps deriving no origin
+    (fail-closed).
+    """
+
+    def test_https_default_port_form_is_trusted_with_bare_entry(self):
+        origin = public_discovery_origin(f"{PROD_HOST}:443", configured_base_url="", allowed_hosts=_LOCALHOST_HOSTS)
+        assert origin == f"https://{PROD_HOST}", "the advertised origin drops the default https port"
+
+    def test_http_default_port_form_is_trusted_with_bare_entry(self):
+        origin = public_discovery_origin("soludev.dev:80", configured_base_url="", allowed_hosts=["soludev.dev"])
+        assert origin == "https://soludev.dev", "the advertised origin drops the default http port"
+
+    def test_default_port_form_matches_the_host_star_wildcard(self):
+        origin = public_discovery_origin(
+            f"{PROD_HOST}:443", configured_base_url="", allowed_hosts=[f"{PROD_HOST}:*", "localhost:*"]
+        )
+        assert origin == f"https://{PROD_HOST}"
+
+    def test_non_default_port_form_still_requires_the_wildcard(self):
+        assert public_discovery_origin(f"{PROD_HOST}:8443", configured_base_url="", allowed_hosts=[PROD_HOST]) is None
+
+    def test_foreign_host_with_default_port_is_still_rejected(self):
+        assert (
+            public_discovery_origin(
+                "dns-rebind.evil.example:443", configured_base_url="", allowed_hosts=_LOCALHOST_HOSTS
+            )
+            is None
+        )
+
+
 class TestAuthGuardDiscoveryOrigin:
     """Behavior of the guard's 401 challenge against spoofed/foreign Hosts."""
 
@@ -212,6 +249,20 @@ class TestAuthGuardDiscoveryOrigin:
         guard = McpAuthGuard(MagicMock(), _deny, configured_base_url="", allowed_hosts=_LOCALHOST_HOSTS)
         _recorder, messages = await self._run(guard, {"Host": PROD_HOST})
         assert dict(messages[0]["headers"])[b"cache-control"] == b"no-store"
+
+    async def test_default_port_host_on_401_carries_the_challenge(self):
+        """QA BUG-002: ``Host: <allowed-host>:443`` still produces the
+        discovery pointer — derived from the bare, canonical origin (the
+        default-port suffix is normalized away)."""
+        guard = McpAuthGuard(MagicMock(), _deny, configured_base_url="", allowed_hosts=_LOCALHOST_HOSTS)
+        _recorder, messages = await self._run(guard, {"Host": f"{PROD_HOST}:443"})
+        start = messages[0]
+        headers = dict(start["headers"])
+        assert start["status"] == 401
+        assert (
+            headers[b"www-authenticate"].decode()
+            == f'Bearer resource_metadata="https://{PROD_HOST}/.well-known/oauth-protected-resource"'
+        )
 
 
 async def _deny(authorization, api_key):  # noqa: ANN001, ARG001 — stub authenticator shape (unused args match the port)

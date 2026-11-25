@@ -11,8 +11,12 @@ Delegation contract pinned here:
   ``{"resource": "https://<host>/mcp", "authorization_servers": [<Logto OIDC issuer>]}``
   — ``<host>`` comes from the app's configured request host (the tests present
   the production Host header; scheme is https as in production behind TLS), and
-  the authorization-server entry is derived from the configured Logto base URL
-  (``<logto_url>/oidc``).
+  the authorization-server entry comes from the ``MCP_AUTHORIZATION_SERVER``
+  setting (QA BUG-003: an explicit PUBLIC issuer wins; the historical
+  ``<logto_url>/oidc`` inline derivation is its fallback and may stay
+  advertised while ``LOGTO_URL`` is set).
+* A ``Host: <allowed-host>:443`` request (QA BUG-002) derives the SAME
+  canonical, port-less document as the port-less Host form.
 * ``OPTIONS`` preflight on the well-known path is answered by the CORS
   middleware WITHOUT any auth check (the configured
   ``settings.allowed_origins`` origin is echoed back).
@@ -42,10 +46,11 @@ class TestProtectedResourceMetadata:
         )
         body = resp.json()
         assert body["resource"] == EXPECTED_RESOURCE, f"unexpected `resource`: {body}"
-        expected_as = f"{deps.settings.logto_url.rstrip('/')}/oidc"
+        expected_as = deps.settings.mcp_authorization_server
         assert body["authorization_servers"] == [expected_as], (
-            f"`authorization_servers` must be the configured Logto OIDC issuer "
-            f"({expected_as!r}), got: {body.get('authorization_servers')}"
+            f"`authorization_servers` must be the advertised MCP_AUTHORIZATION_SERVER "
+            f"({expected_as!r}, the <logto_url>/oidc fallback under this env), got: "
+            f"{body.get('authorization_servers')}"
         )
 
     async def test_metadata_is_public_even_with_garbage_credentials(self, client):
@@ -88,3 +93,26 @@ class TestProtectedResourceMetadata:
             f"resource URL, got {resp.status_code}: {resp.text}"
         )
         assert "resource" not in resp.text, f"no derived resource URL may be echoed, got: {resp.text}"
+
+    async def test_metadata_is_identical_for_the_default_port_host_form(self, client):
+        """QA BUG-002: `Host: <allowed-host>:443` derives the SAME canonical,
+        port-less document as the port-less form (the default-port suffix is
+        normalized away — the challenge and the metadata can never
+        disagree)."""
+        import src.dependencies as deps
+
+        resp = await client.get(
+            WELL_KNOWN,
+            headers={"Host": f"{PROD_HOST}:443"},
+        )
+        assert resp.status_code == 200, (
+            f"the default-port Host form must be allow-listed, got {resp.status_code}: {resp.text}"
+        )
+        body = resp.json()
+        assert body["resource"] == EXPECTED_RESOURCE, (
+            f"the default-port Host form must advertise the canonical port-less "
+            f"`resource` ({EXPECTED_RESOURCE!r}), got: {body}"
+        )
+        assert body["authorization_servers"] == [deps.settings.mcp_authorization_server], (
+            f"the advertised authorization server must be unchanged, got: {body.get('authorization_servers')}"
+        )

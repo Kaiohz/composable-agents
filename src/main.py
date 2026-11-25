@@ -119,6 +119,15 @@ _scheduler_task: asyncio.Task | None = None
 async def lifespan(_app: FastAPI):
     global _scheduler_task
     logger.info(LogMessage.APP_STARTUP_INITIATED)
+    # MCP authorization-server shape (QA BUG-003): the public metadata document
+    # only advertises an issuer a PUBLIC MCP client can reach. An empty value
+    # (nothing advertised at all) and a non-https value (the container-side
+    # LOGTO_URL fallback) stay non-fatal but are warned at startup — the
+    # configmap sets MCP_AUTHORIZATION_SERVER=https://logto.soludev.tech/oidc.
+    if not settings.mcp_authorization_server:
+        logger.warning(LogMessage.MCP_AUTHORIZATION_SERVER_NOT_ADVERTISED)
+    elif not settings.mcp_authorization_server.startswith("https://"):
+        logger.warning(LogMessage.MCP_AUTHORIZATION_SERVER_NOT_HTTPS, settings.mcp_authorization_server)
     # MCP session manager lifecycle (feat-composable-mcp): the streamable-HTTP
     # session resources start and stop with the FastAPI lifespan (Technical
     # Notes). Entered FIRST (AsyncExitStack unwinds shutdown in reverse) so a
@@ -202,6 +211,10 @@ app.add_middleware(
 # allow-listed request Host (MCP_ALLOWED_HOSTS) — a raw, spoofable Host is
 # never echoed into the metadata (M-finding M-2); without a derivable origin
 # the route answers 404 (no discovery document at an unverifiable origin).
+# ``authorization_servers`` comes from MCP_AUTHORIZATION_SERVER (an explicit
+# PUBLIC issuer, QA BUG-003), falling back to ``<logto_url>/oidc``; when
+# neither is configured an EMPTY list is advertised — a public document never
+# carries an issuer the deployment cannot vouch for.
 @app.get(
     WELL_KNOWN_PROTECTED_RESOURCE_PATH,
     summary="OAuth2 protected-resource metadata (public discovery)",
@@ -222,8 +235,10 @@ async def oauth_protected_resource(request: Request) -> Response:
 
     Returns:
         ``{"resource": "https://<public-origin>/mcp", "authorization_servers":
-        [...]}`` with the OIDC issuer derived from the configured Logto base
-        URL — 404 (plain, no derivation detail) when no trustworthy origin can
+        [...]}`` where the advertised issuer is ``MCP_AUTHORIZATION_SERVER``
+        (an explicit publicly-reachable issuer, QA BUG-003) falling back to
+        ``<logto_url>/oidc`` — the list is EMPTY when neither is configured —
+        and 404 (plain, no derivation detail) when no trustworthy origin can
         be derived.
     """
     origin = public_discovery_origin(
@@ -237,7 +252,7 @@ async def oauth_protected_resource(request: Request) -> Response:
     return JSONResponse(
         content={
             "resource": f"{origin}{MCP_MOUNT_PATH}",
-            "authorization_servers": [f"{settings.logto_url.rstrip('/')}/oidc"],
+            "authorization_servers": ([settings.mcp_authorization_server] if settings.mcp_authorization_server else []),
         }
     )
 

@@ -24,6 +24,7 @@ FastAPI router dependencies do NOT protect an independently mounted ASGI app
 
 import json
 import logging
+import re
 from collections.abc import Awaitable, Callable
 
 from mcp.server.fastmcp import FastMCP
@@ -47,6 +48,54 @@ Authenticator = Callable[[str | None, str | None], Awaitable[AuthContext | None]
 #: 401 response body — generic, non-enumerating (no user data, no tools).
 _UNAUTHORIZED_BODY = json.dumps({"detail": "Invalid or missing credentials"}).encode()
 
+#: Default-port suffixes normalized on the request ``Host`` (QA BUG-002): an
+#: ingress may forward the port the client dialed — ``host`` and ``host:443``
+#: (https) / ``host:80`` (http) are the same endpoint behind the proxy.
+_DEFAULT_PORT_SUFFIXES = (":443", ":80")
+
+#: Plain-hostname allow-list entries (no wildcard, no port, no IPv6 brackets)
+#: — the only shape the transport-security list may grow default-port
+#: siblings for (QA BUG-002).
+_PLAIN_HOSTNAME = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _without_default_port(host: str) -> str:
+    """Return ``host`` without a trailing default port (``:443`` / ``:80``).
+
+    QA BUG-002: behind the TLS-terminating proxy ``host`` and ``host:443``
+    are the same endpoint, so the default-port suffix must neither turn an
+    allow-listed Host into a foreign one nor leak into the advertised
+    discovery origin. Any OTHER explicit port is preserved (only the
+    ``host:*`` wildcard covers it).
+    """
+    for suffix in _DEFAULT_PORT_SUFFIXES:
+        if host.endswith(suffix):
+            return host[: -len(suffix)]
+    return host
+
+
+def _transport_allowed_hosts(allowed_hosts: list[str]) -> list[str]:
+    """Normalize the allow-list for the ``mcp`` SDK's exact Host matcher.
+
+    The SDK matches the request ``Host`` EXACTLY: a bare entry never covers
+    the explicit port form (``Host: composables-agent.soludev.tech:443`` was
+    421'd although the host itself was allow-listed — QA BUG-002), and its
+    ``host:*`` wildcard never covers the port-LESS form. Each plain-hostname
+    entry therefore ships with its two default-port siblings — additive by
+    construction, so a still-foreign Host keeps answering 421 with
+    DNS-rebinding protection ENABLED (REQ-013 unchanged). Wildcard entries
+    (``host:*``), explicit-port entries and IPv6 literals pass through
+    unchanged.
+    """
+    normalized = list(allowed_hosts)
+    for entry in allowed_hosts:
+        if _PLAIN_HOSTNAME.match(entry):
+            for suffix in (":443", ":80"):
+                port_form = entry + suffix
+                if port_form not in normalized:
+                    normalized.append(port_form)
+    return normalized
+
 
 def public_discovery_origin(
     request_host: str,
@@ -67,7 +116,9 @@ def public_discovery_origin(
     2. otherwise the request ``Host`` is used ONLY when it is explicitly
        allow-listed in ``MCP_ALLOWED_HOSTS`` (exact entry or ``host:*``
        wildcard) — TLS terminates at the ingress proxy, so the scheme is
-       always ``https``;
+       always ``https``; a default-port suffix (``host:443`` / ``host:80``,
+       QA BUG-002) is matched against the bare entry and stripped from the
+       advertised origin;
     3. otherwise ``None``: no trustworthy origin can be advertised, so the
        callers must serve a challenge/metadata WITHOUT a discovery URL
        instead of echoing a spoofable host.
@@ -87,16 +138,21 @@ def public_discovery_origin(
     host = (request_host or "").strip()
     if not host or not _host_allowed(host, allowed_hosts):
         return None
-    return f"https://{host}"
+    return f"https://{_without_default_port(host)}"
 
 
 def _host_allowed(host: str, allowed_hosts: list[str]) -> bool:
     """Whether ``host`` matches the derivation allow-list shape.
 
-    Exact entries plus ``<host>:*`` wildcard entries (any port).
+    Exact entries plus ``<host>:*`` wildcard entries (any port). An exact
+    entry also covers the same host presented with an explicit DEFAULT port
+    (``host:443`` https / ``host:80`` http — QA BUG-002, the Host normalization
+    strips the suffix before the match); every OTHER port form still requires
+    the ``host:*`` wildcard, so a foreign host keeps failing closed.
     """
+    bare_host = _without_default_port(host)
     for allowed in allowed_hosts:
-        if allowed == host:
+        if allowed in (host, bare_host):
             return True
         if allowed.endswith(":*") and host.startswith(allowed[:-2] + ":"):
             return True
@@ -244,8 +300,12 @@ def build_mcp_asgi_app(
             the ``MCP_ALLOWED_HOSTS`` setting). DNS-rebinding protection stays
             ENABLED — an explicit list (which must contain the public proxy
             host in production) only corrects the SDK's localhost-only default
-            that otherwise 421s every proxied request. The same list also
-            gates the ``Host``-fallback of the discovery-URL derivation (M-2).
+            that otherwise 421s every proxied request. The SDK's matcher compares
+            the Host EXACTLY, so plain-hostname entries are expanded with their
+            default-port siblings (``host:443`` / ``host:80``, QA BUG-002) —
+            additive by construction; a still-foreign Host keeps failing closed.
+            The same expanded list also gates the ``Host``-fallback of the
+            discovery-URL derivation (M-2).
         allowed_origins: MCP transport-security Origin allow-list (from
             ``ALLOWED_ORIGINS``), so browser-origin MCP clients are not 403'd.
         public_base_url: Configured public origin for the OAuth2 discovery
@@ -261,6 +321,7 @@ def build_mcp_asgi_app(
 
     from src.application.mcp.tools import register_mcp_tools
 
+    transport_hosts = _transport_allowed_hosts(allowed_hosts)
     mcp = FastMCP(
         "composable-agents",
         instructions=MCP_INSTRUCTIONS,
@@ -273,7 +334,7 @@ def build_mcp_asgi_app(
         # stays ENABLED; only the host/origin lists become configuration.
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
-            allowed_hosts=allowed_hosts,
+            allowed_hosts=transport_hosts,
             allowed_origins=allowed_origins,
         ),
     )
@@ -285,7 +346,7 @@ def build_mcp_asgi_app(
             inner,
             authenticate,
             configured_base_url=public_base_url,
-            allowed_hosts=allowed_hosts,
+            allowed_hosts=transport_hosts,
         ),
         mcp.session_manager,
     )
