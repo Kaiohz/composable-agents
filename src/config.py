@@ -54,6 +54,41 @@ def resolve_env_int(var: str, default: int) -> int:
     return value if value > 0 else default
 
 
+#: The single refusal message for an empty ``MCP_ALLOWED_HOSTS`` list, shared
+#: by the empty env-string branch and the empty-Python-list branch (they are
+#: the same silent-421 outage, review NEW-2).
+_EMPTY_MCP_ALLOWED_HOSTS_MESSAGE = (
+    "mcp_allowed_hosts must not be empty: with DNS-rebinding protection "
+    "enabled an empty host allow-list rejects every MCP request with "
+    "HTTP 421 — list the public proxy host (MCP_ALLOWED_HOSTS, "
+    "configmap REQ-013) plus the localhost defaults"
+)
+
+
+def _is_json_style_list_value(stripped: str) -> bool:
+    """Whether a CSV env value is actually a JSON-style document (NEW-2).
+
+    A configmap author may copy the neighbouring ``ALLOWED_ORIGINS`` JSON form
+    (``'["https://composables.soludev.tech"]'``): it does not CSV-split and
+    would become ONE entry that matches nothing — a silent total outage
+    (421 for every MCP request with DNS-rebinding protection enabled for
+    ``MCP_ALLOWED_HOSTS``, dead audiences for ``JWT_AUDIENCES``). The
+    characteristic JSON shapes are quote characters anywhere or a ``{``-wrap;
+    a legit host[:port] CSV value never carries either (the ``[::1]`` IPv6
+    literal is bracket-wrapped but never quoted).
+    """
+    return '"' in stripped or "'" in stripped or stripped.startswith("{")
+
+
+def _json_style_list_error(field_name: str, value: str) -> str:
+    """Build the refusal message for a JSON-style CSV env value (NEW-2)."""
+    return (
+        f"{field_name} received a JSON-style value ({value!r}) — an ALLOWED_ORIGINS-style value; these env vars "
+        "are parsed as comma-separated lists (e.g. MCP_ALLOWED_HOSTS=host-a,host-b); a JSON-written value stays "
+        "ONE entry that matches nothing (silent auth failures; HTTP 421 for every MCP request)"
+    )
+
+
 class TracingSettings(BaseSettings):
     provider: str = "none"
     enabled: bool = False
@@ -182,27 +217,28 @@ class Settings(BaseSettings):
         """Coerce a comma-separated env string into a list (REQ-003/REQ-013).
 
         ``JWT_AUDIENCES`` / ``MCP_ALLOWED_HOSTS`` are authored as
-        comma-separated env values (never JSON). An already-parsed list
-        passes through unchanged; absent values fall back to the field
-        default.
+        comma-separated env values (never JSON); an already-parsed list passes
+        through unchanged and absent values fall back to the field default.
 
-        A present-but-empty ``MCP_ALLOWED_HOSTS`` (``""`` or blank-only) is
-        INVALID (M-finding: silent total outage): with DNS-rebinding
-        protection ENABLED an empty host allow-list rejects every MCP request
-        with HTTP 421, so the process refuses to start and the configmap must
-        explicitly list the public proxy host plus the localhost defaults.
-        ``JWT_AUDIENCES`` tolerates an empty value (it simply means "legacy
-        ``JWT_AUDIENCE`` only").
+        Refusals (fail fast at startup instead of a silent outage):
+        * a JSON-STYLE value (see :func:`_is_json_style_list_value`);
+        * an empty ``MCP_ALLOWED_HOSTS`` (env string or Python list) — with
+          DNS-rebinding protection ENABLED an empty allow-list 421s every MCP
+          request; ``JWT_AUDIENCES`` tolerates empty (legacy-only).
         """
+        if isinstance(value, list):
+            # Review NEW-2: the Python API path cannot hide an empty
+            # allow-list either — the same outage, the same refusal.
+            if not value and info.field_name == "mcp_allowed_hosts":
+                raise ValueError(_EMPTY_MCP_ALLOWED_HOSTS_MESSAGE)
+            return value
         if isinstance(value, str):
+            stripped = value.strip()
+            if _is_json_style_list_value(stripped):
+                raise ValueError(_json_style_list_error(info.field_name or "", stripped))
             parts = [part.strip() for part in value.split(",") if part.strip()]
             if not parts and info.field_name == "mcp_allowed_hosts":
-                raise ValueError(
-                    "mcp_allowed_hosts must not be empty: with DNS-rebinding protection "
-                    "enabled an empty host allow-list rejects every MCP request with "
-                    "HTTP 421 — list the public proxy host (MCP_ALLOWED_HOSTS, "
-                    "configmap REQ-013) plus the localhost defaults"
-                )
+                raise ValueError(_EMPTY_MCP_ALLOWED_HOSTS_MESSAGE)
             return parts
         return value
 
@@ -236,6 +272,32 @@ class Settings(BaseSettings):
             )
         )
         return self
+
+    @field_validator("mcp_public_base_url", mode="before")
+    @classmethod
+    def _validate_mcp_public_base_url(cls, value: object) -> object:
+        """Validate + normalize ``MCP_PUBLIC_BASE_URL`` (code-review NEW-1).
+
+        The advertised origin is the pointer the whole OAuth2 discovery chain
+        starts from: a scheme-less value would publish a malformed
+        ``resource_metadata`` URL no MCP client can fetch (the chain breaks
+        SILENTLY), so a present value without an absolute ``http(s)://``
+        scheme REFUSES startup — the same present-but-invalid ⇒ refuse rule
+        as the sibling ``MCP_AUTHORIZATION_SERVER`` validator. Surrounding
+        whitespace and a trailing slash are stripped here (single
+        normalization source); a present ``http://`` value stays dev/QA-legal
+        and is warned at startup (``MCP_PUBLIC_BASE_URL_NOT_HTTPS``).
+        """
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped and not stripped.startswith(("http://", "https://")):
+                raise ValueError(
+                    "mcp_public_base_url must be an absolute URL starting with https:// (e.g. "
+                    "'https://composables-agent.soludev.tech') — a scheme-less value would advertise a "
+                    "malformed resource_metadata URL no MCP client can fetch"
+                )
+            return stripped.rstrip("/")
+        return value
 
     @field_validator("mcp_authorization_server", mode="before")
     @classmethod

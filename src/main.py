@@ -115,19 +115,31 @@ def _run_alembic_upgrade() -> None:
 _scheduler_task: asyncio.Task | None = None
 
 
-@asynccontextmanager
-async def lifespan(_app: FastAPI):
-    global _scheduler_task
-    logger.info(LogMessage.APP_STARTUP_INITIATED)
-    # MCP authorization-server shape (QA BUG-003): the public metadata document
-    # only advertises an issuer a PUBLIC MCP client can reach. An empty value
-    # (nothing advertised at all) and a non-https value (the container-side
-    # LOGTO_URL fallback) stay non-fatal but are warned at startup — the
-    # configmap sets MCP_AUTHORIZATION_SERVER=https://logto.soludev.tech/oidc.
+def _log_mcp_discovery_shape_warnings() -> None:
+    """Log (non-fatal) the MCP OAuth2 discovery-configuration shape at startup.
+
+    The metadata document only advertises an issuer/origin a PUBLIC MCP client
+    can reach: an empty ``MCP_AUTHORIZATION_SERVER`` (nothing advertised at
+    all) and a non-https authorization server (the container-side LOGTO_URL
+    fallback) are warned for QA BUG-003; a non-https ``MCP_PUBLIC_BASE_URL``
+    origin is warned for code-review NEW-1 (a scheme-less value already
+    REFUSES startup in the config validator). All stay non-fatal — an
+    http-only dev/QA deployment — while the configmap sets the public
+    https:// values.
+    """
     if not settings.mcp_authorization_server:
         logger.warning(LogMessage.MCP_AUTHORIZATION_SERVER_NOT_ADVERTISED)
     elif not settings.mcp_authorization_server.startswith("https://"):
         logger.warning(LogMessage.MCP_AUTHORIZATION_SERVER_NOT_HTTPS, settings.mcp_authorization_server)
+    if settings.mcp_public_base_url and not settings.mcp_public_base_url.startswith("https://"):
+        logger.warning(LogMessage.MCP_PUBLIC_BASE_URL_NOT_HTTPS)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    global _scheduler_task
+    logger.info(LogMessage.APP_STARTUP_INITIATED)
+    _log_mcp_discovery_shape_warnings()
     # MCP session manager lifecycle (feat-composable-mcp): the streamable-HTTP
     # session resources start and stop with the FastAPI lifespan (Technical
     # Notes). Entered FIRST (AsyncExitStack unwinds shutdown in reverse) so a

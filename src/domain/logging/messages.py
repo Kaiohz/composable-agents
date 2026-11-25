@@ -436,6 +436,13 @@ class LogMessage(StrEnum):
         "an explicit http value); set MCP_AUTHORIZATION_SERVER to the publicly reachable "
         "issuer, e.g. https://logto.soludev.tech/oidc (QA BUG-003)"
     )
+    MCP_PUBLIC_BASE_URL_NOT_HTTPS = (
+        "MCP discovery documents advertise a non-https public origin: MCP_PUBLIC_BASE_URL is an "
+        "http:// value — public MCP clients reach the resource over TLS; set the https:// public "
+        "origin, e.g. https://composables-agent.soludev.tech (a SCHEME-LESS value already refuses "
+        "startup — code-review NEW-1). The configured value is never interpolated here on purpose: "
+        "an operator may embed credentials in the URL."
+    )
     MCP_TOOL_EXECUTED = "MCP tool executed (user=%s tool=%s duration=%.3fs ok=%s)"
     MCP_TOOL_FAILED = "MCP tool failed (user=%s tool=%s error=%s)"
     MCP_TOOL_FAILURE_TYPE = "MCP tool failed with exception type: %s"

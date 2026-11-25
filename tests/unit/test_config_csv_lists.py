@@ -91,3 +91,54 @@ class TestJwtAudiencesCsv:
     def test_list_values_pass_through_uncoerced(self):
         settings = Settings(database_url=_DUMMY_URL, jwt_audiences=["a"])
         assert settings.jwt_audiences == ["a"]
+
+
+class TestMcpAllowedHostsJsonStyleRefusal:
+    """Review NEW-2: a JSON-style value must REFUSE startup with a message
+    pointing the configmap author at the comma-separated form.
+
+    The production configmap sets its neighbouring list key ``ALLOWED_ORIGINS``
+    in JSON style (``'["https://composables.soludev.tech"]'``) — a copy-paste of
+    that style into ``MCP_ALLOWED_HOSTS`` (or ``JWT_AUDIENCES``, which shares
+    the same CSV seam) produced ONE garbage entry that matched nothing: a
+    silent, total outage. Refuse instead (mirroring the M-1 empty-value
+    refusal pattern).
+    """
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("mcp_allowed_hosts", '["composables-agent.soludev.tech"]'),
+            ("mcp_allowed_hosts", '["host-a", "host-b"]'),
+            ("mcp_allowed_hosts", '{"host-a": true}'),
+            ("mcp_allowed_hosts", "'host-a'"),
+            ("jwt_audiences", '["ui-app-id"]'),
+            ("jwt_audiences", '{"aud": true}'),
+        ],
+    )
+    def test_json_style_value_refuses_startup(self, field: str, value: str):
+        with pytest.raises(ValidationError, match="comma-separated"):
+            Settings(database_url=_DUMMY_URL, **{field: value})
+
+    def test_refusal_message_names_the_field_and_the_comma_form(self):
+        with pytest.raises(
+            ValidationError,
+            match="mcp_allowed_hosts.*JSON-style.*MCP_ALLOWED_HOSTS=host-a,host-b",
+        ):
+            Settings(database_url=_DUMMY_URL, mcp_allowed_hosts='["host-a"]')
+
+    def test_refusal_message_works_for_the_audiences_field_too(self):
+        with pytest.raises(ValidationError, match="jwt_audiences received a JSON-style value"):
+            Settings(database_url=_DUMMY_URL, jwt_audiences='["aud-a"]')
+
+    def test_ipv6_bracket_literal_csv_string_is_still_accepted(self):
+        """The detection must NOT misfire on the legit bracket-wrapped IPv6
+        literal: ``[::1]:*`` carries no quote characters and is not
+        ``{``-wrapped — the documented localhost default stays authorable."""
+        settings = Settings(database_url=_DUMMY_URL, mcp_allowed_hosts="127.0.0.1:*,localhost:*,[::1]:*")
+        assert settings.mcp_allowed_hosts == ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+
+    def test_empty_list_via_python_api_refuses_startup(self):
+        """The empty-outage refusal is not bypassable through the Python API."""
+        with pytest.raises(ValidationError, match="mcp_allowed_hosts must not be empty"):
+            Settings(database_url=_DUMMY_URL, mcp_allowed_hosts=[])
