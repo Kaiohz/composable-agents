@@ -9,6 +9,15 @@ class McpTransportType(StrEnum):
     HTTP = "http"
 
 
+class McpAuthMode(StrEnum):
+    """Authentication mode of a registered MCP server (feat-mcp-oauth2 REQ-004)."""
+
+    #: The configured headers are sent as-is (current behavior, default).
+    HEADERS = "headers"
+    #: The connected user's credential is injected at load/validate time.
+    USER_TOKEN = "user_token"
+
+
 class McpServerConfig(BaseModel, frozen=True):
     """Configuration d'un serveur MCP."""
 
@@ -20,6 +29,9 @@ class McpServerConfig(BaseModel, frozen=True):
     headers: dict[str, str] = Field(default_factory=dict)
     env: dict[str, str] = Field(default_factory=dict)
     auth_token: str | None = None
+    # feat-mcp-oauth2 REQ-004: with ``user_token`` the loader injects the
+    # connected user's credential (JWT bearer / API key) at connection time.
+    auth_mode: McpAuthMode = McpAuthMode.HEADERS
 
     @model_validator(mode="after")
     def validate_transport_fields(self) -> Self:

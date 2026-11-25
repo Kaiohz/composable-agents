@@ -249,6 +249,7 @@ def _register_registry_family(mcp, safe_mcp_call) -> None:
         headers: dict[str, str] | None = None,
         env: dict[str, str] | None = None,
         auth_token: str | None = None,
+        auth_mode: Literal["headers", "user_token"] | None = None,
         source_type: str = "external",
         openapi_url: str | None = None,
     ) -> dict:
@@ -262,6 +263,7 @@ def _register_registry_family(mcp, safe_mcp_call) -> None:
             headers=headers,
             env=env,
             auth_token=auth_token,
+            auth_mode=auth_mode,
             source_type=source_type,
             openapi_url=openapi_url,
         )
@@ -279,6 +281,7 @@ def _register_registry_family(mcp, safe_mcp_call) -> None:
         headers: dict[str, str] | None = None,
         env: dict[str, str] | None = None,
         auth_token: str | None = None,
+        auth_mode: Literal["headers", "user_token"] | None = None,
         source_type: str = "external",
         openapi_url: str | None = None,
     ) -> RegisteredMcpServer:
@@ -286,6 +289,7 @@ def _register_registry_family(mcp, safe_mcp_call) -> None:
 
         Secrets (auth_token/headers/env) are write-only (REQ-019): the result
         carries the registry's MASKED entry and secrets never reach logs.
+        ``auth_mode`` (REQ-004) selects the credential-transmission mode.
         """
         request = _create_request(
             name=name,
@@ -296,6 +300,7 @@ def _register_registry_family(mcp, safe_mcp_call) -> None:
             headers=headers,
             env=env,
             auth_token=auth_token,
+            auth_mode=auth_mode,
             source_type=source_type,
             openapi_url=openapi_url,
         )
@@ -309,6 +314,7 @@ def _register_registry_family(mcp, safe_mcp_call) -> None:
         headers: dict[str, str] | None = None,
         env: dict[str, str] | None = None,
         auth_token: str | None = None,
+        auth_mode: Literal["headers", "user_token"] | None = None,
         source_type: str | None = None,
         openapi_url: str | None = None,
     ) -> RegisteredMcpServer:
@@ -333,6 +339,7 @@ def _register_registry_family(mcp, safe_mcp_call) -> None:
                     ("headers", headers),
                     ("env", env),
                     ("auth_token", auth_token),
+                    ("auth_mode", auth_mode),
                     ("source_type", source_type),
                     ("openapi_url", openapi_url),
                 )

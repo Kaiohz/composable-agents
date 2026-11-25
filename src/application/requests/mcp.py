@@ -67,6 +67,8 @@ class CreateMcpServerRequest(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     env: dict[str, str] = Field(default_factory=dict)
     auth_token: str | None = None
+    # feat-mcp-oauth2 REQ-004: credential-transmission mode (non-secret).
+    auth_mode: Literal["headers", "user_token"] = "headers"
     source_type: Literal["external", "openapi"] = "external"
     openapi_url: str | None = Field(default=None, max_length=2000)
 
@@ -92,6 +94,7 @@ class UpdateMcpServerRequest(BaseModel):
     headers: dict[str, str] | None = None
     env: dict[str, str] | None = None
     auth_token: str | None = None
+    auth_mode: Literal["headers", "user_token"] | None = None
     source_type: Literal["external", "openapi"] | None = None
     openapi_url: str | None = Field(default=None, max_length=2000)
 

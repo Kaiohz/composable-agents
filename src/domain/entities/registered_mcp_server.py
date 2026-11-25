@@ -33,6 +33,8 @@ class RegisteredMcpServer(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     env: dict[str, str] = Field(default_factory=dict)
     auth_token: str | None = None
+    # Non-secret metadata (feat-mcp-oauth2 REQ-004): readable, not masked.
+    auth_mode: str = "headers"
     tool_count: int = 0
     source_type: str = "external"
     openapi_url: str | None = None
@@ -45,7 +47,8 @@ class McpServerWrite(BaseModel):
 
     Secret fields (``auth_token`` / ``headers`` / ``env``) are write-only:
     they are forwarded to the trusted registry and are redacted from tool
-    results and logs.
+    results and logs. ``auth_mode`` is non-secret metadata carrying the
+    credential-transmission mode (REQ-004).
     """
 
     name: str = Field(..., min_length=1)
@@ -56,6 +59,7 @@ class McpServerWrite(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     env: dict[str, str] = Field(default_factory=dict)
     auth_token: str | None = None
+    auth_mode: Literal["headers", "user_token"] = "headers"
     source_type: Literal["external", "openapi"] = "external"
     openapi_url: str | None = None
 

@@ -125,7 +125,12 @@ class TestLoadToolsHttp:
 
         # Assert
         call_args = mock_cls.call_args[0][0]
-        assert call_args["auth-server"]["auth_token"] == "secret-token"
+        # REQ-005 (feat-mcp-oauth2-dual-auth): the stored auth_token is
+        # transmitted as the `Authorization: Bearer <value>` header — the
+        # `auth_token` connection key is UNSUPPORTED by langchain-mcp-adapters
+        # 0.3.0 (TypeError in _create_streamable_http_session).
+        assert "auth_token" not in call_args["auth-server"]
+        assert call_args["auth-server"]["headers"] == {"Authorization": "Bearer secret-token"}
 
 
 class TestLoadToolsEnvVarResolution:

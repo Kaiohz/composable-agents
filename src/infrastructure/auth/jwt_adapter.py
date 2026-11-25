@@ -41,18 +41,31 @@ class JwtAdapter(JwtServicePort):
     ``asyncio.Lock`` guards the fetch to prevent a stampede of concurrent
     decodes all hitting the JWKS endpoint on a cold cache.
 
+    Audiences (feat-mcp-oauth2-dual-auth REQ-003): every value passed via
+    ``audience`` (legacy single ``JWT_AUDIENCE``) and ``audiences`` (the
+    ``JWT_AUDIENCES`` list, e.g. the Logto OpenCode app-id) is accepted,
+    deduplicated with the legacy value first. With no audiences configured the
+    adapter keeps the exact legacy behavior (the plain single ``audience``
+    value — including the empty "" deny-all shape).
+
     Args:
         jwks_url: URL of the OIDC JWKS endpoint. When empty, ``decode_token``
             always returns ``None`` (no JWKS configured).
-        audience: Expected JWT ``aud`` claim. Passed to ``jwt.decode``.
+        audience: Legacy expected JWT ``aud`` claim. Always honored.
+        audiences: Additional expected ``aud`` claims (multi-audience).
     """
 
     _JWKS_CACHE_TTL = 300
     _JWKS_CACHE_KEY = "jwks"
 
-    def __init__(self, jwks_url: str, audience: str) -> None:
+    def __init__(self, jwks_url: str, audience: str, audiences: list[str] | None = None) -> None:
         self._jwks_url = jwks_url
         self._audience = audience
+        # Effective accept list (REQ-003): legacy single value first, then the
+        # extra configured audiences, deduplicated. The raw single value is
+        # kept so the no-``JWT_AUDIENCES`` case stays byte-for-byte identical
+        # to the legacy call shape.
+        self._audiences = self._merge_audiences(audience, audiences)
         # The HTTP client is only needed when a JWKS endpoint is configured;
         # the cache + lock are cheap and always present so the rest of the
         # code does not need to branch on ``jwks_url``.
@@ -61,6 +74,24 @@ class JwtAdapter(JwtServicePort):
         )
         self._jwks_cache: TTLCache = TTLCache(maxsize=1, ttl=self._JWKS_CACHE_TTL)
         self._jwks_lock = asyncio.Lock()
+
+    @staticmethod
+    def _merge_audiences(audience: str, audiences: list[str] | None) -> list[str]:
+        """Return the deduplicated accept list (legacy single value first).
+
+        Args:
+            audience: Legacy single ``JWT_AUDIENCE`` (may be empty).
+            audiences: Extra ``JWT_AUDIENCES`` entries (may be empty).
+
+        Returns:
+            The deduplicated list of accepted audiences; empty when neither
+            setting provides a value.
+        """
+        merged: list[str] = []
+        for candidate in (audience, *(audiences or [])):
+            if candidate and candidate not in merged:
+                merged.append(candidate)
+        return merged
 
     # ------------------------------------------------------------------
     # JWKS fetching / caching
@@ -152,12 +183,17 @@ class JwtAdapter(JwtServicePort):
             key_dict = self._find_key_by_kid(jwks, kid)
             signing_key = PyJWK.from_dict(key_dict)
 
-            # 3. Verify + decode.
+            # 3. Verify + decode. A single accepted audience keeps the exact
+            #    legacy call shape (a plain string — the no-``JWT_AUDIENCES``
+            #    behavior is unchanged); several audiences are checked as a
+            #    list (PyJWT accepts both shapes). An empty effective list
+            #    falls back to the raw legacy value ("" = deny-all, as before).
+            expected_audience = self._audiences[0] if len(self._audiences) == 1 else (self._audiences or self._audience)
             payload = jwt.decode(
                 token,
                 key=signing_key.key,
                 algorithms=_ACCEPTED_ALGORITHMS,
-                audience=self._audience,
+                audience=expected_audience,
             )
 
             return User.model_validate(payload)

@@ -14,6 +14,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
+from src.application.mcp.server import (
+    MCP_MOUNT_PATH,
+    WELL_KNOWN_PROTECTED_RESOURCE_PATH,
+)
 from src.application.routes.agents import router as agents_router
 from src.application.routes.api_keys import router as api_keys_router
 from src.application.routes.chat import router as chat_router
@@ -185,6 +189,42 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Public OAuth2 discovery document (feat-mcp-oauth2-dual-auth REQ-002). Wired
+# BEFORE the protected routers: the route carries NO auth dependency at all —
+# it is a static, non-sensitive discovery document consumed by MCP clients
+# right after the 401 ``WWW-Authenticate`` challenge (the OPTIONS preflight is
+# answered by the CORS middleware without auth). The ``Host`` header carries
+# the public host (production terminates TLS at the ingress proxy, so the
+# scheme is always ``https``); the response is a static JSON — no I/O.
+@app.get(
+    WELL_KNOWN_PROTECTED_RESOURCE_PATH,
+    summary="OAuth2 protected-resource metadata (public discovery)",
+    description=(
+        "Unauthenticated RFC 9728-style protected-resource metadata for the "
+        "MCP OAuth2 discovery chain: the resource identifier plus the "
+        "authorization servers accepting tokens for it."
+    ),
+    response_description="The static protected-resource metadata document.",
+    include_in_schema=False,
+)
+async def oauth_protected_resource(request: Request) -> dict:
+    """Return the static OAuth2 protected-resource metadata (public, REQ-002).
+
+    Args:
+        request: The incoming request (only its ``Host`` header is read).
+
+    Returns:
+        ``{"resource": "https://<host>/mcp", "authorization_servers": [...]}`
+        with the OIDC issuer derived from the configured Logto base URL.
+    """
+    host = request.headers.get("host", "")
+    return {
+        "resource": f"https://{host}{MCP_MOUNT_PATH}",
+        "authorization_servers": [f"{settings.logto_url.rstrip('/')}/oidc"],
+    }
+
 
 app.include_router(health_router)
 

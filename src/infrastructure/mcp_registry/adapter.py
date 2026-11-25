@@ -28,7 +28,7 @@ from typing import Any
 
 import httpx
 
-from src.domain.entities.mcp_server_config import McpServerConfig, McpTransportType
+from src.domain.entities.mcp_server_config import McpAuthMode, McpServerConfig, McpTransportType
 from src.domain.entities.registered_mcp_server import (
     McpServerValidationReport,
     McpServerWrite,
@@ -97,7 +97,10 @@ def _to_execution_config(entry: dict[str, Any], name: str) -> McpServerConfig:
     """Project a revealed registry entry onto the server-side execution config.
 
     Placeholder resolution (e.g. ``${USER_JWT}``) happens inside the tool
-    loader per call, against the originating user's contextvars.
+    loader per call, against the originating user's contextvars. The
+    credential-transmission mode (``auth_mode``, feat-mcp-oauth2 REQ-004) is
+    carried through so the loader can inject the connected user's credential;
+    an unknown value is rejected by the entity (the source degrades).
     """
     headers = {str(key): str(value) for key, value in (entry.get("headers") or {}).items()}
     env = {str(key): str(value) for key, value in (entry.get("env") or {}).items()}
@@ -110,6 +113,7 @@ def _to_execution_config(entry: dict[str, Any], name: str) -> McpServerConfig:
         headers=resolve_headers_drop_empty(headers),
         env=resolve_headers_drop_empty(env),
         auth_token=entry.get("auth_token"),
+        auth_mode=entry.get("auth_mode") or McpAuthMode.HEADERS,
     )
 
 

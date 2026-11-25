@@ -34,10 +34,30 @@ logger = logging.getLogger(__name__)
 #: Streamable-HTTP MCP endpoint mounted on the FastAPI app.
 MCP_MOUNT_PATH = "/mcp"
 
+#: Public OAuth2 protected-resource metadata document (MCP authorization spec
+#: 2025-06-18): the discovery target advertised by the 401 challenge and served
+#: by the public route wired in ``src/main.py`` (REQ-002).
+WELL_KNOWN_PROTECTED_RESOURCE_PATH = "/.well-known/oauth-protected-resource"
+
 Authenticator = Callable[[str | None, str | None], Awaitable[AuthContext | None]]
 
 #: 401 response body — generic, non-enumerating (no user data, no tools).
 _UNAUTHORIZED_BODY = json.dumps({"detail": "Invalid or missing credentials"}).encode()
+
+
+def www_authenticate_challenge(host: str) -> str:
+    """Build the MCP OAuth2 discovery challenge header value (REQ-001).
+
+    Args:
+        host: The request ``Host`` header value (production sends the public
+            proxy host; the scheme is always ``https`` because TLS terminates
+            at the ingress proxy).
+
+    Returns:
+        The ``WWW-Authenticate`` challenge pointing at the public
+        protected-resource metadata document.
+    """
+    return f'Bearer resource_metadata="https://{host}{WELL_KNOWN_PROTECTED_RESOURCE_PATH}"'
 
 
 class McpAuthGuard:
@@ -68,22 +88,29 @@ class McpAuthGuard:
             scope = dict(scope)
             scope["path"] = "/"
         headers = _asgi_headers(scope)
+        host = headers.get("host", "")
         try:
             ctx = await self._authenticate(headers.get("authorization"), headers.get("x-api-key"))
         except Exception:  # noqa: BLE001 — never leak auth internals over the wire
             logger.exception(LogMessage.MCP_REQUEST_DENIED)
-            await self._send_unauthorized(send)
+            await self._send_unauthorized(send, host)
             return
         if ctx is None:
             logger.warning(LogMessage.MCP_REQUEST_DENIED)
-            await self._send_unauthorized(send)
+            await self._send_unauthorized(send, host)
             return
         logger.info(LogMessage.AUTH_CREDENTIALS_VALIDATED, ctx.user_id, ctx.method)
         await self._app(scope, receive, send)
 
     @staticmethod
-    async def _send_unauthorized(send) -> None:
-        """Emit a plain HTTP 401 with a bounded JSON body."""
+    async def _send_unauthorized(send, host: str = "") -> None:  # noqa: ANN001 — raw ASGI
+        """Emit a plain HTTP 401 carrying the OAuth2 discovery challenge.
+
+        The body stays the generic, non-enumerating JSON; the
+        ``WWW-Authenticate`` header points OAuth2-enabled MCP clients at the
+        public protected-resource metadata document (REQ-001) so they can
+        start the authorization flow (401 → metadata → authorization server).
+        """
         await send(
             {
                 "type": "http.response.start",
@@ -91,6 +118,7 @@ class McpAuthGuard:
                 "headers": [
                     (b"content-type", b"application/json"),
                     (b"content-length", str(len(_UNAUTHORIZED_BODY)).encode()),
+                    (b"www-authenticate", www_authenticate_challenge(host).encode("latin-1")),
                 ],
             }
         )
@@ -102,18 +130,32 @@ def _asgi_headers(scope) -> dict[str, str]:  # noqa: ANN001 — raw ASGI scope
     return {key.decode("latin-1").lower(): value.decode("latin-1") for key, value in scope.get("headers", [])}
 
 
-def build_mcp_asgi_app(authenticate: Authenticator):
+def build_mcp_asgi_app(
+    authenticate: Authenticator,
+    *,
+    allowed_hosts: list[str],
+    allowed_origins: list[str],
+):
     """Compose the guarded streamable-HTTP MCP ASGI app (REQ-001/002).
 
     Args:
         authenticate: The dual-auth callable reused from the REST security
             (delegates to the wired :class:`AuthService` and sets the RLS
             contextvars exactly like ``verify_credentials``).
+        allowed_hosts: MCP transport-security Host allow-list (REQ-013, from
+            the ``MCP_ALLOWED_HOSTS`` setting). DNS-rebinding protection stays
+            ENABLED — an explicit list (which must contain the public proxy
+            host in production) only corrects the SDK's localhost-only default
+            that otherwise 421s every proxied request.
+        allowed_origins: MCP transport-security Origin allow-list (from
+            ``ALLOWED_ORIGINS``), so browser-origin MCP clients are not 403'd.
 
     Returns:
         ``(guarded_asgi_app, session_manager)`` — the mounted guard and the
         session manager whose ``run()`` context the FastAPI lifespan enters.
     """
+    from mcp.server.transport_security import TransportSecuritySettings
+
     from src.application.mcp.tools import register_mcp_tools
 
     mcp = FastMCP(
@@ -122,6 +164,15 @@ def build_mcp_asgi_app(authenticate: Authenticator):
         stateless_http=True,
         json_response=True,
         streamable_http_path="/",
+        # Explicit transport security (REQ-013): FastMCP would otherwise
+        # auto-enable a localhost-only Host list (its default host is
+        # 127.0.0.1) and 421 every proxy-presented production Host. Protection
+        # stays ENABLED; only the host/origin lists become configuration.
+        transport_security=TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=allowed_hosts,
+            allowed_origins=allowed_origins,
+        ),
     )
     register_mcp_tools(mcp)
     inner = mcp.streamable_http_app()

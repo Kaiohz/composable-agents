@@ -12,7 +12,9 @@ from src.domain.errors.mcp import McpConnectionError, McpToolLoadError
 from src.domain.errors.messages import ErrorMessage
 from src.domain.logging.messages import LogMessage
 from src.domain.ports.mcp_tool_loader import McpToolLoader
-from src.infrastructure.env_utils import resolve_headers_drop_empty
+from src.domain.services.mcp_auth_mode import user_credential_headers
+from src.infrastructure.database.rls_context import current_auth_context
+from src.infrastructure.env_utils import resolve_all_vars, resolve_headers_drop_empty
 
 logger = logging.getLogger(__name__)
 
@@ -59,17 +61,34 @@ class LangchainMcpToolLoader(McpToolLoader):
                     "transport": "stdio",
                     "command": config.command,
                     "args": config.args,
-                    "env": self._resolve_env_vars(config.env),
+                    "env": resolve_headers_drop_empty(config.env),
                 }
             elif config.transport == McpTransportType.HTTP:
-                server_config = {
+                headers: dict[str, str] = dict(config.headers)
+                if config.auth_token:
+                    # REQ-005: the stored auth_token travels as the
+                    # ``Authorization: Bearer <value>`` header —
+                    # langchain-mcp-adapters 0.3.0 StreamableHttpConnection
+                    # NEVER accepts the ``auth_token`` key (TypeError).
+                    # Placeholders (env + ``${USER_JWT}``/``${USER_API_KEY}``)
+                    # resolve to concrete values first; an empty resolution
+                    # simply drops the header again.
+                    token = resolve_all_vars(config.auth_token)
+                    if token:
+                        headers["Authorization"] = f"Bearer {token}"
+                # REQ-004: ``auth_mode: "user_token"`` injects the connected
+                # user's credential (the domain rule decides which header
+                # carries it); on a colliding explicit header name the
+                # injected credential takes precedence.
+                headers.update(user_credential_headers(config.auth_mode, current_auth_context.get()))
+                # One resolution pass resolves env/user placeholders and drops
+                # empty/credential-empty entries (never send a malformed
+                # ``Authorization: Bearer `` or empty ``X-API-Key``).
+                server_configs[config.name] = {
                     "transport": "streamable_http",
                     "url": config.url,
-                    "headers": self._resolve_env_vars(config.headers),
+                    "headers": resolve_headers_drop_empty(headers),
                 }
-                if config.auth_token:
-                    server_config["auth_token"] = config.auth_token
-                server_configs[config.name] = server_config
 
         try:
             # The client expects a mapping of validated connection TypedDicts.
@@ -146,23 +165,3 @@ class LangchainMcpToolLoader(McpToolLoader):
             else:
                 patched.append(tool)
         return patched
-
-    def _resolve_env_vars(self, mapping: dict[str, str]) -> dict[str, str]:
-        """Resolve ${VAR_NAME} placeholders (os.environ + user credentials) in a mapping.
-
-        Delegates to :func:`resolve_headers_drop_empty`, which resolves both
-        environment variables (``${OPENROUTER_API_KEY}`` etc.) and the
-        user-credential placeholders (``${USER_JWT}``, ``${USER_API_KEY}``)
-        from the RLS contextvars, then DROPS entries whose resolved value is
-        empty or whose user-credential placeholder resolved to empty. This
-        prevents sending a malformed ``Authorization: Bearer `` (with no token)
-        or an empty ``X-API-Key`` to a remote MCP server.
-
-        Args:
-            mapping: The input header/env mapping.
-
-        Returns:
-            A new dict with resolved values; empty/credential-empty entries
-            dropped. Non-string values are passed through unchanged.
-        """
-        return resolve_headers_drop_empty(mapping)

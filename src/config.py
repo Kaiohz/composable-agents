@@ -1,9 +1,10 @@
 import os
+from typing import Annotated
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 from pydantic import Field, PrivateAttr, field_validator, model_validator
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, NoDecode
 
 load_dotenv()
 
@@ -75,6 +76,20 @@ class Settings(BaseSettings):
     # --- Dual auth (JWT + per-user API keys) ---
     logto_url: str = ""
     jwt_audience: str = ""
+    # --- feat-mcp-oauth2-dual-auth (REQ-003 / REQ-013) ---
+    # Additional accepted JWT audiences (comma-separated env var
+    # ``JWT_AUDIENCES``, e.g. the Logto OpenCode app-id). The legacy single
+    # ``JWT_AUDIENCE`` stays honored; the two lists are merged by the JWT
+    # adapter (deduped, legacy value first). Empty/absent → legacy-only.
+    jwt_audiences: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # MCP transport-security Host allow-list (comma-separated env var
+    # ``MCP_ALLOWED_HOSTS``). DNS-rebinding protection stays ENABLED; only the
+    # host list is configurable. The default mirrors the mcp SDK's
+    # localhost-only auto-enable (dev/QA safe); the production configmap adds
+    # the public proxy host.
+    mcp_allowed_hosts: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+    )
     secret_encryption_key: str = ""
     # --- Composable MCP control plane (feat-composable-mcp) ---
     # Trusted mcp-raganything registry service base URL (REQ-017 / Technical
@@ -143,6 +158,20 @@ class Settings(BaseSettings):
     @property
     def ssl_mode(self) -> str | None:
         return self._ssl_mode
+
+    @field_validator("jwt_audiences", "mcp_allowed_hosts", mode="before")
+    @classmethod
+    def _coerce_csv_list(cls, value: object) -> object:
+        """Coerce a comma-separated env string into a list (REQ-003/REQ-013).
+
+        ``JWT_AUDIENCES`` / ``MCP_ALLOWED_HOSTS`` are authored as
+        comma-separated env values (never JSON). An already-parsed list
+        passes through unchanged; empty/absent values fall back to the field
+        default.
+        """
+        if isinstance(value, str):
+            return [part.strip() for part in value.split(",") if part.strip()]
+        return value
 
     @model_validator(mode="after")
     def normalize_database_url(self) -> "Settings":

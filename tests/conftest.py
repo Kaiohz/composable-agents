@@ -16,6 +16,17 @@ os.environ.setdefault("DATABASE_URL", "postgresql://test:test@localhost:5432/tes
 os.environ.setdefault("LOGTO_URL", "http://test")
 os.environ.setdefault("JWT_AUDIENCE", "test-audience")
 os.environ.setdefault("SECRET_ENCRYPTION_KEY", "")
+# feat-mcp-oauth2-dual-auth (REQ-003 / REQ-013) configuration seam: a two-value
+# audience list (legacy single value first — identical single-audience subset)
+# and the MCP transport-security host list for the session test server
+# (127.0.0.1:<port> wildcard) plus the production Host used by the
+# Host-header-override behavioral probes. Green-phase Settings will read these;
+# absent fields ignore the env vars entirely (RED-safe).
+os.environ.setdefault("JWT_AUDIENCES", "test-audience,opencode-audience")
+os.environ.setdefault(
+    "MCP_ALLOWED_HOSTS",
+    "127.0.0.1:*,localhost:*,[::1]:*,composables-agent.soludev.tech",
+)
 
 from collections.abc import AsyncGenerator
 
