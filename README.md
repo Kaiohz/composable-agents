@@ -20,7 +20,7 @@ composable-agents uses **dual authentication**: every protected endpoint accepts
 
 | Method | Header | `user_id` source | Validated by |
 |---|---|---|---|
-| **JWT** | `Authorization: Bearer <jwt>` | the JWT `sub` claim | Logto OIDC JWKS (`LOGTO_URL` + `JWT_AUDIENCE`) |
+| **JWT** | `Authorization: Bearer <jwt>` | the JWT `sub` claim | Logto OIDC JWKS (`LOGTO_URL` + `JWT_AUDIENCES` / legacy `JWT_AUDIENCE`) |
 | **API key** | `X-API-Key: cpk_...` | the `user_id` column on the matching `api_keys` row | SHA-256 hash lookup in the `api_keys` table |
 
 The two methods are mutually exclusive on a given request — send **one** of the two headers. If neither validates, the server returns `401 {"detail": "Invalid or missing credentials"}`.
@@ -29,7 +29,7 @@ The two methods are mutually exclusive on a given request — send **one** of th
 
 ### Obtaining a JWT (production)
 
-In production, the user authenticates against **Logto** (via an oauth2-proxy in front of composable-agents) and receives a JWT. The `Authorization: Bearer <jwt>` header is then forwarded to composable-agents, which validates the signature against the Logto JWKS and the `aud` claim against `JWT_AUDIENCE`. The JWT `sub` becomes the `user_id` for RLS and per-user LLM resolution.
+In production, the user authenticates against **Logto** (via an oauth2-proxy in front of composable-agents) and receives a JWT. The `Authorization: Bearer <jwt>` header is then forwarded to composable-agents, which validates the signature against the Logto JWKS and the `aud` claim against the accepted audience list: `JWT_AUDIENCES` (comma-separated; legacy `JWT_AUDIENCE` is still honored as an extra audience). This lets several Logto applications (the oauth2-proxy UI client AND code-agent clients such as the Logto "OpenCode" native app) obtain accepted tokens. The JWT `sub` becomes the `user_id` for RLS and per-user LLM resolution. An invalid JWT never falls back to an API key — an `Authorization` header always means JWT.
 
 ### Obtaining a per-user API key
 
@@ -117,6 +117,42 @@ Any MCP-over-streamable-HTTP client can connect with the same credential used by
 ```
 
 Use the same `Authorization: Bearer <jwt>` header for JWT-based clients. An invalid presented JWT does not silently fall back to an API key.
+
+### Native OAuth2 (MCP authorization spec, 2025-06-18 discovery)
+
+The MCP endpoint speaks the MCP OAuth2 discovery chain for code agents (`OpenCode`, `Claude Code`, …):
+
+1. an unauthenticated request to `/mcp` is answered `401` with
+   `WWW-Authenticate: Bearer resource_metadata="<origin>/.well-known/oauth-protected-resource"`
+   (plus `Cache-Control: no-store`, generic non-enumerating body);
+2. `GET /.well-known/oauth-protected-resource` is public (CORS preflighted, no auth) and returns
+   `{"resource": "<origin>/mcp", "authorization_servers": ["https://logto.soludev.tech/oidc"]}`;
+3. a pre-registered **public Logto native app** (PKCE S256, no secret) issues resource-bound JWTs
+   whose `aud` = the MCP resource indicator — validated offline against the cached JWKS.
+
+Recommended `opencode.jsonc` for the composable-agents server:
+
+```jsonc
+{
+  "mcp": {
+    "servers": {
+      "composables": {
+        "type": "remote",
+        "url": "https://composables-agent.soludev.tech/mcp",
+        "oauth": {
+          "client_id": "<logto-opencode-app-id>",
+          "callback_port": 19876,
+          "redirect_uri": "http://127.0.0.1:19876/callback"
+        }
+      }
+    }
+  }
+}
+```
+
+Machine-to-machine access keeps using `oauth: false` + an `X-API-Key` header. The discovery origin is
+`MCP_PUBLIC_BASE_URL` when set, else the request `Host` only when it is allow-listed in `MCP_ALLOWED_HOSTS`
+(default-port suffixes `:443`/`:80` are stripped before the match; any other host fails closed).
 
 ### Built-in assistant
 
@@ -2377,7 +2413,11 @@ Configured via `.env` file or environment variables. See `.env.example`.
 | Variable | Default | Description |
 |---|---|---|
 | `LOGTO_URL` | `""` (empty) | Logto OIDC issuer URL for JWT validation (e.g. `https://logto.soludev.tech`). When empty, the JWT path is disabled and only the per-user API key path is active (QA/local mode). |
-| `JWT_AUDIENCE` | `""` (empty) | Expected `aud` claim for incoming JWTs (typically the Logto app ID). When `LOGTO_URL` is set, this **must** be set too. |
+| `JWT_AUDIENCE` | `""` (empty) | Legacy single expected `aud` claim for incoming JWTs (typically the Logto oauth2-proxy app ID). Still honored; superseded by `JWT_AUDIENCES`. |
+| `JWT_AUDIENCES` | `""` (empty) | Comma-separated list of accepted `aud` claims (e.g. `ui-app-id,opencode-app-id`). Merged with `JWT_AUDIENCE` (legacy first). Required when `LOGTO_URL` is set and several Logto apps authenticate. |
+| `MCP_ALLOWED_HOSTS` | `127.0.0.1:*,localhost:*,[::1]:*` | Comma-separated allow-list for the MCP transport-security Host check and (fallback) discovery-origin derivation. DNS-rebinding protection stays ENABLED; a present-but-empty or JSON-style value refuses startup. Prod must add `composables-agent.soludev.tech`. |
+| `MCP_PUBLIC_BASE_URL` | `""` (empty) | Explicit public origin for the MCP discovery documents (`WWW-Authenticate` + `/.well-known`). Always wins over the allow-listed request Host. Scheme-less/relative values refuse startup; non-https warns. Prod: `https://composables-agent.soludev.tech`. |
+| `MCP_AUTHORIZATION_SERVER` | `""` (empty → `<LOGTO_URL>/oidc`) | Public AS advertised in `/.well-known/oauth-protected-resource` (`https://logto.soludev.tech/oidc` in prod). Relative values refuse startup; empty → no `authorization_servers` entry. |
 | `SECRET_ENCRYPTION_KEY` | `""` (empty) | Fernet key used to encrypt per-user LLM API keys at rest. Generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. **Required** when per-user LLM settings are enabled. Must be stable across restarts. |
 
 ### Deprecated (no longer used for auth / LLM)
