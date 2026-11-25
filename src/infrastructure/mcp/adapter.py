@@ -25,6 +25,28 @@ logger = logging.getLogger(__name__)
 BACKEND_ONLY_TOOL_NAMES = frozenset({"temporary_upload_file", "temporary_delete_file"})
 
 
+def _merge_headers(base: dict[str, str], injected: dict[str, str]) -> dict[str, str]:
+    """Merge header mappings case-insensitively; the injected mapping wins.
+
+    HTTP header names are case-insensitive, so a configured ``authorization``
+    and an injected ``Authorization`` are the SAME header: the merged mapping
+    keeps the INJECTED spelling/value (feat-mcp-oauth2 credential-precedence
+    contract, explicitly normalized instead of relying on httpx's accidental
+    last-write-wins ordering).
+
+    Args:
+        base: The configured (explicit) headers.
+        injected: The credential headers taking precedence.
+
+    Returns:
+        A fresh mapping; the last-written spelling per lowercase key wins.
+    """
+    merged: dict[str, tuple[str, str]] = {key.lower(): (key, value) for key, value in base.items()}
+    for key, value in injected.items():
+        merged[key.lower()] = (key, value)
+    return dict(merged.values())
+
+
 class LangchainMcpToolLoader(McpToolLoader):
     """Adapter MCP utilisant langchain-mcp-adapters pour charger des outils."""
 
@@ -64,30 +86,31 @@ class LangchainMcpToolLoader(McpToolLoader):
                     "env": resolve_headers_drop_empty(config.env),
                 }
             elif config.transport == McpTransportType.HTTP:
-                headers: dict[str, str] = dict(config.headers)
+                # Credentials that take precedence over the configured
+                # headers: REQ-005 (stored auth_token as
+                # ``Authorization: Bearer <value>`` — langchain-mcp-adapters
+                # 0.3.0 StreamableHttpConnection NEVER accepts the
+                # ``auth_token`` key, TypeError) then REQ-004 (the connected
+                # user's credential, injected by the domain rule). An empty
+                # resolution drops the entry again, and the user credential
+                # (last write) wins the precedence chain.
+                injected: dict[str, str] = {}
                 if config.auth_token:
-                    # REQ-005: the stored auth_token travels as the
-                    # ``Authorization: Bearer <value>`` header —
-                    # langchain-mcp-adapters 0.3.0 StreamableHttpConnection
-                    # NEVER accepts the ``auth_token`` key (TypeError).
-                    # Placeholders (env + ``${USER_JWT}``/``${USER_API_KEY}``)
-                    # resolve to concrete values first; an empty resolution
-                    # simply drops the header again.
                     token = resolve_all_vars(config.auth_token)
                     if token:
-                        headers["Authorization"] = f"Bearer {token}"
+                        injected["Authorization"] = f"Bearer {token}"
                 # REQ-004: ``auth_mode: "user_token"`` injects the connected
                 # user's credential (the domain rule decides which header
-                # carries it); on a colliding explicit header name the
-                # injected credential takes precedence.
-                headers.update(user_credential_headers(config.auth_mode, current_auth_context.get()))
+                # carries it); colliding header names are replaced
+                # case-insensitively by the injected credential.
+                injected.update(user_credential_headers(config.auth_mode, current_auth_context.get()))
                 # One resolution pass resolves env/user placeholders and drops
                 # empty/credential-empty entries (never send a malformed
                 # ``Authorization: Bearer `` or empty ``X-API-Key``).
                 server_configs[config.name] = {
                     "transport": "streamable_http",
                     "url": config.url,
-                    "headers": resolve_headers_drop_empty(headers),
+                    "headers": resolve_headers_drop_empty(_merge_headers(dict(config.headers), injected)),
                 }
 
         try:

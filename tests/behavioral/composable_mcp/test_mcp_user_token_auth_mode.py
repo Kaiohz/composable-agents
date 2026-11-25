@@ -33,6 +33,7 @@ expected header).
 """
 
 import os
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -66,7 +67,7 @@ class RecordingMcpServer:
 
     HOST = "127.0.0.1"
 
-    def __init__(self, name: str = SERVER_NAME) -> None:
+    def __init__(self, name: str = SERVER_NAME, require_credential: bool = False) -> None:
         from mcp.server.fastmcp import FastMCP
         from starlette.middleware import Middleware
 
@@ -80,24 +81,44 @@ class RecordingMcpServer:
             return "pong-record"
 
         class _HeaderRecorder:
-            def __init__(self, app, sink) -> None:  # noqa: ANN001
+            def __init__(self, app, sink, require_credential: bool) -> None:  # noqa: ANN001
                 self._app = app
                 self._sink = sink
+                # Optional REAL 401 policy: when required, a request WITHOUT
+                # any credential header is recorded then REJECTED — this makes
+                # the unattended-credential-drop contract observable (the
+                # remote server's own 401 surfaces as McpToolLoadError).
+                self._require = require_credential
 
             async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001
                 if scope["type"] == "http":
-                    self._sink.append(
-                        {
-                            key.decode("latin-1").lower(): value.decode("latin-1")
-                            for key, value in scope.get("headers", [])
-                        }
-                    )
+                    headers = {
+                        key.decode("latin-1").lower(): value.decode("latin-1")
+                        for key, value in scope.get("headers", [])
+                    }
+                    self._sink.append(headers)
+                    if self._require and not headers.get("authorization") and not headers.get("x-api-key"):
+                        body = b'{"detail": "credentials required"}'
+                        await send(
+                            {
+                                "type": "http.response.start",
+                                "status": 401,
+                                "headers": [
+                                    (b"content-type", b"application/json"),
+                                    (b"content-length", str(len(body)).encode()),
+                                ],
+                            }
+                        )
+                        await send({"type": "http.response.body", "body": body})
+                        return
                 await self._app(scope, receive, send)
 
         inner = mcp.streamable_http_app()
         # Inserted BEFORE the first request: Starlette builds its stack lazily,
         # and uvicorn keeps serving the app's own lifespan (session manager).
-        inner.user_middleware.insert(0, Middleware(_HeaderRecorder, sink=records))
+        inner.user_middleware.insert(
+            0, Middleware(_HeaderRecorder, sink=records, require_credential=require_credential)
+        )
         self._app = inner
         self._inner = None
         self._thread = None
@@ -374,6 +395,158 @@ class TestAuthTokenAsAuthorizationHeader:
             )
             assert all(value != users["a"]["key"] for value in observed.get("x-api-key", set())), (
                 "headers mode must NOT inject the user's credential"
+            )
+        finally:
+            server.stop()
+
+
+# ---------------------------------------------------------------------------
+# Helpers for the unattended / collision contracts (review M-4 and m-1)
+# ---------------------------------------------------------------------------
+if TYPE_CHECKING:
+    from src.domain.entities.mcp_server_config import McpServerConfig
+
+def _loader_config(server: RecordingMcpServer) -> "McpServerConfig":
+    from src.domain.entities.mcp_server_config import McpAuthMode, McpServerConfig, McpTransportType
+
+    return McpServerConfig(
+        name=SERVER_NAME,
+        transport=McpTransportType.HTTP,
+        url=server.url,
+        headers={},
+        auth_mode=McpAuthMode.USER_TOKEN,
+    )
+
+
+def _clear_auth_context():
+    """Enter a context with NO user credential (cron/unattended-run shape)."""
+    from src.infrastructure.database.rls_context import current_auth_context, current_auth_method, current_credential
+
+    context_token = current_auth_context.set(None)
+    credential_token = current_credential.set(None)
+    method_token = current_auth_method.set(None)
+    return context_token, credential_token, method_token
+
+
+def _reset_auth_context(tokens) -> None:
+    from src.infrastructure.database.rls_context import current_auth_context, current_auth_method, current_credential
+
+    auth_context_token, credential_token, method_token = tokens
+    current_auth_method.reset(method_token)
+    current_credential.reset(credential_token)
+    current_auth_context.reset(auth_context_token)
+
+
+class TestUnattendedCredentialDrop:
+    """REQ-004 error case (review M-4): `auth_mode: "user_token"` in a context
+    with NO user credential → the credential header is DROPPED (existing
+    `resolve_headers_drop_empty` semantics — never a malformed
+    `Authorization: Bearer ` / empty `X-API-Key`) and the remote server's own
+    401 surfaces as a clear `McpToolLoadError`.
+
+    The REAL loader chain is driven against the REAL recording MCP server; the
+    built-in-assistant one-shot path deliberately ISOLATES such a load failure
+    (REQ-040 degradation), so the loader boundary is where the `McpToolLoadError`
+    contract is observable deterministically while the header observation stays
+    end-to-end on the wire (the target records exactly what was transmitted).
+    """
+
+    async def test_no_user_credential_drops_header_and_surfaces_mcp_tool_load_error(self):
+        from src.domain.errors.mcp import McpToolLoadError
+        from src.infrastructure.database.rls_context import current_auth_context
+        from src.infrastructure.mcp.adapter import LangchainMcpToolLoader
+
+        server = RecordingMcpServer(require_credential=True).start()
+        try:
+            config = _loader_config(server)
+            loader = LangchainMcpToolLoader()
+            tokens = _clear_auth_context()
+            try:
+                assert current_auth_context.get() is None, "the unattended context must carry no user credential"
+                # Act & Assert — the credential-less load hits the remote 401
+                with pytest.raises(McpToolLoadError) as excinfo:
+                    await loader.load_tools([config])
+                assert "Failed to load MCP tools" in str(excinfo.value), (
+                    f"the failure must surface as the clear McpToolLoadError mapping, got: {excinfo.value}"
+                )
+            finally:
+                _reset_auth_context(tokens)
+
+            # Observable side effect: NOTHING credential-like reached the target
+            observed = _headers_on_target(server.recorded_headers)
+            assert server.recorded_headers, "the rejected request must have been recorded (headers captured)"
+            assert not observed.get("authorization", set()) or all(
+                value and value != "Bearer " for value in observed.get("authorization", set())
+            ), f"no (partial) Authorization header may be transmitted, observed: {observed}"
+            assert not observed.get("x-api-key", set()), (
+                f"an unattended user_token run must DROP the injected credential header, observed: {observed}"
+            )
+        finally:
+            server.stop()
+
+    async def test_control_with_user_credential_loads_tools(self):
+        """Negative control: the SAME setup with the user's credential in
+        context loads the tools — proving the drop (not the target) is what
+        made the unattended case fail."""
+        from src.domain.entities.auth.auth_context import AuthContext
+        from src.infrastructure.database.rls_context import current_auth_context
+        from src.infrastructure.mcp.adapter import LangchainMcpToolLoader
+
+        server = RecordingMcpServer(require_credential=True).start()
+        try:
+            config = _loader_config(server)
+            loader = LangchainMcpToolLoader()
+            context_token = current_auth_context.set(
+                AuthContext(user_id="user-a", method="api_key", raw_credential="cpk-control-credential")
+            )
+            try:
+                tools = await loader.load_tools([config])
+                assert tools, "with the user's API key in context the user_token server loads its tools"
+            finally:
+                current_auth_context.reset(context_token)
+            observed = _headers_on_target(server.recorded_headers)
+            assert "cpk-control-credential" in observed.get("x-api-key", set()), (
+                f"the control run must inject the user's API key, observed: {observed}"
+            )
+        finally:
+            server.stop()
+
+
+class TestCaseInsensitiveHeaderCollision:
+    """Review minor m-1: the injected credential wins over a colliding header
+    CASE-INSENSITIVELY (a configured `x-api-key` and the injected `X-API-Key`
+    are the same HTTP header)."""
+
+    async def test_lowercase_colliding_header_replaced_by_injected_credential(self):
+        from src.domain.entities.auth.auth_context import AuthContext
+        from src.domain.entities.mcp_server_config import McpAuthMode, McpServerConfig, McpTransportType
+        from src.infrastructure.database.rls_context import current_auth_context
+        from src.infrastructure.mcp.adapter import LangchainMcpToolLoader
+
+        colliding_lowercase = "cpk_lowercase_colliding_value"
+        server = RecordingMcpServer().start()
+        try:
+            config = McpServerConfig(
+                name=SERVER_NAME,
+                transport=McpTransportType.HTTP,
+                url=server.url,
+                headers={"x-api-key": colliding_lowercase},
+                auth_mode=McpAuthMode.USER_TOKEN,
+            )
+            loader = LangchainMcpToolLoader()
+            context_token = current_auth_context.set(
+                AuthContext(user_id="user-a", method="api_key", raw_credential="cpk-injected-wins")
+            )
+            try:
+                await loader.load_tools([config])
+            finally:
+                current_auth_context.reset(context_token)
+            observed = _headers_on_target(server.recorded_headers)
+            assert "cpk-injected-wins" in observed.get("x-api-key", set()), (
+                f"the injected credential must win the case-insensitive collision, observed: {observed}"
+            )
+            assert colliding_lowercase not in observed.get("x-api-key", set()), (
+                f"the differently-cased colliding value must NOT be transmitted, observed: {observed}"
             )
         finally:
             server.stop()

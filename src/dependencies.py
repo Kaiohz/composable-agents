@@ -216,9 +216,13 @@ try:
         security.authenticate_headers,
         # Explicit MCP transport security (feat-mcp-oauth2 REQ-013): the Host
         # allow-list comes from MCP_ALLOWED_HOSTS (DNS-rebinding protection
-        # stays ENABLED), origins from ALLOWED_ORIGINS.
+        # stays ENABLED), origins from ALLOWED_ORIGINS. The same list gates
+        # the Host fallback of the OAuth2 discovery-URL derivation (M-2):
+        # MCP_PUBLIC_BASE_URL wins when configured, an unlisted Host is never
+        # echoed into a discovery document.
         allowed_hosts=settings.mcp_allowed_hosts,
         allowed_origins=settings.allowed_origins,
+        public_base_url=settings.mcp_public_base_url,
     )
 except Exception:  # pragma: no cover — construction failures surface at boot
     logger.exception(LogMessage.MCP_SERVER_MOUNTED)

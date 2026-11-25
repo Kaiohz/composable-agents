@@ -75,3 +75,18 @@ class TestProtectedResourceMetadata:
         assert resp.headers.get("access-control-allow-origin") == CONFIGURED_BROWSER_ORIGIN, (
             f"preflight must echo the configured browser origin, got: {resp.headers.get('access-control-allow-origin')!r}"
         )
+
+    async def test_metadata_refuses_a_spoofable_foreign_host_without_configuration(self, client):
+        """Review M-2: without a configured `MCP_PUBLIC_BASE_URL`, a non-allow-
+        listed request Host can NEVER shape the advertised `resource` URL —
+        the discovery document is simply not served at such an origin (404,
+        no derivation details reflected)."""
+        resp = await client.get(
+            WELL_KNOWN,
+            headers={"Host": "dns-rebind.evil.example"},
+        )
+        assert resp.status_code == 404, (
+            "the metadata document must not be served with an attacker-shaped "
+            f"resource URL, got {resp.status_code}: {resp.text}"
+        )
+        assert "resource" not in resp.text, f"no derived resource URL may be echoed, got: {resp.text}"

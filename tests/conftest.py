@@ -27,6 +27,12 @@ os.environ.setdefault(
     "MCP_ALLOWED_HOSTS",
     "127.0.0.1:*,localhost:*,[::1]:*,composables-agent.soludev.tech",
 )
+# feat-mcp-oauth2 M-2: the discovery-origin Host fallback is the branch the
+# behavioral probes exercise (the probes present the production Host, which is
+# allow-listed). The configured MCP_PUBLIC_BASE_URL always wins
+# (precedence is unit-tested); keeping the env unset here makes the fallback
+# branch deterministic in the suite.
+os.environ.setdefault("MCP_PUBLIC_BASE_URL", "")
 
 from collections.abc import AsyncGenerator
 

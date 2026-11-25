@@ -7,8 +7,9 @@ normalization) on success, and non-HTTP ASGI pass-through.
 """
 
 import json
+from unittest.mock import MagicMock
 
-from src.application.mcp.server import McpAuthGuard
+from src.application.mcp.server import McpAuthGuard, public_discovery_origin, www_authenticate_challenge
 
 
 class _Recorder:
@@ -29,6 +30,10 @@ def _http_scope(headers: dict[str, str] | None = None, path: str = "/mcp") -> di
         "path": path,
         "headers": [(k.encode("latin-1"), v.encode("latin-1")) for k, v in (headers or {}).items()],
     }
+
+
+_LOCALHOST_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*", "composables-agent.soludev.tech"]
+PROD_HOST = "composables-agent.soludev.tech"
 
 
 def _send_collector(messages: list[dict]):
@@ -116,3 +121,105 @@ class TestAuthGuardForwarding:
         # No 401 was produced; the recorder's forwarding marker is the only output.
         assert messages == [{"type": "asgi.record", "forwarded": True}]
         assert all(message.get("status") != 401 for message in messages)
+
+
+class TestPublicDiscoveryOriginDerivation:
+    """M-finding M-2: the discovery URL never echoes a raw, spoofable request
+    Host — the configured `MCP_PUBLIC_BASE_URL` wins, and only an explicitly
+    allow-listed Host may be used as a fallback."""
+
+    def test_configured_base_url_always_wins(self):
+        origin = public_discovery_origin(
+            "dns-rebind.evil.example",
+            configured_base_url="https://composables-agent.soludev.tech/",
+            allowed_hosts=_LOCALHOST_HOSTS,
+        )
+        assert origin == "https://composables-agent.soludev.tech"
+
+    def test_allowed_host_is_trusted_without_configuration(self):
+        origin = public_discovery_origin(
+            PROD_HOST, configured_base_url="", allowed_hosts=_LOCALHOST_HOSTS
+        )
+        assert origin == f"https://{PROD_HOST}"
+
+    def test_wildcard_port_host_is_allowed(self):
+        origin = public_discovery_origin(
+            "127.0.0.1:8012", configured_base_url="", allowed_hosts=_LOCALHOST_HOSTS
+        )
+        assert origin == "https://127.0.0.1:8012"
+
+    def test_foreign_host_is_never_echoed(self):
+        assert (
+            public_discovery_origin("dns-rebind.evil.example", configured_base_url="", allowed_hosts=_LOCALHOST_HOSTS)
+            is None
+        )
+
+    def test_empty_host_is_never_echoed(self):
+        assert public_discovery_origin("", configured_base_url="", allowed_hosts=_LOCALHOST_HOSTS) is None
+
+    def test_empty_allowlist_matches_nothing(self):
+        assert public_discovery_origin("127.0.0.1:80", configured_base_url="", allowed_hosts=[]) is None
+
+    def test_challenge_embeds_the_full_path(self):
+        challenge = www_authenticate_challenge(f"https://{PROD_HOST}")
+        assert (
+            challenge == f'Bearer resource_metadata="https://{PROD_HOST}/.well-known/oauth-protected-resource"'
+        )
+
+
+class TestAuthGuardDiscoveryOrigin:
+    """Behavior of the guard's 401 challenge against spoofed/foreign Hosts."""
+
+    async def _run(self, guard, headers: dict[str, str] | None) -> tuple[_Recorder, list[dict]]:
+        recorder, messages = _Recorder(), []
+
+        async def _auth(authorization, api_key):  # noqa: ARG001 — stub signature matches the port
+            return None
+
+        await guard(_http_scope(headers), _receive_noop, _send_collector(messages))
+        return recorder, messages
+
+    async def test_allowed_host_on_401_carries_allowlisted_challenge(self):
+        guard = McpAuthGuard(MagicMock(), _deny, configured_base_url="", allowed_hosts=_LOCALHOST_HOSTS)
+        _recorder, messages = await self._run(guard, {"Host": PROD_HOST})
+        start = messages[0]
+        headers = dict(start["headers"])
+        assert start["status"] == 401
+        assert (
+            headers[b"www-authenticate"].decode()
+            == f'Bearer resource_metadata="https://{PROD_HOST}/.well-known/oauth-protected-resource"'
+        )
+
+    async def test_configured_base_url_wins_over_spoofed_host(self):
+        guard = McpAuthGuard(
+            MagicMock(), _deny, configured_base_url="https://public.example", allowed_hosts=_LOCALHOST_HOSTS
+        )
+        _recorder, messages = await self._run(guard, {"Host": "dns-rebind.evil.example"})
+        headers = dict(messages[0]["headers"])
+        assert (
+            headers[b"www-authenticate"].decode()
+            == 'Bearer resource_metadata="https://public.example/.well-known/oauth-protected-resource"'
+        )
+
+    async def test_foreign_host_on_401_carries_no_discovery_url(self):
+        """A spoofable (non-allow-listed) Host is NEVER echoed: the 401 goes
+        out WITHOUT the WWW-Authenticate header (no discovery pointer to an
+        attacker-controlled origin)."""
+        guard = McpAuthGuard(MagicMock(), _deny, configured_base_url="", allowed_hosts=_LOCALHOST_HOSTS)
+        _recorder, messages = await self._run(guard, {"Host": "dns-rebind.evil.example"})
+        start = messages[0]
+        header_names = {name for name, _ in start["headers"]}
+        assert start["status"] == 401
+        assert b"www-authenticate" not in header_names
+
+    async def test_401_is_never_cacheable(self):
+        """M-finding M-2 hardening: every 401 carries Cache-Control: no-store
+        so a shared cache cannot replay a challenge to another client."""
+        guard = McpAuthGuard(MagicMock(), _deny, configured_base_url="", allowed_hosts=_LOCALHOST_HOSTS)
+        _recorder, messages = await self._run(guard, {"Host": PROD_HOST})
+        assert dict(messages[0]["headers"])[b"cache-control"] == b"no-store"
+
+
+async def _deny(authorization, api_key):  # noqa: ANN001, ARG001 — stub authenticator shape (unused args match the port)
+    """An authenticator that always refuses (matches the port signature)."""
+    return None

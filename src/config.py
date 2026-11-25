@@ -3,7 +3,7 @@ from typing import Annotated
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 from dotenv import load_dotenv
-from pydantic import Field, PrivateAttr, field_validator, model_validator
+from pydantic import Field, PrivateAttr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode
 
 load_dotenv()
@@ -86,10 +86,19 @@ class Settings(BaseSettings):
     # ``MCP_ALLOWED_HOSTS``). DNS-rebinding protection stays ENABLED; only the
     # host list is configurable. The default mirrors the mcp SDK's
     # localhost-only auto-enable (dev/QA safe); the production configmap adds
-    # the public proxy host.
+    # the public proxy host. A present-but-empty value REFUSES startup (a
+    # allow-empty list would 421 every MCP request — fail fast instead).
     mcp_allowed_hosts: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["127.0.0.1:*", "localhost:*", "[::1]:*"]
     )
+    # Public base origin advertised by the MCP OAuth2 discovery documents
+    # (feat-mcp-oauth2 M-2 hardening), e.g.
+    # ``https://composables-agent.soludev.tech``. The request ``Host`` header
+    # is client-supplied and MUST NOT be echoed unvalidated: when this is
+    # configured it always wins; when unset the request Host is trusted ONLY
+    # when it matches the ``MCP_ALLOWED_HOSTS`` allow-list. The production
+    # configmap sets it.
+    mcp_public_base_url: str = ""
     secret_encryption_key: str = ""
     # --- Composable MCP control plane (feat-composable-mcp) ---
     # Trusted mcp-raganything registry service base URL (REQ-017 / Technical
@@ -161,16 +170,32 @@ class Settings(BaseSettings):
 
     @field_validator("jwt_audiences", "mcp_allowed_hosts", mode="before")
     @classmethod
-    def _coerce_csv_list(cls, value: object) -> object:
+    def _coerce_csv_list(cls, value: object, info: ValidationInfo) -> object:
         """Coerce a comma-separated env string into a list (REQ-003/REQ-013).
 
         ``JWT_AUDIENCES`` / ``MCP_ALLOWED_HOSTS`` are authored as
         comma-separated env values (never JSON). An already-parsed list
-        passes through unchanged; empty/absent values fall back to the field
+        passes through unchanged; absent values fall back to the field
         default.
+
+        A present-but-empty ``MCP_ALLOWED_HOSTS`` (``""`` or blank-only) is
+        INVALID (M-finding: silent total outage): with DNS-rebinding
+        protection ENABLED an empty host allow-list rejects every MCP request
+        with HTTP 421, so the process refuses to start and the configmap must
+        explicitly list the public proxy host plus the localhost defaults.
+        ``JWT_AUDIENCES`` tolerates an empty value (it simply means "legacy
+        ``JWT_AUDIENCE`` only").
         """
         if isinstance(value, str):
-            return [part.strip() for part in value.split(",") if part.strip()]
+            parts = [part.strip() for part in value.split(",") if part.strip()]
+            if not parts and info.field_name == "mcp_allowed_hosts":
+                raise ValueError(
+                    "mcp_allowed_hosts must not be empty: with DNS-rebinding protection "
+                    "enabled an empty host allow-list rejects every MCP request with "
+                    "HTTP 421 — list the public proxy host (MCP_ALLOWED_HOSTS, "
+                    "configmap REQ-013) plus the localhost defaults"
+                )
+            return parts
         return value
 
     @model_validator(mode="after")

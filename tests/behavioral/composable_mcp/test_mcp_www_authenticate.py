@@ -136,3 +136,48 @@ class TestAuthPrecedenceRegressionPins:
         result = await call_mcp_tool(mcp_base_url, users["a"]["headers"], "composable_users_me")
         assert result["ok"], f"composable_users_me failed via a valid API key: {result}"
         assert result["result"].get("user_id") == "user-a"
+
+
+class TestChallengeOriginHardening:
+    """Review M-2: the discovery URL is never derived from a raw, spoofable
+    request Host. The configured `MCP_PUBLIC_BASE_URL` wins when set (unit
+    precedence), else ONLY an allow-listed request Host is used (this suite's
+    fallback branch): a FOREIGN Host gets a 401 WITHOUT any
+    `WWW-Authenticate` discovery pointer, and every 401 carries
+    `Cache-Control: no-store` so no shared cache can replay a challenge."""
+
+    async def test_foreign_host_on_401_never_receives_a_discovery_url(self, mcp_base_url):
+        """A spoofed Host is answered 401 (unchanged semantics) but the
+        response advertises NO resource_metadata URL for that Host."""
+        resp = await mcp_post_status(
+            mcp_base_url,
+            headers={"Host": "dns-rebind.evil.example", "X-API-Key": "cpk_unknown"},
+            method="initialize",
+        )
+        assert resp.status_code == 401, f"a foreign-Host probe stays 401, got {resp.status_code}"
+        challenge = resp.headers.get("www-authenticate")
+        assert challenge is None, (
+            "a non-allow-listed request Host must NEVER be echoed into the "
+            f"discovery challenge, got: {challenge!r}"
+        )
+        assert resp.json() == {"detail": "Invalid or missing credentials"}, (
+            f"the 401 body stays the generic JSON regardless of the Host, got: {resp.text}"
+        )
+
+    async def test_allowed_host_challenge_is_derived_from_the_allowlist(self, mcp_base_url):
+        """The allow-listed production Host IS a valid fallback origin: the
+        challenge keeps pointing at the production well-known URL."""
+        resp = await mcp_post_status(
+            mcp_base_url, headers={"Host": PROD_HOST}, method="initialize"
+        )
+        assert resp.status_code == 401
+        assert resp.headers.get("www-authenticate") == EXPECTED_WWW_AUTHENTICATE
+
+    async def test_401_challenge_response_is_never_cacheable(self, mcp_base_url):
+        """Every 401 carries `Cache-Control: no-store` (challenge responses
+        must not be cached and replayed to a different client)."""
+        resp = await mcp_post_status(mcp_base_url, headers=_host_probe_headers(), method="initialize")
+        assert resp.status_code == 401
+        assert resp.headers.get("cache-control") == "no-store", (
+            f"401 responses must not be cacheable, got cache-control={resp.headers.get('cache-control')!r}"
+        )

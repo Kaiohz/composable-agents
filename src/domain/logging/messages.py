@@ -421,11 +421,24 @@ class LogMessage(StrEnum):
         "(repeat-lifespan context, e.g. unit tests) — REST/SSE surfaces unaffected"
     )
     MCP_REQUEST_DENIED = "MCP request denied (missing or invalid credentials)"
+    MCP_DISCOVERY_ORIGIN_UNAVAILABLE = (
+        "MCP OAuth2 discovery origin unresolved: MCP_PUBLIC_BASE_URL is unset and the "
+        "request Host is not in MCP_ALLOWED_HOSTS — no discovery URL is advertised"
+    )
     MCP_TOOL_EXECUTED = "MCP tool executed (user=%s tool=%s duration=%.3fs ok=%s)"
     MCP_TOOL_FAILED = "MCP tool failed (user=%s tool=%s error=%s)"
     MCP_TOOL_FAILURE_TYPE = "MCP tool failed with exception type: %s"
     MCP_REGISTRY_FORWARDING = "Registry request forwarded (method=%s path=%s)"
     MCP_REGISTRY_FORWARD_FAILED = "Registry request failed (status=%s)"
+    MCP_REGISTRY_AUTH_MODE_MISSING = (
+        "Registered MCP server entry '%s' carries no auth_mode — the registry may not accept "
+        "the field yet; defaulting to 'headers' (MCP_REGISTRY_AUTH_MODE_MISSING)"
+    )
+    MCP_REGISTRY_AUTH_MODE_DROPPED = (
+        "Registry %s response did not echo auth_mode='%s' (echoed %r) — the registry does not accept/store "
+        "auth_mode and 'user_token' would silently degrade to static 'headers' (MCP_REGISTRY_AUTH_MODE_DROPPED; "
+        "deploy the registry's auth_mode support BEFORE this service — REQ-004 ordering)"
+    )
     BUILTIN_AGENT_RESOLVING = "Resolving built-in assistant definition (user=%s)"
     BUILTIN_AGENT_TOOLS_RESOLVED = "Built-in assistant tools resolved (user=%s tools=%d degraded=%d)"
     BUILTIN_AGENT_OPTIONAL_TOOL_FAILED = (

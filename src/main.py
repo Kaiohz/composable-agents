@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse, Response
 from src.application.mcp.server import (
     MCP_MOUNT_PATH,
     WELL_KNOWN_PROTECTED_RESOURCE_PATH,
+    public_discovery_origin,
 )
 from src.application.routes.agents import router as agents_router
 from src.application.routes.api_keys import router as api_keys_router
@@ -195,9 +196,12 @@ app.add_middleware(
 # BEFORE the protected routers: the route carries NO auth dependency at all —
 # it is a static, non-sensitive discovery document consumed by MCP clients
 # right after the 401 ``WWW-Authenticate`` challenge (the OPTIONS preflight is
-# answered by the CORS middleware without auth). The ``Host`` header carries
-# the public host (production terminates TLS at the ingress proxy, so the
-# scheme is always ``https``); the response is a static JSON — no I/O.
+# answered by the CORS middleware without auth). The advertised origin is the
+# SAME derivation the 401 challenge uses (public_discovery_origin): the
+# configured MCP_PUBLIC_BASE_URL when set, otherwise ONLY an explicitly
+# allow-listed request Host (MCP_ALLOWED_HOSTS) — a raw, spoofable Host is
+# never echoed into the metadata (M-finding M-2); without a derivable origin
+# the route answers 404 (no discovery document at an unverifiable origin).
 @app.get(
     WELL_KNOWN_PROTECTED_RESOURCE_PATH,
     summary="OAuth2 protected-resource metadata (public discovery)",
@@ -209,21 +213,33 @@ app.add_middleware(
     response_description="The static protected-resource metadata document.",
     include_in_schema=False,
 )
-async def oauth_protected_resource(request: Request) -> dict:
+async def oauth_protected_resource(request: Request) -> Response:
     """Return the static OAuth2 protected-resource metadata (public, REQ-002).
 
     Args:
-        request: The incoming request (only its ``Host`` header is read).
+        request: The incoming request (its ``Host`` header is used only when
+            allow-listed by ``MCP_ALLOWED_HOSTS``).
 
     Returns:
-        ``{"resource": "https://<host>/mcp", "authorization_servers": [...]}`
-        with the OIDC issuer derived from the configured Logto base URL.
+        ``{"resource": "https://<public-origin>/mcp", "authorization_servers":
+        [...]}`` with the OIDC issuer derived from the configured Logto base
+        URL — 404 (plain, no derivation detail) when no trustworthy origin can
+        be derived.
     """
-    host = request.headers.get("host", "")
-    return {
-        "resource": f"https://{host}{MCP_MOUNT_PATH}",
-        "authorization_servers": [f"{settings.logto_url.rstrip('/')}/oidc"],
-    }
+    origin = public_discovery_origin(
+        request.headers.get("host", ""),
+        configured_base_url=settings.mcp_public_base_url,
+        allowed_hosts=settings.mcp_allowed_hosts,
+    )
+    if origin is None:
+        logger.warning(LogMessage.MCP_DISCOVERY_ORIGIN_UNAVAILABLE)
+        return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content={"detail": "Not Found"})
+    return JSONResponse(
+        content={
+            "resource": f"{origin}{MCP_MOUNT_PATH}",
+            "authorization_servers": [f"{settings.logto_url.rstrip('/')}/oidc"],
+        }
+    )
 
 
 app.include_router(health_router)

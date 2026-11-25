@@ -12,12 +12,21 @@ Two cache-correctness mechanisms (spec §7 CACHE-001/CACHE-002):
   model metadata edits change the fingerprint, so EVERY worker rebuilds on
   the next invocation — not only the process that performed the mutation.
   Process-local eviction alone would not meet the acceptance criteria.
+* CREDENTIAL FRESHNESS (feat-mcp-oauth2 M-3) — the effective fingerprint also
+  covers the caller's raw credential (hashed, never stored): custom-agent
+  runners with ``mcp_servers: auth_mode: user_token`` bind the user's
+  credential into their MCP connections AT LOAD TIME (langchain-mcp-adapters
+  pins connection headers when the session is created), so a rotated or
+  revoked credential must evict the cached runner or a stale token keeps
+  being re-transmitted. The registered-server (built-in assistant) path is
+  safe by construction: its runner is rebuilt on every turn and never cached.
 
 In-flight runs keep their snapshot: the fingerprint is read once per
 ``get_runner`` call and the returned runner is used for the whole invocation.
 """
 
 import asyncio
+import hashlib
 import logging
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
@@ -41,7 +50,7 @@ from src.domain.ports.model_repository import ModelRepository
 from src.domain.ports.prompt_repository import PromptRepository
 from src.domain.ports.runner_freshness import RunnerFreshness
 from src.domain.ports.tracing_provider import TracingProvider
-from src.infrastructure.database.rls_context import current_user_id
+from src.infrastructure.database.rls_context import current_credential, current_user_id
 from src.infrastructure.deepagent.adapter import DeepAgentRunner
 from src.infrastructure.deepagent.builtin_resolution import BuiltinToolsetResolver
 from src.infrastructure.deepagent.factory import create_agent_from_config, resolve_model_identity
@@ -58,6 +67,33 @@ _DEFAULT_PROVIDER = "openai"
 #: LRU cap on the per-user degraded-capability records (REQ-040 advisory data
 #: with tiny values; the cap keeps worker memory flat at any user scale).
 _DEGRADED_CACHE_MAX_USERS = 256
+
+#: Length of the credential hash prefix kept in the cache fingerprint: the
+#: full digest is unnecessary for collision-avoidance and never constitutes
+#: usable credential material (feat-mcp-oauth2 M-3).
+_CREDENTIAL_FINGERPRINT_CHARS = 16
+
+# Separator joining the freshness fingerprint and the credential fingerprint
+# (freshness parts are themselves '|'-joined, so a distinct final component).
+_FINGERPRINT_SEPARATOR = "\x1f"
+
+
+def _credential_fingerprint() -> str:
+    """Cheap fingerprint of the caller's raw credential (never the credential).
+
+    feat-mcp-oauth2 M-finding M-3: runners with ``auth_mode: user_token`` MCP
+    servers bind the user's credential at tool-load time, so the credential
+    must be part of the runner cache identity — a rotated/revoked credential
+    changes the fingerprint and evicts the stale runner. Returns an empty
+    string without a credential (unattended runs are stable).
+
+    Returns:
+        A short SHA-256 prefix of the raw credential, or ``""`` when unset.
+    """
+    raw = current_credential.get() or ""
+    if not raw:
+        return ""
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:_CREDENTIAL_FINGERPRINT_CHARS]
 
 
 @dataclass
@@ -147,8 +183,8 @@ class PersistentAgentRegistry(AgentRegistry):
         Returns:
             AgentRunner ready for invocation, reflecting the latest committed
             dependency state (agent YAML revision, unpinned prompt Latest
-            version, model metadata) or the freshly resolved built-in
-            toolset.
+            version, model metadata, raw user credential) or the freshly
+            resolved built-in toolset.
 
         Raises:
             AgentNotFoundError: If no config exists for this user/agent.
@@ -165,15 +201,13 @@ class PersistentAgentRegistry(AgentRegistry):
 
         entry = self._runners.get(key)
         if entry is not None:
-            if self._runner_freshness is None:
-                logger.info(LogMessage.AGENT_CACHE_HIT, agent_name)
-                return entry.runner
-            current_fingerprint = await self._runner_freshness.fingerprint(agent_name)
+            current_fingerprint = await self._runner_fingerprint(agent_name)
             if current_fingerprint == entry.fingerprint:
                 logger.info(LogMessage.AGENT_CACHE_HIT, agent_name)
                 return entry.runner
-            # CACHE-002: a dependency changed (or vanished) since the cached
-            # runner was built — evict and rebuild below.
+            # CACHE-002 (or a rotated credential, feat-mcp-oauth2 M-3): a
+            # dependency changed since the cached runner was built — evict
+            # and rebuild below.
             logger.info(LogMessage.RUNNER_FRESHNESS_REBUILD, agent_name, uid)
             async with self._lock:
                 self._runners.pop(key, None)
@@ -200,12 +234,30 @@ class PersistentAgentRegistry(AgentRegistry):
                 config_resolver=config_resolver,
                 extra_tools=extra_tools,
             )
-            fingerprint = (
-                await self._runner_freshness.fingerprint(agent_name) if self._runner_freshness is not None else ""
-            )
+            fingerprint = await self._runner_fingerprint(agent_name)
             self._runners[key] = _CacheEntry(runner=runner, fingerprint=fingerprint)
             logger.info(LogMessage.AGENT_CACHED, agent_name)
             return runner
+
+    async def _runner_fingerprint(self, agent_name: str) -> str:
+        """Combined runner cache identity (CACHE-002 + credential freshness).
+
+        The committed dependency fingerprint (``RunnerFreshness`` port; empty
+        when no port is wired) joined with the caller's raw-credential hash
+        (feat-mcp-oauth2 M-3). Read AFTER the build in the build path so a
+        commit that lands during the build is still captured, exactly like
+        the pre-existing freshness semantics.
+
+        Args:
+            agent_name: Name of the agent whose dependency state is read.
+
+        Returns:
+            The full fingerprint the cache entry is validated against.
+        """
+        freshness = ""
+        if self._runner_freshness is not None:
+            freshness = await self._runner_freshness.fingerprint(agent_name)
+        return _FINGERPRINT_SEPARATOR.join((freshness, _credential_fingerprint()))
 
     def _apply_platform_selector(self, config: AgentConfig) -> tuple[list, AgentConfig]:
         """Swap the ``tools: ["mcp"]`` selector for the platform toolset.
