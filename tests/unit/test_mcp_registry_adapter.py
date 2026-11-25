@@ -234,9 +234,11 @@ class TestProjectionHelpers:
         malformed source as degraded capability info (REQ-040) instead of
         booting a tool with an unusable connection.
         """
-        import pytest as _pytest
-
-        with _pytest.raises(Exception):  # noqa: B017,BLE001 — any validation failure isolates the source
+        with pytest.raises((ValueError, TypeError)):
+            # ``McpServerConfig`` (pydantic model_validator) raises ValueError
+            # for the http-transport contract; a non-string transport raises
+            # TypeError from the enum conversion. Anything else does not
+            # belong to the isolation contract of this projection.
             _to_execution_config({}, "malformed")
 
     def test_non_string_scalar_values_are_coerced(self):

@@ -821,7 +821,9 @@ class AgentPlatformToolsetBuilder:
     def _users_tool(self) -> StructuredTool:
         deps_lazy = self._deps
 
-        async def composable_users_me() -> str:
+        async def composable_users_me() -> (
+            str
+        ):  # NOSONAR python:S7503 — the StructuredTool contract wants a coroutine; the use case it delegates to is a sync, non-blocking in-memory query
             """Return the authenticated user's non-sensitive profile."""
             auth_context = deps_lazy().get_current_auth_context()
             profile = deps_lazy().get_get_current_user_use_case().execute(auth_context)

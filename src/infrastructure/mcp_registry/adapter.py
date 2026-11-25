@@ -225,7 +225,9 @@ class HttpMcpRegistryClient(McpRegistryClient):
         logger.info(LogMessage.MCP_REGISTRY_FORWARDING, method, url)
         try:
             response = await self._client.request(method, url, headers=headers, json=json_body)
-        except (TimeoutError, httpx.HTTPError, OSError) as exc:
+        # ``TimeoutError`` is deliberately absent: it subclasses ``OSError``
+        # (already listed), so listing it again is redunant (S5713).
+        except (httpx.HTTPError, OSError) as exc:
             logger.warning(LogMessage.MCP_REGISTRY_FORWARD_FAILED, "network")
             raise McpRegistryUnavailableError(ErrorMessage.MCP_REGISTRY_UNAVAILABLE) from exc
         if response.status_code == 404:
