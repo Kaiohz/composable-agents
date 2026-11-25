@@ -180,9 +180,7 @@ def _seed_registry(stub_registry, *, url: str, auth_mode: str | None, headers: d
     stub_registry.reset(seed={SERVER_NAME: entry})
 
 
-async def _run_assistant_with_target_tool(
-    client, stub_llm, mcp_base_url, users, auth_headers: dict[str, str]
-) -> dict:
+async def _run_assistant_with_target_tool(client, stub_llm, mcp_base_url, users, auth_headers: dict[str, str]) -> dict:
     """Run the REAL built-in assistant so it loads/calls the registered server."""
     await configure_llm_credentials(client, users["a"]["headers"])
     stub_llm.script(
@@ -348,9 +346,7 @@ class TestAuthTokenAsAuthorizationHeader:
         finally:
             server.stop()
 
-    async def test_auth_token_env_placeholder_resolved(
-        self, mcp_base_url, client, stub_llm, users, stub_registry
-    ):
+    async def test_auth_token_env_placeholder_resolved(self, mcp_base_url, client, stub_llm, users, stub_registry):
         """REQ-005: env placeholders in `auth_token` are resolved (os.environ)."""
         os.environ[ENV_TOKEN_VAR] = ENV_TOKEN_VALUE
         server = RecordingMcpServer().start()
@@ -405,6 +401,7 @@ class TestAuthTokenAsAuthorizationHeader:
 # ---------------------------------------------------------------------------
 if TYPE_CHECKING:
     from src.domain.entities.mcp_server_config import McpServerConfig
+
 
 def _loader_config(server: RecordingMcpServer) -> "McpServerConfig":
     from src.domain.entities.mcp_server_config import McpAuthMode, McpServerConfig, McpTransportType

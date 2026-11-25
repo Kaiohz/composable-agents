@@ -137,15 +137,11 @@ class TestPublicDiscoveryOriginDerivation:
         assert origin == "https://composables-agent.soludev.tech"
 
     def test_allowed_host_is_trusted_without_configuration(self):
-        origin = public_discovery_origin(
-            PROD_HOST, configured_base_url="", allowed_hosts=_LOCALHOST_HOSTS
-        )
+        origin = public_discovery_origin(PROD_HOST, configured_base_url="", allowed_hosts=_LOCALHOST_HOSTS)
         assert origin == f"https://{PROD_HOST}"
 
     def test_wildcard_port_host_is_allowed(self):
-        origin = public_discovery_origin(
-            "127.0.0.1:8012", configured_base_url="", allowed_hosts=_LOCALHOST_HOSTS
-        )
+        origin = public_discovery_origin("127.0.0.1:8012", configured_base_url="", allowed_hosts=_LOCALHOST_HOSTS)
         assert origin == "https://127.0.0.1:8012"
 
     def test_foreign_host_is_never_echoed(self):
@@ -162,9 +158,7 @@ class TestPublicDiscoveryOriginDerivation:
 
     def test_challenge_embeds_the_full_path(self):
         challenge = www_authenticate_challenge(f"https://{PROD_HOST}")
-        assert (
-            challenge == f'Bearer resource_metadata="https://{PROD_HOST}/.well-known/oauth-protected-resource"'
-        )
+        assert challenge == f'Bearer resource_metadata="https://{PROD_HOST}/.well-known/oauth-protected-resource"'
 
 
 class TestAuthGuardDiscoveryOrigin:

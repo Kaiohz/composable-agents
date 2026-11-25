@@ -176,7 +176,9 @@ class TestCredentialScopedFingerprintInvalidation:
         assert mock_create.await_count == 1
 
     @patch("src.infrastructure.persistent_registry.adapter.create_agent_from_config", new_callable=AsyncMock)
-    async def test_rotated_credential_invalidates_cached_runner(self, mock_create, fresh_registry, mock_agent_config_store):
+    async def test_rotated_credential_invalidates_cached_runner(
+        self, mock_create, fresh_registry, mock_agent_config_store
+    ):
         # Arrange — the rotated token is the REVIEW M-3 scenario: a stale
         # cached runner would keep transmitting the old credential.
         registry, _freshness = fresh_registry
@@ -193,7 +195,9 @@ class TestCredentialScopedFingerprintInvalidation:
         assert mock_agent_config_store.get.await_count == 2
 
     @patch("src.infrastructure.persistent_registry.adapter.create_agent_from_config", new_callable=AsyncMock)
-    async def test_unattended_run_without_credential_is_stable(self, mock_create, fresh_registry, mock_agent_config_store):
+    async def test_unattended_run_without_credential_is_stable(
+        self, mock_create, fresh_registry, mock_agent_config_store
+    ):
         # Arrange
         registry, _freshness = fresh_registry
         mock_agent_config_store.get.return_value = VALID_YAML

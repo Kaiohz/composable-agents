@@ -62,6 +62,35 @@ class LangchainMcpToolLoader(McpToolLoader):
         # (retry/skip) instead of stalling or being killed.
         self._tool_timeout = tool_timeout
 
+    def _http_connection_spec(self, config: McpServerConfig) -> dict[str, Any]:
+        """Build the ``streamable_http`` connection spec for one HTTP server.
+
+        Credential precedence: REQ-005 (stored auth_token as
+        ``Authorization: Bearer <value>`` — langchain-mcp-adapters 0.3.0
+        StreamableHttpConnection NEVER accepts the ``auth_token`` key,
+        TypeError) then REQ-004 (the connected user's credential, injected
+        by the domain rule). An empty resolution drops the entry again, and
+        the user credential (last write) wins the precedence chain.
+
+        REQ-004: ``auth_mode: "user_token"`` injects the connected user's
+        credential (the domain rule decides which header carries it);
+        colliding header names are replaced case-insensitively by the
+        injected credential. One resolution pass resolves env/user
+        placeholders and drops empty/credential-empty entries (never send a
+        malformed ``Authorization: Bearer `` or empty ``X-API-Key``).
+        """
+        injected: dict[str, str] = {}
+        if config.auth_token:
+            token = resolve_all_vars(config.auth_token)
+            if token:
+                injected["Authorization"] = f"Bearer {token}"
+        injected.update(user_credential_headers(config.auth_mode, current_auth_context.get()))
+        return {
+            "transport": "streamable_http",
+            "url": config.url,
+            "headers": resolve_headers_drop_empty(_merge_headers(dict(config.headers), injected)),
+        }
+
     async def load_tools(self, configs: list[McpServerConfig]) -> list[Any]:
         """Charge les outils depuis les serveurs MCP configures.
 
@@ -86,32 +115,7 @@ class LangchainMcpToolLoader(McpToolLoader):
                     "env": resolve_headers_drop_empty(config.env),
                 }
             elif config.transport == McpTransportType.HTTP:
-                # Credentials that take precedence over the configured
-                # headers: REQ-005 (stored auth_token as
-                # ``Authorization: Bearer <value>`` — langchain-mcp-adapters
-                # 0.3.0 StreamableHttpConnection NEVER accepts the
-                # ``auth_token`` key, TypeError) then REQ-004 (the connected
-                # user's credential, injected by the domain rule). An empty
-                # resolution drops the entry again, and the user credential
-                # (last write) wins the precedence chain.
-                injected: dict[str, str] = {}
-                if config.auth_token:
-                    token = resolve_all_vars(config.auth_token)
-                    if token:
-                        injected["Authorization"] = f"Bearer {token}"
-                # REQ-004: ``auth_mode: "user_token"`` injects the connected
-                # user's credential (the domain rule decides which header
-                # carries it); colliding header names are replaced
-                # case-insensitively by the injected credential.
-                injected.update(user_credential_headers(config.auth_mode, current_auth_context.get()))
-                # One resolution pass resolves env/user placeholders and drops
-                # empty/credential-empty entries (never send a malformed
-                # ``Authorization: Bearer `` or empty ``X-API-Key``).
-                server_configs[config.name] = {
-                    "transport": "streamable_http",
-                    "url": config.url,
-                    "headers": resolve_headers_drop_empty(_merge_headers(dict(config.headers), injected)),
-                }
+                server_configs[config.name] = self._http_connection_spec(config)
 
         try:
             # The client expects a mapping of validated connection TypedDicts.

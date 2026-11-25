@@ -38,9 +38,7 @@ NO_CREDENTIALS: dict[str, str] = {}
 #: runs on 127.0.0.1; a Host-header override stands in for the TLS proxy).
 PROD_HOST = "composables-agent.soludev.tech"
 
-EXPECTED_WWW_AUTHENTICATE = (
-    f'Bearer resource_metadata="https://{PROD_HOST}/.well-known/oauth-protected-resource"'
-)
+EXPECTED_WWW_AUTHENTICATE = f'Bearer resource_metadata="https://{PROD_HOST}/.well-known/oauth-protected-resource"'
 
 
 def _host_probe_headers(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -110,9 +108,7 @@ class TestNoJwtToApiKeyFallback:
         bad_token = stub_jwks.issue_token(sub="user-a")[:-4] + "zzzz"
         resp = await mcp_post_status(
             mcp_base_url,
-            headers=_host_probe_headers(
-                {"Authorization": f"Bearer {bad_token}", "X-API-Key": users["a"]["key"]}
-            ),
+            headers=_host_probe_headers({"Authorization": f"Bearer {bad_token}", "X-API-Key": users["a"]["key"]}),
             method="initialize",
         )
         _assert_unauthorized_with_discovery_challenge(resp)
@@ -157,8 +153,7 @@ class TestChallengeOriginHardening:
         assert resp.status_code == 401, f"a foreign-Host probe stays 401, got {resp.status_code}"
         challenge = resp.headers.get("www-authenticate")
         assert challenge is None, (
-            "a non-allow-listed request Host must NEVER be echoed into the "
-            f"discovery challenge, got: {challenge!r}"
+            f"a non-allow-listed request Host must NEVER be echoed into the discovery challenge, got: {challenge!r}"
         )
         assert resp.json() == {"detail": "Invalid or missing credentials"}, (
             f"the 401 body stays the generic JSON regardless of the Host, got: {resp.text}"
@@ -167,9 +162,7 @@ class TestChallengeOriginHardening:
     async def test_allowed_host_challenge_is_derived_from_the_allowlist(self, mcp_base_url):
         """The allow-listed production Host IS a valid fallback origin: the
         challenge keeps pointing at the production well-known URL."""
-        resp = await mcp_post_status(
-            mcp_base_url, headers={"Host": PROD_HOST}, method="initialize"
-        )
+        resp = await mcp_post_status(mcp_base_url, headers={"Host": PROD_HOST}, method="initialize")
         assert resp.status_code == 401
         assert resp.headers.get("www-authenticate") == EXPECTED_WWW_AUTHENTICATE
 

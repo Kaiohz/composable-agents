@@ -55,9 +55,7 @@ class TestProtectedResourceMetadata:
             WELL_KNOWN,
             headers={"Host": PROD_HOST, "Authorization": "Bearer not-a-real-token"},
         )
-        assert resp.status_code == 200, (
-            f"the well-known route must stay public, got {resp.status_code}: {resp.text}"
-        )
+        assert resp.status_code == 200, f"the well-known route must stay public, got {resp.status_code}: {resp.text}"
 
     async def test_options_preflight_answered_by_cors_without_auth(self, client):
         """A CORS preflight (OPTIONS) on the well-known path is answered by the
