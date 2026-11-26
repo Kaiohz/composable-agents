@@ -21,7 +21,6 @@ from src.domain.services.agent_registry_refs import (
 
 logger = logging.getLogger(__name__)
 
-
 class CreateAgentConfigUseCase:
     """Create a new agent configuration in persistent storage.
 

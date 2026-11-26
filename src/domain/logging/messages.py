@@ -444,11 +444,42 @@ class LogMessage(StrEnum):
         "(repeat-lifespan context, e.g. unit tests) — REST/SSE surfaces unaffected"
     )
     MCP_REQUEST_DENIED = "MCP request denied (missing or invalid credentials)"
+    MCP_DISCOVERY_ORIGIN_UNAVAILABLE = (
+        "MCP OAuth2 discovery origin unresolved: MCP_PUBLIC_BASE_URL is unset and the "
+        "request Host is not in MCP_ALLOWED_HOSTS — no discovery URL is advertised"
+    )
+    MCP_AUTHORIZATION_SERVER_NOT_ADVERTISED = (
+        "MCP protected-resource metadata advertises NO authorization server: both "
+        "MCP_AUTHORIZATION_SERVER and LOGTO_URL are empty — MCP clients cannot complete "
+        "the OAuth2 discovery chain (REQ-002)"
+    )
+    MCP_AUTHORIZATION_SERVER_NOT_HTTPS = (
+        "MCP protected-resource metadata advertises the non-https authorization server '%s' "
+        "— a PUBLIC MCP client may not reach it (a container-internal LOGTO_URL fallback or "
+        "an explicit http value); set MCP_AUTHORIZATION_SERVER to the publicly reachable "
+        "issuer, e.g. https://logto.soludev.tech/oidc (QA BUG-003)"
+    )
+    MCP_PUBLIC_BASE_URL_NOT_HTTPS = (
+        "MCP discovery documents advertise a non-https public origin: MCP_PUBLIC_BASE_URL is an "
+        "http:// value — public MCP clients reach the resource over TLS; set the https:// public "
+        "origin, e.g. https://composables-agent.soludev.tech (a SCHEME-LESS value already refuses "
+        "startup — code-review NEW-1). The configured value is never interpolated here on purpose: "
+        "an operator may embed credentials in the URL."
+    )
     MCP_TOOL_EXECUTED = "MCP tool executed (user=%s tool=%s duration=%.3fs ok=%s)"
     MCP_TOOL_FAILED = "MCP tool failed (user=%s tool=%s error=%s)"
     MCP_TOOL_FAILURE_TYPE = "MCP tool failed with exception type: %s"
     MCP_REGISTRY_FORWARDING = "Registry request forwarded (method=%s path=%s)"
     MCP_REGISTRY_FORWARD_FAILED = "Registry request failed (status=%s)"
+    MCP_REGISTRY_AUTH_MODE_MISSING = (
+        "Registered MCP server entry '%s' carries no auth_mode — the registry may not accept "
+        "the field yet; defaulting to 'headers' (MCP_REGISTRY_AUTH_MODE_MISSING)"
+    )
+    MCP_REGISTRY_AUTH_MODE_DROPPED = (
+        "Registry %s response did not echo auth_mode='%s' (echoed %r) — the registry does not accept/store "
+        "auth_mode and 'user_token' would silently degrade to static 'headers' (MCP_REGISTRY_AUTH_MODE_DROPPED; "
+        "deploy the registry's auth_mode support BEFORE this service — REQ-004 ordering)"
+    )
     BUILTIN_AGENT_RESOLVING = "Resolving built-in assistant definition (user=%s)"
     BUILTIN_AGENT_TOOLS_RESOLVED = "Built-in assistant tools resolved (user=%s tools=%d degraded=%d)"
     BUILTIN_AGENT_OPTIONAL_TOOL_FAILED = (

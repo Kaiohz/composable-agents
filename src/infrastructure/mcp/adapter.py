@@ -12,7 +12,9 @@ from src.domain.errors.mcp import McpConnectionError, McpToolLoadError
 from src.domain.errors.messages import ErrorMessage
 from src.domain.logging.messages import LogMessage
 from src.domain.ports.mcp_tool_loader import McpToolLoader
-from src.infrastructure.env_utils import resolve_headers_drop_empty
+from src.domain.services.mcp_auth_mode import user_credential_headers
+from src.infrastructure.database.rls_context import current_auth_context
+from src.infrastructure.env_utils import resolve_all_vars, resolve_headers_drop_empty
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +23,28 @@ logger = logging.getLogger(__name__)
 #: are NEVER exposed to the LLM; the normal ``list_files`` / ``list_folders``
 #: / ``read_file`` tools keep flowing through (REQ-037).
 BACKEND_ONLY_TOOL_NAMES = frozenset({"temporary_upload_file", "temporary_delete_file"})
+
+
+def _merge_headers(base: dict[str, str], injected: dict[str, str]) -> dict[str, str]:
+    """Merge header mappings case-insensitively; the injected mapping wins.
+
+    HTTP header names are case-insensitive, so a configured ``authorization``
+    and an injected ``Authorization`` are the SAME header: the merged mapping
+    keeps the INJECTED spelling/value (feat-mcp-oauth2 credential-precedence
+    contract, explicitly normalized instead of relying on httpx's accidental
+    last-write-wins ordering).
+
+    Args:
+        base: The configured (explicit) headers.
+        injected: The credential headers taking precedence.
+
+    Returns:
+        A fresh mapping; the last-written spelling per lowercase key wins.
+    """
+    merged: dict[str, tuple[str, str]] = {key.lower(): (key, value) for key, value in base.items()}
+    for key, value in injected.items():
+        merged[key.lower()] = (key, value)
+    return dict(merged.values())
 
 
 class LangchainMcpToolLoader(McpToolLoader):
@@ -37,6 +61,35 @@ class LangchainMcpToolLoader(McpToolLoader):
         # to a ToolException -> ToolMessage(error) so the agent can recover
         # (retry/skip) instead of stalling or being killed.
         self._tool_timeout = tool_timeout
+
+    def _http_connection_spec(self, config: McpServerConfig) -> dict[str, Any]:
+        """Build the ``streamable_http`` connection spec for one HTTP server.
+
+        Credential precedence: REQ-005 (stored auth_token as
+        ``Authorization: Bearer <value>`` — langchain-mcp-adapters 0.3.0
+        StreamableHttpConnection NEVER accepts the ``auth_token`` key,
+        TypeError) then REQ-004 (the connected user's credential, injected
+        by the domain rule). An empty resolution drops the entry again, and
+        the user credential (last write) wins the precedence chain.
+
+        REQ-004: ``auth_mode: "user_token"`` injects the connected user's
+        credential (the domain rule decides which header carries it);
+        colliding header names are replaced case-insensitively by the
+        injected credential. One resolution pass resolves env/user
+        placeholders and drops empty/credential-empty entries (never send a
+        malformed ``Authorization: Bearer `` or empty ``X-API-Key``).
+        """
+        injected: dict[str, str] = {}
+        if config.auth_token:
+            token = resolve_all_vars(config.auth_token)
+            if token:
+                injected["Authorization"] = f"Bearer {token}"
+        injected.update(user_credential_headers(config.auth_mode, current_auth_context.get()))
+        return {
+            "transport": "streamable_http",
+            "url": config.url,
+            "headers": resolve_headers_drop_empty(_merge_headers(dict(config.headers), injected)),
+        }
 
     async def load_tools(self, configs: list[McpServerConfig]) -> list[Any]:
         """Charge les outils depuis les serveurs MCP configures.
@@ -59,17 +112,10 @@ class LangchainMcpToolLoader(McpToolLoader):
                     "transport": "stdio",
                     "command": config.command,
                     "args": config.args,
-                    "env": self._resolve_env_vars(config.env),
+                    "env": resolve_headers_drop_empty(config.env),
                 }
             elif config.transport == McpTransportType.HTTP:
-                server_config = {
-                    "transport": "streamable_http",
-                    "url": config.url,
-                    "headers": self._resolve_env_vars(config.headers),
-                }
-                if config.auth_token:
-                    server_config["auth_token"] = config.auth_token
-                server_configs[config.name] = server_config
+                server_configs[config.name] = self._http_connection_spec(config)
 
         try:
             # The client expects a mapping of validated connection TypedDicts.
@@ -146,23 +192,3 @@ class LangchainMcpToolLoader(McpToolLoader):
             else:
                 patched.append(tool)
         return patched
-
-    def _resolve_env_vars(self, mapping: dict[str, str]) -> dict[str, str]:
-        """Resolve ${VAR_NAME} placeholders (os.environ + user credentials) in a mapping.
-
-        Delegates to :func:`resolve_headers_drop_empty`, which resolves both
-        environment variables (``${OPENROUTER_API_KEY}`` etc.) and the
-        user-credential placeholders (``${USER_JWT}``, ``${USER_API_KEY}``)
-        from the RLS contextvars, then DROPS entries whose resolved value is
-        empty or whose user-credential placeholder resolved to empty. This
-        prevents sending a malformed ``Authorization: Bearer `` (with no token)
-        or an empty ``X-API-Key`` to a remote MCP server.
-
-        Args:
-            mapping: The input header/env mapping.
-
-        Returns:
-            A new dict with resolved values; empty/credential-empty entries
-            dropped. Non-string values are passed through unchanged.
-        """
-        return resolve_headers_drop_empty(mapping)

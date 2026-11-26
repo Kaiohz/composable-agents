@@ -40,31 +40,34 @@ ModelResolver = Callable[[Any], Awaitable[ModelMetadata]]
 async def resolve_model_identity(
     config: AgentConfig,
     model_resolver: ModelResolver | None,
-) -> tuple[str, str | None]:
-    """Resolve the effective serving model identity (AGT-003 precedence).
+) -> str:
+    """Resolve the effective serving model name (AGT-003 precedence).
 
-    Returns ``(model_name, base_url)``: the ``model_ref`` catalog's
-    ``provider_model`` identifier and ``base_url`` when the reference is set,
-    else the legacy ``model`` string with ``None`` base URL. Shared by
+    Returns the ``model_ref`` catalog's ``provider_model`` identifier when the
+    reference is set, else the legacy ``model`` string. Shared by
     ``_resolve_model`` and the agent registry (which passes the served model
     name to the runner for the LLM-usage trace enrichment, dashboard spec §1).
+
+    The LLM connection never comes from the Model resource: the base URL and
+    API key are resolved exclusively from the user's LLM Settings (spec §C
+    RUNTIME-003/004) — a former ``base_url`` field no longer exists to project.
 
     Args:
         config: The agent configuration.
         model_resolver: Optional catalog model metadata resolver.
 
     Returns:
-        Tuple of ``(model_name, base_url)``.
+        The effective serving model name.
 
     Raises:
         ConfigError: When ``model_ref`` is set but no resolver is wired.
     """
     if config.model_ref is None:
-        return config.model, None
+        return config.model
     if model_resolver is None:
         raise ConfigError(f"Agent '{config.name}' sets model_ref but no model metadata resolver is wired.")
     metadata = await model_resolver(str(config.model_ref))
-    return metadata.provider_model, metadata.base_url
+    return metadata.provider_model
 
 
 async def _resolve_model(
@@ -77,17 +80,18 @@ async def _resolve_model(
     Resolution order (spec §5.5 AGT-003):
 
     * ``model_ref`` (catalog UUID) takes PRECEDENCE — the agent runs with the
-      referenced model's ``provider_model`` identifier and, when present, its
-      ``base_url``. An invalid/missing reference raises the matching error and
-      NEVER falls back to the legacy ``model`` string; the legacy string stays
-      in the YAML for schema compatibility only.
+      referenced model's ``provider_model`` identifier. An invalid/missing
+      reference raises the matching error and NEVER falls back to the legacy
+      ``model`` string; the legacy string stays in the YAML for schema
+      compatibility only.
     * Without ``model_ref`` the legacy ``model`` string applies unchanged
       (legacy custom strings and singleton LLM settings keep their behavior).
 
-    Runtime credentials are resolved exactly as before (unchanged by this
-    feature): when ``llm_credentials_resolver`` is provided AND
-    ``current_user_id`` is set, the user's ``(base_url, api_key)`` build a
-    per-user :class:`ChatOpenAI`; an unconfigured user raises
+    Runtime credentials are resolved exactly as before and are the ONLY source
+    of the LLM connection (spec §C RUNTIME-003/004): when
+    ``llm_credentials_resolver`` is provided AND ``current_user_id`` is set,
+    the user's Settings-resolved ``(base_url, api_key)`` build a per-user
+    :class:`ChatOpenAI`; an unconfigured user raises
     :class:`LlmNotConfiguredError`; when the resolver is ``None`` OR the user
     context is unset (tests), the env-based string model fallback applies.
 
@@ -110,11 +114,10 @@ async def _resolve_model(
     from src.infrastructure.database.rls_context import current_user_id
 
     model_name = config.model
-    model_base_url: str | None = None
 
     if config.model_ref is not None:
         try:
-            model_name, model_base_url = await resolve_model_identity(config, model_resolver)
+            model_name = await resolve_model_identity(config, model_resolver)
         except ModelNotFoundError:
             logger.error(LogMessage.AGENT_CREATE_ERROR, config.name)
             raise
@@ -131,7 +134,9 @@ async def _resolve_model(
     credentials_base_url, api_key = credentials
     return ChatOpenAI(
         model=model_name,
-        base_url=model_base_url or credentials_base_url,
+        # RUNTIME-003: the ONLY base URL — always the Settings-resolved one;
+        # a Model resource never participates in the provider connection.
+        base_url=credentials_base_url,
         api_key=SecretStr(api_key),
         # LLM-usage capture (dashboard spec §1-§2): the LangGraph agent node
         # invokes the model with ``ainvoke`` — a NON-streaming provider call —

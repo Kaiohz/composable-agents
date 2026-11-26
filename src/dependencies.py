@@ -214,7 +214,18 @@ from src.application.mcp.server import build_mcp_asgi_app as _build_mcp_asgi_app
 # delegates to ``security.authenticate_headers`` (set_auth_service wires the
 # AuthService during init_persistence — exactly how verify_credentials works).
 try:
-    mcp_asgi_app, mcp_session_manager = _build_mcp_asgi_app(security.authenticate_headers)
+    mcp_asgi_app, mcp_session_manager = _build_mcp_asgi_app(
+        security.authenticate_headers,
+        # Explicit MCP transport security (feat-mcp-oauth2 REQ-013): the Host
+        # allow-list comes from MCP_ALLOWED_HOSTS (DNS-rebinding protection
+        # stays ENABLED), origins from ALLOWED_ORIGINS. The same list gates
+        # the Host fallback of the OAuth2 discovery-URL derivation (M-2):
+        # MCP_PUBLIC_BASE_URL wins when configured, an unlisted Host is never
+        # echoed into a discovery document.
+        allowed_hosts=settings.mcp_allowed_hosts,
+        allowed_origins=settings.allowed_origins,
+        public_base_url=settings.mcp_public_base_url,
+    )
 except Exception:  # pragma: no cover — construction failures surface at boot
     logger.exception(LogMessage.MCP_SERVER_MOUNTED)
     mcp_asgi_app = None
@@ -374,6 +385,10 @@ async def init_persistence() -> None:
     _root.jwt_adapter = JwtAdapter(
         jwks_url=f"{settings.logto_url}/oidc/jwks" if settings.logto_url else "",
         audience=settings.jwt_audience,
+        # Multi-audience acceptance (feat-mcp-oauth2 REQ-003): the legacy
+        # single JWT_AUDIENCE stays first in the accept list, JWT_AUDIENCES
+        # appends further audiences (e.g. the Logto OpenCode app-id).
+        audiences=list(settings.jwt_audiences),
     )
     auth_service = AuthService(jwt_port=_root.jwt_adapter, api_key_repo=_root.api_key_repository)
     security.set_auth_service(auth_service)
@@ -919,7 +934,7 @@ def get_get_prompt_version_use_case() -> GetPromptVersionUseCase:
 
 
 def get_create_model_use_case() -> CreateModelUseCase:
-    """Provide a CreateModelUseCase instance (metadata-only, MDL-001)."""
+    """Provide a CreateModelUseCase instance (identity-only, MODEL-002)."""
     return CreateModelUseCase(_require_model_repository())
 
 
@@ -939,7 +954,7 @@ def get_update_model_use_case() -> UpdateModelUseCase:
 
 
 def get_delete_model_use_case() -> DeleteModelUseCase:
-    """Provide a DeleteModelUseCase instance (reference-safe, MDL-004)."""
+    """Provide a DeleteModelUseCase instance (reference-safe, MODEL-008)."""
     return DeleteModelUseCase(_require_model_repository())
 
 

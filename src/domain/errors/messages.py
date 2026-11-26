@@ -235,6 +235,7 @@ class ErrorMessage(StrEnum):
     # --- Model catalog (spec §5.2) ---
     MODEL_NOT_FOUND = "Model not found: {model_id}"
     MODEL_IN_USE = "Model is referenced by one or more agents and cannot be deleted: {model_id}"
+    MODEL_REPOSITORY_NOT_WIRED = "Agent '{name}' sets model_ref but no model repository is wired."
     MODEL_FAILED_CREATE = "Failed to create model: {error}"
     MODEL_FAILED_GET = "Failed to get model {model_id}: {error}"
     MODEL_FAILED_LIST = "Failed to list models: {error}"

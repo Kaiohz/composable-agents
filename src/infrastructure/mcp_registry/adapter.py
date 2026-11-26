@@ -29,7 +29,7 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
-from src.domain.entities.mcp_server_config import McpServerConfig, McpTransportType
+from src.domain.entities.mcp_server_config import McpAuthMode, McpServerConfig, McpTransportType
 from src.domain.entities.registered_mcp_server import (
     McpServerValidationReport,
     McpServerWrite,
@@ -69,8 +69,41 @@ def _credential_headers() -> dict[str, str]:
 
 
 def _write_payload(payload: McpServerWrite) -> dict[str, Any]:
-    """Serialize a write input for the registry (secrets included, REQ-019)."""
+    """Serialize a write input for the registry (secrets included, REQ-019).
+
+    Deployment ordering (feat-mcp-oauth2 M-finding M-5): ``auth_mode`` is
+    carried on EVERY create/update/validate payload (the REQ-004 contract —
+    the registry must persist it for ``user_token`` to round-trip). The
+    registry side (mcp-ragalong slice) MUST accept and persist the field
+    BEFORE this service reaches production:
+
+    * a registry that FORBIDS extras rejects these payloads with 422 — the
+      rollout order (registry first) is mandatory;
+    * a LENIENT registry silently ignores the field — the degradation is made
+      LOUD instead of silent by :meth:`_warn_auth_mode_echo` (create/update
+      responses are compared against the requested mode) and by the
+      ``MCP_REGISTRY_AUTH_MODE_MISSING`` warning on the reveal/read path
+      (:meth:`_to_execution_config`).
+    """
     return payload.model_dump(mode="json")
+
+
+def _warn_auth_mode_echo(action: str, requested: str | None, entry: dict[str, Any]) -> None:
+    """Warn LOUDLY when a registry response indicates ``auth_mode`` was dropped.
+
+    feat-mcp-oauth2 M-finding M-5: a registry that ignores the new
+    ``auth_mode`` field (pre-deployment registry) silently degrades a
+    ``user_token`` server to static ``headers`` — the user's chosen OAuth2
+    mode would never be transmitted and nothing would say so. The create /
+    update RESPONSE is therefore compared against the requested mode: a
+    requested ``user_token`` that is absent (or contradicted) in the echoed
+    entry is logged as a structured warning instead of failing a request
+    that the deployed registry otherwise handled. Never raises, never leaks
+    secret material (the echoed mode is metadata, not a secret).
+    """
+    echoed = entry.get("auth_mode") if isinstance(entry, dict) else None
+    if requested == McpAuthMode.USER_TOKEN and echoed != McpAuthMode.USER_TOKEN:
+        logger.warning(LogMessage.MCP_REGISTRY_AUTH_MODE_DROPPED, action, requested, echoed)
 
 
 def _masked_server(data: dict[str, Any]) -> RegisteredMcpServer:
@@ -99,10 +132,19 @@ def _to_execution_config(entry: dict[str, Any], name: str) -> McpServerConfig:
     """Project a revealed registry entry onto the server-side execution config.
 
     Placeholder resolution (e.g. ``${USER_JWT}``) happens inside the tool
-    loader per call, against the originating user's contextvars.
+    loader per call, against the originating user's contextvars. The
+    credential-transmission mode (``auth_mode``, feat-mcp-oauth2 REQ-004) is
+    carried through so the loader can inject the connected user's credential;
+    an ABSENT value means the registry did not (yet) accept the field — the
+    degradation is logged (M-finding M-5) and defaults to ``headers``; an
+    unknown value is rejected by the entity (the source degrades).
     """
     headers = {str(key): str(value) for key, value in (entry.get("headers") or {}).items()}
     env = {str(key): str(value) for key, value in (entry.get("env") or {}).items()}
+    mode = entry.get("auth_mode")
+    if mode is None:
+        logger.warning(LogMessage.MCP_REGISTRY_AUTH_MODE_MISSING, name)
+        mode = McpAuthMode.HEADERS
     return McpServerConfig(
         name=str(entry.get("name") or name),
         transport=McpTransportType(str(entry.get("transport") or "http")),
@@ -112,6 +154,7 @@ def _to_execution_config(entry: dict[str, Any], name: str) -> McpServerConfig:
         headers=resolve_headers_drop_empty(headers),
         env=resolve_headers_drop_empty(env),
         auth_token=entry.get("auth_token"),
+        auth_mode=mode,
     )
 
 
@@ -184,6 +227,8 @@ class HttpMcpRegistryClient(McpRegistryClient):
         logger.info(LogMessage.MCP_REGISTRY_FORWARDING, method, url)
         try:
             response = await self._client.request(method, url, headers=headers, json=json_body)
+        # ``TimeoutError`` is deliberately absent: it subclasses ``OSError``
+        # (already listed), so listing it again is redunant (S5713).
         except (httpx.HTTPError, OSError) as exc:
             logger.warning(LogMessage.MCP_REGISTRY_FORWARD_FAILED, "network")
             raise McpRegistryUnavailableError(ErrorMessage.MCP_REGISTRY_UNAVAILABLE) from exc
@@ -239,11 +284,13 @@ class HttpMcpRegistryClient(McpRegistryClient):
             entry = await self._request("POST", "", json_body=_write_payload(payload))
         except McpRegistryConflictError as exc:
             raise McpRegistryConflictError(ErrorMessage.AGENT_IMPORT_MCP_CONFLICT.format(name=payload.name)) from exc
+        _warn_auth_mode_echo("create", payload.auth_mode, entry)
         return _masked_server(entry)
 
     async def update_server(self, name: str, changes: dict) -> RegisteredMcpServer:
         """Update a registered MCP server (masked response, REQ-018)."""
         entry = await self._request("PUT", f"/{name}", json_body=changes)
+        _warn_auth_mode_echo(f"update:{name}", changes.get("auth_mode"), entry)
         return _masked_server(entry)
 
     async def delete_server(self, name: str) -> None:

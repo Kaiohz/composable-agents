@@ -68,6 +68,12 @@ EXPECTED_TOOLS = {
 # REQ-020 — never exposed through MCP or the built-in assistant.
 FORBIDDEN_TOOL_FRAGMENTS = ("settings", "api_key", "api_keys", "reveal", " credential", "llm")
 
+# MODEL-001 — the exactly-allowed identity field set of a Model resource; the
+# Settings-owned connection fields ``provider`` and ``base_url`` are removed
+# from every Model contract (REST, MCP control plane, agent-facing toolset).
+MODEL_IDENTITY_FIELDS = {"id", "name", "provider_model", "created_at", "updated_at"}
+REMOVED_MODEL_FIELDS = ("provider", "base_url")
+
 
 async def _tools_map(mcp_base_url, headers):
     """Return {name: tool} from a real tools/list call."""
@@ -231,3 +237,161 @@ class TestStorePathSafety:
             {"filename": "../../etc/passwd", "content": "malicious"},
         )
         assert not result["ok"], f"memory prefix escape accepted: {result}"
+
+
+class TestModelToolsTwoFieldContract:
+    """MODEL-007 (real ``tools/list`` + ``tools/call`` entry points): the MCP
+    Model create/update tools carry exactly the REST two-field business
+    contract — same fields, same trim/non-empty rules, removed (Settings-owned)
+    fields exposed nowhere, and the same ownership rules as REST.
+
+    The mcp SDK wraps a pydantic-model parameter (``args: CreateModelRequest``)
+    in a dynamic arguments model, so the tool schema nests the DTO under
+    ``properties.args`` (``$defs`` + ``$ref``) and a call addresses it as
+    ``{"args": {...}}`` — the established convention of the DTO-based MCP tools
+    (prompts, crons, models) and exactly how an LLM sees them.
+    """
+
+    async def test_tool_schemas_expose_exactly_the_identity_fields(self, mcp_base_url, users):
+        tools = await _tools_map(mcp_base_url, users["a"]["headers"])
+        create_props, create_def = _tool_args_properties(tools["composable_models_create"].inputSchema)
+        update_props, update_def = _tool_args_properties(tools["composable_models_update"].inputSchema)
+        assert set(create_props) == {"name", "provider_model"}, f"create DTO fields: {sorted(create_props)}"
+        assert set(update_props) == {"name", "provider_model"}, f"update DTO fields: {sorted(update_props)}"
+        for removed in REMOVED_MODEL_FIELDS:
+            assert removed not in create_props, f"removed field '{removed}' exposed by the create tool schema"
+            assert removed not in update_props, f"removed field '{removed}' exposed by the update tool schema"
+        # ``extra="forbid"`` is carried into the JSON schema: no other field can
+        # even be shaped into the tool call.
+        assert create_def.get("additionalProperties") is False, "the create DTO schema must forbid extra fields"
+        assert update_def.get("additionalProperties") is False, "the update DTO schema must forbid extra fields"
+
+    async def test_create_follows_the_two_field_contract(self, mcp_base_url, users):
+        created = await call_mcp_tool(
+            mcp_base_url,
+            users["a"]["headers"],
+            "composable_models_create",
+            {"args": {"name": "  Via MCP  ", "provider_model": "  mcp-create-x  "}},
+        )
+        assert created["ok"], f"valid two-field create must succeed: {created}"
+        body = created["result"]
+        assert set(body) == MODEL_IDENTITY_FIELDS, f"identity-only result expected, got: {sorted(body)}"
+        for removed in REMOVED_MODEL_FIELDS:
+            assert removed not in body, f"removed field '{removed}' leaked through the MCP create result"
+        assert body["name"] == "Via MCP", "the tool must apply the same trim rule as REST"
+        assert body["provider_model"] == "mcp-create-x"
+
+    async def test_create_rejects_a_removed_field_and_persists_nothing(self, mcp_base_url, users):
+        rejected = await call_mcp_tool(
+            mcp_base_url,
+            users["a"]["headers"],
+            "composable_models_create",
+            {"args": {"name": "Smuggled", "provider_model": "mcp-reject-x", "provider": "openai"}},
+        )
+        assert not rejected["ok"], "a Settings-owned field must be rejected on the MCP Model create surface"
+        listed = await call_mcp_tool(mcp_base_url, users["a"]["headers"], "composable_models_list")
+        assert listed["ok"], str(listed)
+        items = listed["result"]["models"]
+        assert all(item["name"] != "Smuggled" for item in items), f"the rejected create must persist nothing: {items}"
+
+    async def test_update_rejects_removed_unknown_and_invalid_fields(self, mcp_base_url, users):
+        model = await self._create_model(mcp_base_url, users)
+        for payload in (
+            {"provider": "anthropic"},
+            {"base_url": "https://api.example.com/v1"},
+            {"unknown_field": "x"},
+            {"name": "   "},
+            {"provider_model": None},
+        ):
+            rejected = await call_mcp_tool(
+                mcp_base_url,
+                users["a"]["headers"],
+                "composable_models_update",
+                {"model_id": model["id"], "args": payload},
+            )
+            assert not rejected["ok"], f"the MCP update must reject {sorted(payload)}: {rejected}"
+        got = await call_mcp_tool(
+            mcp_base_url, users["a"]["headers"], "composable_models_get", {"model_id": model["id"]}
+        )
+        body = got["result"]
+        assert body["name"] == model["name"] and body["provider_model"] == model["provider_model"], (
+            "no invalid update may be applied"
+        )
+
+    async def test_update_keeps_omitted_field_and_trims_like_rest(self, mcp_base_url, users):
+        model = await self._create_model(mcp_base_url, users)
+        patched = await call_mcp_tool(
+            mcp_base_url,
+            users["a"]["headers"],
+            "composable_models_update",
+            {"model_id": model["id"], "args": {"name": "  Renamed  "}},
+        )
+        assert patched["ok"], str(patched)
+        assert set(patched["result"]) == MODEL_IDENTITY_FIELDS, sorted(patched["result"])
+        assert patched["result"]["name"] == "Renamed", "the tool must apply the same trim rule as REST"
+        assert patched["result"]["provider_model"] == model["provider_model"], "the omitted field keeps its value"
+
+    async def test_update_with_no_editable_field_is_rejected(self, mcp_base_url, users):
+        """MODEL-006 parity: a PATCH with no editable field stays rejected —
+        either as an omitted ``args`` argument or as an empty one."""
+        model = await self._create_model(mcp_base_url, users)
+        missing_args = await call_mcp_tool(
+            mcp_base_url, users["a"]["headers"], "composable_models_update", {"model_id": model["id"]}
+        )
+        assert not missing_args["ok"], "an update without the editable-fields argument must be rejected"
+        empty_args = await call_mcp_tool(
+            mcp_base_url,
+            users["a"]["headers"],
+            "composable_models_update",
+            {"model_id": model["id"], "args": {}},
+        )
+        assert not empty_args["ok"], "an empty editable-fields patch must be rejected"
+
+    async def test_ownership_matches_rest_and_is_non_enumerating(self, mcp_base_url, users, client):
+        model = await self._create_model(mcp_base_url, users)
+        foreign = await call_mcp_tool(
+            mcp_base_url,
+            users["b"]["headers"],
+            "composable_models_update",
+            {"model_id": model["id"], "args": {"name": "Hijack"}},
+        )
+        assert not foreign["ok"], "user B must not update user A's model through MCP"
+        assert model["name"] not in str(foreign["result"]), "foreign ownership must not be disclosed"
+        got = await client.get(f"/api/v1/models/{model['id']}", headers=users["a"]["headers"])
+        assert got.status_code == 200 and got.json()["name"] == model["name"]
+
+    async def test_malformed_non_uuid_id_is_a_structured_not_found(self, mcp_base_url, users):
+        """BUG-001 parity: the MCP tools share the REST repository path, so a
+        malformed (non-UUID) id must surface as a structured not-found error —
+        never an unhandled server error, on any mutating or reading verb."""
+        for name, arguments in (
+            ("composable_models_get", {"model_id": "not-a-uuid"}),
+            ("composable_models_update", {"model_id": "not-a-uuid", "args": {"name": "x"}}),
+            ("composable_models_delete", {"model_id": "not-a-uuid"}),
+        ):
+            refused = await call_mcp_tool(mcp_base_url, users["a"]["headers"], name, arguments)
+            assert not refused["ok"], (name, refused)
+            assert "MCP_NOT_FOUND_ERROR" in str(refused["result"]), (name, refused)
+
+    @staticmethod
+    async def _create_model(mcp_base_url, users) -> dict:
+        created = await call_mcp_tool(
+            mcp_base_url,
+            users["a"]["headers"],
+            "composable_models_create",
+            {"args": {"name": "Owned", "provider_model": "owned-x"}},
+        )
+        assert created["ok"], f"setting up the owned model failed: {created}"
+        return created["result"]
+
+
+def _tool_args_properties(tool_schema: dict) -> tuple[dict, dict]:
+    """Resolve the DTO-annotated ``args`` property of an MCP tool input schema.
+
+    Returns:
+        ``(properties, definition)`` — the nested pydantic model's JSON-schema
+        properties and its full resolved definition (for ``additionalProperties``).
+    """
+    ref = tool_schema["properties"]["args"].get("$ref", "")
+    definition = tool_schema.get("$defs", {}).get(ref.removeprefix("#/$defs/"), {})
+    return definition.get("properties", {}), definition

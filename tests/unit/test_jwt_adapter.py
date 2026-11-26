@@ -341,3 +341,74 @@ class TestJwtAdapter:
 
         # Assert
         assert result is None
+
+
+class TestAudienceLegacyParity:
+    """feat-mcp-oauth2 REQ-003 error case (review M-4): ``JWT_AUDIENCES``
+    unset/empty must keep the EXACT legacy adapter path (byte-identical call
+    shape) — a single accepted audience stays the plain ``str`` that
+    ``tests/unit/test_jwt_adapter.py::test_audience_passed_to_jwt_decode``
+    already pins, never silently converted to a list or an allow-all.
+
+    Self-contained stubbing (JWKS fetch + signing-key resolution mocked, like
+    ``TestJwtAdapter._stub_signing_key``) only patches ``jwt.decode``
+    to CAPTURE the ``audience`` argument it receives.
+    """
+
+    async def _captured_audience(self, *, audience: str, audiences: list[str] | None) -> object:
+        adapter = JwtAdapter(jwks_url=JWKS_URL, audience=audience, audiences=audiences)
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = _jwks_dict()
+        adapter._jwks_http_client = AsyncMock()
+        adapter._jwks_http_client.get = AsyncMock(return_value=mock_response)
+
+        mock_key = MagicMock()
+        mock_key.key = "mock-key"
+        with (
+            patch("src.infrastructure.auth.jwt_adapter.PyJWK.from_dict", return_value=mock_key),
+            patch(
+                "src.infrastructure.auth.jwt_adapter.jwt.get_unverified_header",
+                return_value={"kid": "test-kid"},
+            ),
+            patch("src.infrastructure.auth.jwt_adapter.jwt.decode", return_value=_valid_claims()) as mock_decode,
+        ):
+            await adapter.decode_token("some-token")
+        _, kwargs = mock_decode.call_args
+        return kwargs["audience"]
+
+    async def test_unset_audiences_uses_plain_legacy_string(self) -> None:
+        """`JWT_AUDIENCES` unset (None) → the plain legacy ``str`` call shape."""
+        audience = await self._captured_audience(audience=AUDIENCE, audiences=None)
+        assert audience == AUDIENCE
+        assert isinstance(audience, str), "the legacy single-audience shape must stay a plain str"
+
+    async def test_empty_audiences_uses_plain_legacy_string(self) -> None:
+        """`JWT_AUDIENCES=""` (parsed to []) collapses to the legacy shape too."""
+        audience = await self._captured_audience(audience=AUDIENCE, audiences=[])
+        assert audience == AUDIENCE
+        assert isinstance(audience, str)
+
+    async def test_empty_legacy_audience_keeps_legacy_deny_all_shape(self) -> None:
+        """The legacy empty-`JWT_AUDIENCE` deny-all value is never accepted as
+        an audience: with one extra configured audience the effective list is
+        that single audience in the SAME plain-string shape as the legacy
+        single-audience path (dedupe + collapse; no silent allow-all)."""
+        audience = await self._captured_audience(audience="", audiences=["extra-audience"])
+        assert audience == "extra-audience"
+        assert isinstance(audience, str)
+
+    async def test_single_effective_audience_deduped_to_plain_legacy_string(self) -> None:
+        """`JWT_AUDIENCES` listing exactly the legacy value → one element →
+        the identical legacy ``str`` shape (dedupe keeps it single-valued)."""
+        audience = await self._captured_audience(audience=AUDIENCE, audiences=[AUDIENCE])
+        assert audience == AUDIENCE
+        assert isinstance(audience, str)
+
+    async def test_two_audiences_use_list_with_legacy_first(self) -> None:
+        """Multiple audiences → a list, legacy value first, deduped."""
+        audience = await self._captured_audience(
+            audience=AUDIENCE,
+            audiences=["opencode-audience", AUDIENCE, "opencode-audience"],
+        )
+        assert audience == [AUDIENCE, "opencode-audience"]

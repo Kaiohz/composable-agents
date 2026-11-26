@@ -94,10 +94,12 @@ class McpRegistryClient(ABC):
         """
         ...
 
-    async def aclose(self) -> None:  # noqa: B027 — optional lifecycle hook
+    async def aclose(self) -> None:  # noqa: B027 — optional lifecycle hook  # NOSONAR python:S7503 — intentional async no-op hook: abstract protocol method; concrete overrides are awaited (httpx aclose)  # noqa: B027
         """Release any owned HTTP resources (composition-root lifecycle hook).
 
         Concrete adapters with a persistent connection pool override this;
-        stateless clients keep the default cooperative no-op.
+        stateless clients keep the default cooperative no-op. The ``async``
+        shape is part of the protocol contract even though the no-op body
+        awaits nothing (S7503 false positive, documented).
         """
         await asyncio.sleep(0)

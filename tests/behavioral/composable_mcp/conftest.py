@@ -186,6 +186,20 @@ def jwt_users() -> dict[str, dict[str, str]]:
     }
 
 
+@pytest.fixture
+def stub_jwks() -> StubJwksServer:
+    """The process-wide JWKS stub (issued through the conftest's own singleton).
+
+    Test modules MUST mint tokens through this fixture rather than importing
+    ``get_stub_jwks`` directly: with pytest's prepend import mode and the
+    package-less ``tests`` tree, an absolute import of this conftest creates a
+    SECOND module instance whose module-global singleton would start a SECOND
+    stub JWKS server bound to a different RSA key — tokens would then never
+    verify against the JWKS retargeted onto the production adapter.
+    """
+    return get_stub_jwks()
+
+
 # ---------------------------------------------------------------------------
 # Real app over a real socket + MCP SDK client helpers
 # ---------------------------------------------------------------------------

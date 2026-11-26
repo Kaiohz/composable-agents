@@ -103,7 +103,14 @@ class EffectiveBuiltinAgentService:
         return effective
 
     async def get_effective_metadata(self) -> AgentConfigMetadata:
-        """Return the effective built-in metadata for the current user."""
+        """Return the effective built-in metadata for the current user.
+
+        No override → the default metadata, without any Model lookup. With an
+        override carrying ``model_ref``, the CURRENT referenced Model is loaded
+        (BUILTIN-META-002/005) and its ``provider_model`` is projected as the
+        card's ``model`` — never the legacy Pydantic default. An unresolvable
+        reference surfaces the existing resolution error (no fallback).
+        """
         override = await self._current_override()
         if override is None:
             return builtin_agent_metadata()
@@ -111,7 +118,7 @@ class EffectiveBuiltinAgentService:
         config = self._load_override(override)
         return AgentConfigMetadata(
             name=BUILTIN_AGENT_NAME,
-            model=config.model,
+            model=await self._projected_model(config),
             minio_path="",
             description=config.description,
             created_at=override.created_at,
@@ -120,6 +127,26 @@ class EffectiveBuiltinAgentService:
             is_builtin=True,
             is_customized=True,
         )
+
+    async def _projected_model(self, config: AgentConfig) -> str:
+        """Project the serving model name of a customized built-in (§A).
+
+        ``model_ref`` set → load the referenced Model resource once and expose
+        its current ``provider_model`` (BUILTIN-META-002/006); ``model_ref``
+        absent → keep ``config.model`` (explicit legacy value or platform
+        default, BUILTIN-META-003). A present ``model_ref`` without a wired
+        repository is an explicit configuration error, never a silent fallback.
+
+        Raises:
+            ModelNotFoundError: Missing or inaccessible referenced model.
+            ConfigError: ``model_ref`` present but no model repository wired.
+        """
+        if config.model_ref is None:
+            return config.model
+        if self._model_repository is None:
+            raise ConfigError(ErrorMessage.MODEL_REPOSITORY_NOT_WIRED.format(name=config.name))
+        metadata = await self._model_repository.get(str(config.model_ref))
+        return metadata.provider_model
 
     async def update(self, name: str, yaml_content: str) -> AgentConfig:
         """Validate and replace the current user's built-in override."""
