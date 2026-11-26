@@ -31,11 +31,13 @@ def yaml_prompt_ref(name: str, prompt_id: str, version: int | None = None) -> st
         ref = f"prompt_ref:\n  id: {prompt_id}\n  version: {version}\n"
     else:
         ref = f"prompt_ref:\n  id: {prompt_id}\n"
-    return f"name: {name}\ntools: []\ndebug: false\n{ref}"
+    # REQ-MODEL-003: a new custom agent must also declare a model source.
+    return f"name: {name}\nmodel: test-model\ntools: []\ndebug: false\n{ref}"
 
 
 def yaml_model_ref(name: str, model_id: str) -> str:
-    return f"name: {name}\ntools: []\ndebug: false\nmodel_ref: {model_id}\n"
+    # REQ-PROMPT-005: a new custom agent must also declare a prompt source.
+    return f'name: {name}\ntools: []\ndebug: false\nmodel_ref: {model_id}\nsystem_prompt: "Resolution prompt."\n'
 
 
 def yaml_legacy(name: str, model: str) -> str:
@@ -168,7 +170,13 @@ class TestModelResolution:
         model_id = model.json()["id"]
 
         name = f"agent-{uuid.uuid4().hex[:6]}"
-        yaml_text = f"name: {name}\ntools: []\ndebug: false\nmodel_ref: {model_id}\nmodel: legacy-should-be-ignored\n"
+
+        yaml_text = (
+            f"name: {name}\ntools: []\ndebug: false\n"
+            f"model_ref: {model_id}\n"
+            "model: legacy-should-be-ignored\n"
+            "system_prompt: \"Catalog serving prompt.\"\n"
+        )
         thread = await _configured_stack(client, users, yaml_text, name)
         resp = await invoke_agent(client, users["a"]["headers"], thread["id"])
         assert resp.status_code == 200, resp.text

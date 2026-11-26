@@ -14,7 +14,6 @@ fields stay empty, and the destructive-delete HITL floor remains enabled.
 
 import logging
 from datetime import UTC, datetime
-from typing import Any
 
 from src.application.services.builtin_agent import (
     BUILTIN_AGENT_NAME,
@@ -22,10 +21,6 @@ from src.application.services.builtin_agent import (
     builtin_agent_config,
     builtin_agent_metadata,
     is_builtin_agent_name,
-)
-from src.application.use_cases.create_agent_config import (
-    registry_ref_metadata_fields,
-    validate_registry_refs,
 )
 from src.domain.entities.agent_config import AgentConfig, HITLConfig
 from src.domain.entities.agent_config_metadata import AgentConfigMetadata
@@ -35,14 +30,47 @@ from src.domain.errors.messages import ErrorMessage
 from src.domain.logging.messages import LogMessage
 from src.domain.ports.agent_config_loader import AgentConfigLoader
 from src.domain.ports.builtin_agent_override_store import BuiltinAgentOverrideStore
+from src.domain.ports.mcp_registry import McpRegistryClient
 from src.domain.ports.model_repository import ModelRepository
 from src.domain.ports.prompt_repository import PromptRepository
+from src.domain.services.agent_registry_refs import (
+    registry_ref_metadata_fields,
+    validate_registry_refs,
+)
+from src.domain.services.mcp_ref_policy import ensure_mcp_refs_registered
 from src.infrastructure.database.rls_context import current_user_id
 
 logger = logging.getLogger(__name__)
 
 _OVERRIDE_SOURCE = "built-in assistant customization"
 _FORBIDDEN_DYNAMIC_FIELDS = ("tools", "subagents", "mcp_servers")
+
+
+def _forbidden_capability_errors(config: AgentConfig) -> list[dict]:
+    """One error per platform-managed capability the YAML tries to set."""
+    return [
+        {
+            "loc": ["body", field],
+            "msg": ErrorMessage.BUILTIN_CUSTOMIZATION_FIELD_FORBIDDEN.format(field=field),
+        }
+        for field in _FORBIDDEN_DYNAMIC_FIELDS
+        if getattr(config, field)
+    ]
+
+
+def _hitl_floor_errors(rules: dict) -> list[dict]:
+    """One error per destructive delete whose HITL floor was disabled."""
+    errors: list[dict] = []
+    for tool in BUILTIN_HITL_DELETE_TOOLS:
+        rule = rules.get(tool)
+        if rule is not None and rule is not True:
+            errors.append(
+                {
+                    "loc": ["body", "hitl", "rules", tool],
+                    "msg": ErrorMessage.BUILTIN_CUSTOMIZATION_HITL_FLOOR.format(tool=tool),
+                }
+            )
+    return errors
 
 
 class EffectiveBuiltinAgentService:
@@ -54,11 +82,13 @@ class EffectiveBuiltinAgentService:
         override_store: BuiltinAgentOverrideStore,
         prompt_repository: PromptRepository | None = None,
         model_repository: ModelRepository | None = None,
+        mcp_registry: McpRegistryClient | None = None,
     ) -> None:
         self._config_loader = config_loader
         self._override_store = override_store
         self._prompt_repository = prompt_repository
         self._model_repository = model_repository
+        self._mcp_registry = mcp_registry
 
     async def get_effective_config(self) -> AgentConfig:
         """Return the effective built-in config for the current user."""
@@ -130,6 +160,13 @@ class EffectiveBuiltinAgentService:
             )
         self._validate_customizable(config)
         await validate_registry_refs(config, self._prompt_repository, self._model_repository)
+        if config.mcp_refs:
+            # REQ-BUILTIN-001: the selector presents registered servers only —
+            # a customization referencing an unregistered (or foreign) server
+            # is refused before anything is persisted.
+            if self._mcp_registry is None:
+                raise ConfigError(ErrorMessage.MCP_REGISTRY_UNAVAILABLE)
+            await ensure_mcp_refs_registered(self._mcp_registry, config.mcp_refs)
 
         user_id = self._require_user_id()
         now = datetime.now(UTC)
@@ -174,24 +211,13 @@ class EffectiveBuiltinAgentService:
         return current_user_id.get() or "system"
 
     def _validate_customizable(self, config: AgentConfig) -> None:
-        errors: list[dict[str, Any]] = []
-        for field in _FORBIDDEN_DYNAMIC_FIELDS:
-            if getattr(config, field):
-                errors.append(
-                    {
-                        "loc": ["body", field],
-                        "msg": ErrorMessage.BUILTIN_CUSTOMIZATION_FIELD_FORBIDDEN.format(field=field),
-                    }
-                )
-        for tool in BUILTIN_HITL_DELETE_TOOLS:
-            rule = config.hitl.rules.get(tool)
-            if rule is not None and rule is not True:
-                errors.append(
-                    {
-                        "loc": ["body", "hitl", "rules", tool],
-                        "msg": ErrorMessage.BUILTIN_CUSTOMIZATION_HITL_FLOOR.format(tool=tool),
-                    }
-                )
+        """Reject any capability the platform manages for the built-in.
+
+        The two rule families (dynamic-toolset capability fields and the
+        destructive-delete HITL floor) are validated independently so each
+        stays minimal and fully covered.
+        """
+        errors = [*_forbidden_capability_errors(config), *_hitl_floor_errors(config.hitl.rules)]
         if errors:
             raise ConfigValidationError(errors)
 

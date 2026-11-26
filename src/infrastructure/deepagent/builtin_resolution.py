@@ -4,8 +4,10 @@ Per-build (per-turn) resolution in the RUNNING user's context (REQ-036/038):
 
 * the built-in MCP mounts exposed by ``mcp-raganything`` (Files, Classical
   RAG, Web, Memories) when their internal base URL is configured;
-* every supported MCP server the current user registered — resolved through
-  the trusted execution-config path (REQ-037);
+* ONLY the MCP servers the current user EXPLICITLY SELECTED in the built-in
+  customization (``mcp_refs``) — resolved through the trusted
+  execution-config path (REQ-037); the entire user registry is NEVER mounted
+  automatically (REQ-BUILTIN-003);
 * the builtin ``create_pdf`` LangChain tool.
 
 CONCURRENCY (spec NFR): optional MCP tool sources are loaded CONCURRENTLY
@@ -19,8 +21,9 @@ timeout, malformed registry payload, ANY exception type — is logged safely
 and surfaced as degraded capability information; the remaining tools
 (platform, healthy servers) stay available and the build never raises.
 
-Deterministic namespacing (REQ-039): the SOURCES are collected in sorted-name
-order and the tool names are assigned AFTER the gather, sequentially, in that
+Deterministic namespacing (REQ-039): the PLATFORM mounts are collected in a
+fixed order and the selected user mounts follow the customization's selection
+order; the tool names are assigned AFTER the gather, sequentially, in that
 same order — so the resolution is deterministic across turns. The platform
 tool names are RESERVED first (callers pass ``reserved_names``), so a
 registered MCP server can never silently shadow a platform ``composable_*``
@@ -128,33 +131,39 @@ class BuiltinToolsetResolver:
         self._builtin_base_url_provider = builtin_mcp_base_url_provider
         self._agent_name = agent_name
 
-    async def resolve_dynamic_tools(self, reserved_names: frozenset[str] = frozenset()) -> tuple[list, list[dict]]:
-        """Resolve MCP mounts, registered servers and ``create_pdf``.
+    async def resolve_dynamic_tools(
+        self, reserved_names: frozenset[str] = frozenset(), selected_refs: list[str] | None = None
+    ) -> tuple[list, list[dict]]:
+        """Resolve MCP mounts, the SELECTED registered servers and ``create_pdf``.
 
         Args:
             reserved_names: Agent-facing tool names already claimed by the
                 platform toolset — a registered MCP server advertising one of
                 these names is deterministically namespaced instead of
                 silently shadowing the platform tool (REQ-039).
+            selected_refs: The built-in customization's explicit MCP selection
+                (registry identities). ``None``/empty mounts NO user-registered
+                server: only the explicitly selected servers are mounted, in
+                addition to the platform tooling (REQ-BUILTIN-003).
 
         Returns:
             ``(tools, degraded)`` — the resolved LangChain tools plus the
             JSON-safe degradation entries (REQ-040) for the failing optional
             sources. NEVER raises: a failing registry or source degrades.
         """
-        sources, collection_degraded = await self._collect_sources()
+        sources, collection_degraded = await self._collect_sources(selected_refs)
         tools, load_degraded = await self._load_sources(sources, reserved_names)
         tools.append(self._pdf_tool())
         degraded = [*collection_degraded, *load_degraded]
         logger.info(LogMessage.BUILTIN_AGENT_TOOLS_RESOLVED, _uid(), len(tools), len(degraded))
         return tools, degraded
 
-    async def _collect_sources(self) -> tuple[list[McpServerConfig], list[dict]]:
+    async def _collect_sources(self, selected_refs: list[str] | None) -> tuple[list[McpServerConfig], list[dict]]:
         """Collect the optional MCP sources in their stable, sorted order.
 
-        Returns:
-            ``(sources, degraded)`` — the collected source configs and the
-            degradation entries produced while resolving them.
+        The platform mounts always apply; user-registered servers are mounted
+        ONLY when explicitly selected (``mcp_refs``), resolved through the
+        trusted execution-config path with per-construction deduplication.
         """
         sources: list[McpServerConfig] = []
         degraded: list[dict] = []
@@ -164,31 +173,32 @@ class BuiltinToolsetResolver:
                 sources.append(
                     McpServerConfig(name=mount_name, transport=McpTransportType.HTTP, url=f"{base_url}{mount_path}")
                 )
-        sources.extend(await self._collect_registered_sources(degraded))
+        if selected_refs:
+            sources.extend(await self._collect_selected_sources(list(selected_refs), degraded))
+            logger.info(LogMessage.BUILTIN_MCP_SELECTION_APPLIED, len(selected_refs), _uid())
         return sources, degraded
 
-    async def _collect_registered_sources(self, degraded: list[dict]) -> list[McpServerConfig]:
-        """Resolve the decrypted execution config of EVERY registered server.
+    async def _collect_selected_sources(self, selected_refs: list[str], degraded: list[dict]) -> list[McpServerConfig]:
+        """Resolve ONLY the explicitly selected registered servers (REQ-BUILTIN-003).
 
-        The registry client returns MASKED management projections; the
-        execution configuration comes through the TRUSTED ``get_execution_config``
-        path (REQ-037) whose decrypted credentials travel only inside the tool
-        loader. Malformed registry payloads and registry outages degrade the
-        registered-server sources WITHOUT ever failing the build (REQ-040).
+        Each unique reference resolves its decrypted execution config through
+        the trusted path (REQ-037), exactly once per construction (NFR). A
+        failing registry or an unknown server degrades to capability
+        information without ever failing the built-in build (REQ-040).
         """
         if self._registry_client is None:
             return []
-        try:
-            servers = await self._registry_client.list_servers()
-        except Exception as exc:  # noqa: BLE001 — one bad registry must not brick the assistant
-            self._record_degradation(degraded, "mcp-registry", exc)
-            return []
         configured: list[McpServerConfig] = []
-        for server in sorted(servers, key=lambda s: s.name):
+        seen: set[str] = set()
+        for ref in selected_refs:
+            if ref in seen:
+                continue
+            seen.add(ref)
             try:
-                configured.append(await self._registry_client.get_execution_config(server.name))
-            except Exception as exc:  # noqa: BLE001 — malformed payload isolated per server
-                self._record_degradation(degraded, server.name, exc)
+                configured.append(await self._registry_client.get_execution_config(ref))
+            # A single missing server degrades; it must never brick the build.
+            except Exception as exc:  # noqa: BLE001
+                self._record_degradation(degraded, ref, exc)
         return configured
 
     @staticmethod

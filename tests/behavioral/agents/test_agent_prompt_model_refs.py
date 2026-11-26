@@ -29,6 +29,7 @@ def _uuid() -> str:
 
 
 def yaml_prompt_ref(name: str, prompt_id: str, version: int | None = None, extra: str = "") -> str:
+    # REQ-MODEL-003: a new custom agent must declare a model source as well.
     body = f"name: {name}\nmodel: test-model\ntools: []\ndebug: false\n"
     if version is not None:
         body += f"prompt_ref:\n  id: {prompt_id}\n  version: {version}\n"
@@ -39,6 +40,7 @@ def yaml_prompt_ref(name: str, prompt_id: str, version: int | None = None, extra
 
 
 def yaml_model_ref(name: str, model_id: str, legacy_model: str | None = None) -> str:
+    # REQ-PROMPT-005: a new custom agent must declare a prompt source as well.
     body = f"name: {name}\ntools: []\ndebug: false\nmodel_ref: {model_id}\n"
     if legacy_model is not None:
         body += f"model: {legacy_model}\n"
@@ -75,7 +77,12 @@ class TestPromptRefAccepted:
         got = await client.get(f"/api/v1/agents/{name}", headers=users["a"]["headers"])
         assert got.json()["prompt_ref"]["version"] == 1
 
-    async def test_updating_to_inline_prompt_clears_ref(self, client, users):
+    async def test_updating_to_inline_prompt_is_refused_and_stored_config_untouched(
+        self, client, users
+    ):
+        """REQ-LEGACY-003: materialization applies to CREATION only — an update
+        YAML carrying a NEW inline prompt definition is refused with an explicit
+        error and the stored configuration stays untouched."""
         prompt = await _create_prompt(client, users["a"]["headers"])
         name = f"agent-{uuid.uuid4().hex[:8]}"
         _, created = await create_agent_yaml(client, users["a"]["headers"], yaml_prompt_ref(name, prompt["id"]), name)
@@ -87,10 +94,18 @@ class TestPromptRefAccepted:
             headers=users["a"]["headers"],
             files={"file": ("agent.yaml", yaml_legacy.encode(), "text/yaml")},
         )
-        assert resp.status_code == 200
+        assert resp.status_code in VALIDATION_CODES, resp.text
         got = await client.get(f"/api/v1/agents/{name}", headers=users["a"]["headers"])
-        assert got.json().get("prompt_ref") is None
-        assert got.json()["system_prompt"] == "inline now"
+        assert got.status_code == 200
+        # The rejected update must not be partially applied: the reference
+        # stays the source of truth.
+        assert got.json().get("prompt_ref") is not None
+        assert got.json()["prompt_ref"]["id"] == prompt["id"]
+        assert got.json().get("system_prompt") in (None, "")
+        new_prompts = await client.get("/api/v1/prompts", headers=users["a"]["headers"])
+        assert all(p["name"] != f"{name}-prompt" for p in new_prompts.json()), (
+            "a rejected update must not materialize resources"
+        )
 
 
 class TestPromptRefExclusivity:
@@ -209,7 +224,10 @@ class TestModelRef:
         _, resp = await create_agent_yaml(client, users["b"]["headers"], yaml_model_ref(name, a_model["id"]), name)
         assert resp.status_code in UNAVAILABLE_CODES
 
-    async def test_removed_model_ref_on_update(self, client, users):
+    async def test_removing_model_ref_for_a_new_inline_model_is_refused(self, client, users):
+        """REQ-LEGACY-003: switching BACK to a new inline model definition is
+        refused on update (conversion to registered resources is the manual-
+        edit conversion path); the stored configuration stays untouched."""
         model = await _create_model(client, users["a"]["headers"])
         name = f"agent-{uuid.uuid4().hex[:8]}"
         _, created = await create_agent_yaml(client, users["a"]["headers"], yaml_model_ref(name, model["id"]), name)
@@ -221,24 +239,37 @@ class TestModelRef:
             headers=users["a"]["headers"],
             files={"file": ("agent.yaml", yaml_legacy.encode(), "text/yaml")},
         )
-        assert resp.status_code == 200
+        assert resp.status_code in VALIDATION_CODES, resp.text
         got = await client.get(f"/api/v1/agents/{name}", headers=users["a"]["headers"])
-        assert got.json().get("model_ref") is None
-        assert got.json()["model"] == "back-to-legacy"
+        assert got.status_code == 200
+        assert got.json()["model_ref"] == model["id"]
+        new_models = await client.get("/api/v1/models", headers=users["a"]["headers"])
+        assert all(m["name"] != f"{name}-model" for m in new_models.json()), (
+            "a rejected update must not materialize resources"
+        )
 
 
 class TestLegacyCompatibility:
-    async def test_inline_prompt_legacy_agent_still_valid(self, client, users):
-        """§8.4: agents without prompt_ref/model_ref remain valid untouched."""
+    async def test_inline_values_are_materialized_into_registered_resources(self, client, users):
+        """Spec agent-resource-import: an inline-only creation is materialized —
+        the persisted agent references the created catalog model and registry
+        prompt instead of carrying the inline values (REQ-IMPORT-003)."""
         name = f"agent-{uuid.uuid4().hex[:8]}"
-        yaml_text = f'name: {name}\nmodel: my-legacy-model\nsystem_prompt: "Legacy prompt."\ntools: []\ndebug: false\n'
+        yaml_text = f'name: {name}\nmodel: anthropic:my-legacy-model\nsystem_prompt: "Legacy prompt."\ntools: []\ndebug: false\n'
         _, resp = await create_agent_yaml(client, users["a"]["headers"], yaml_text, name)
         assert resp.status_code == 201
+
+        listing_models = await client.get("/api/v1/models", headers=users["a"]["headers"])
+        materialized = [m for m in listing_models.json() if m["name"] == f"{name}-model"]
+        assert len(materialized) == 1
+        listing_prompts = await client.get("/api/v1/prompts", headers=users["a"]["headers"])
+        materialized_prompt = [p for p in listing_prompts.json() if p["name"] == f"{name}-prompt"]
+        assert len(materialized_prompt) == 1
+
         got = await client.get(f"/api/v1/agents/{name}", headers=users["a"]["headers"])
-        assert got.json()["model"] == "my-legacy-model"
-        assert got.json()["system_prompt"] == "Legacy prompt."
-        assert got.json().get("prompt_ref") is None
-        assert got.json().get("model_ref") is None
+        assert got.status_code == 200
+        assert got.json()["model_ref"] == materialized[0]["id"]
+        assert got.json()["prompt_ref"]["id"] == materialized_prompt[0]["id"]
 
     async def test_same_user_prompt_and_model_refs_saved(self, client, users):
         """A single agent may reference the user's own prompt AND model."""

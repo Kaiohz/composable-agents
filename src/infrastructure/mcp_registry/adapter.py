@@ -27,6 +27,7 @@ import logging
 from typing import Any
 
 import httpx
+from pydantic import ValidationError
 
 from src.domain.entities.mcp_server_config import McpAuthMode, McpServerConfig, McpTransportType
 from src.domain.entities.registered_mcp_server import (
@@ -35,6 +36,7 @@ from src.domain.entities.registered_mcp_server import (
     RegisteredMcpServer,
 )
 from src.domain.errors.mcp import (
+    McpRegistryConflictError,
     McpRegistryNotFoundError,
     McpRegistryRequestError,
     McpRegistryUnavailableError,
@@ -232,6 +234,16 @@ class HttpMcpRegistryClient(McpRegistryClient):
             raise McpRegistryUnavailableError(ErrorMessage.MCP_REGISTRY_UNAVAILABLE) from exc
         if response.status_code == 404:
             raise McpRegistryNotFoundError(ErrorMessage.MCP_REGISTRY_SERVER_NOT_FOUND.format(name=url))
+        if response.status_code == 409:
+            # Registration conflicts surface as explicit, safe errors (REQ-TX-002):
+            # the body (secrets) is never echoed, only the conflict semantics.
+            logger.warning(LogMessage.MCP_REGISTRY_FORWARD_FAILED, response.status_code)
+            raise McpRegistryConflictError(ErrorMessage.MCP_REGISTRY_REQUEST_FAILED.format(status=response.status_code))
+        if response.status_code in (502, 503, 504):
+            # A registry 5xx IS an availability signal: the safe-retryable
+            # semantics apply (REQ-TX-003), never an echoed body.
+            logger.warning(LogMessage.MCP_REGISTRY_FORWARD_FAILED, response.status_code)
+            raise McpRegistryUnavailableError(ErrorMessage.MCP_REGISTRY_UNAVAILABLE)
         if response.status_code >= 400:
             # REQ-009: the registry body is never echoed (it can carry secrets;
             # only the status code reaches logs/results).
@@ -239,7 +251,15 @@ class HttpMcpRegistryClient(McpRegistryClient):
             raise McpRegistryRequestError(ErrorMessage.MCP_REGISTRY_REQUEST_FAILED.format(status=response.status_code))
         if response.status_code == 204:
             return None
-        return response.json()
+        try:
+            return response.json()
+        except ValueError as exc:  # json.JSONDecodeError ⊂ ValueError
+            # A non-JSON registry body is a contract drift, exactly like an
+            # unparseable dict payload: controlled error, never a 500.
+            logger.warning(LogMessage.MCP_REGISTRY_FORWARD_FAILED, "payload-decode")
+            raise McpRegistryRequestError(
+                ErrorMessage.MCP_REGISTRY_REQUEST_FAILED.format(status=response.status_code)
+            ) from exc
 
     async def list_servers(self) -> list[RegisteredMcpServer]:
         """List the current user's registered MCP servers (masked, REQ-018)."""
@@ -254,8 +274,16 @@ class HttpMcpRegistryClient(McpRegistryClient):
         return _masked_server(entry)
 
     async def create_server(self, payload: McpServerWrite) -> RegisteredMcpServer:
-        """Register a server through the owning registry (REQ-017)."""
-        entry = await self._request("POST", "", json_body=_write_payload(payload))
+        """Register a server through the owning registry (REQ-017).
+
+        A registration conflict is turned into an explicit, safe error naming
+        the candidate server (REQ-TX-002/REQ-TX-004) without echoing the
+        registry body (which may carry secrets).
+        """
+        try:
+            entry = await self._request("POST", "", json_body=_write_payload(payload))
+        except McpRegistryConflictError as exc:
+            raise McpRegistryConflictError(ErrorMessage.AGENT_IMPORT_MCP_CONFLICT.format(name=payload.name)) from exc
         _warn_auth_mode_echo("create", payload.auth_mode, entry)
         return _masked_server(entry)
 
@@ -270,9 +298,29 @@ class HttpMcpRegistryClient(McpRegistryClient):
         await self._request("DELETE", f"/{name}")
 
     async def validate_server(self, payload: McpServerWrite) -> McpServerValidationReport:
-        """Validate a candidate server WITHOUT persisting it (REG contract)."""
+        """Validate a candidate server WITHOUT persisting it (REG contract).
+
+        The REAL registry answers ``McpServerValidateResponse{tool_count: N}``
+        on a validated candidate and raises an explicit error (non-2xx) for an
+        invalid one; fuller deployments may return the whole report shape. A
+        payload that cannot be parsed at ALL is a registry contract drift —
+        surfaced as a controlled :class:`McpRegistryRequestError`, never as a
+        raw validation error (which would reach the client as a 500).
+
+        Raises:
+            McpRegistryRequestError: The registry answered with an unusable
+                payload (status-only detail, no body echo).
+        """
         report = await self._request("POST", "/validate", json_body=_write_payload(payload))
-        return McpServerValidationReport.model_validate(report)
+        if not isinstance(report, dict):
+            raise McpRegistryRequestError(ErrorMessage.MCP_REGISTRY_REQUEST_FAILED.format(status="shape"))
+        try:
+            return McpServerValidationReport.model_validate(report)
+        except ValidationError as exc:
+            logger.warning(LogMessage.MCP_REGISTRY_FORWARD_FAILED, "validation-payload-shape")
+            raise McpRegistryRequestError(
+                ErrorMessage.MCP_REGISTRY_REQUEST_FAILED.format(status="validation-shape")
+            ) from exc
 
     async def get_execution_config(self, name: str) -> McpServerConfig:
         """Resolve the decrypted execution configuration (TRUSTED, REQ-037).
@@ -292,10 +340,21 @@ class HttpMcpRegistryClient(McpRegistryClient):
             McpRegistryRequestError: The registry answered with an unusable
                 payload (status-only detail).
         """
+        entry = await self.reveal_server(name)
+        return _to_execution_config(entry, name)
+
+    async def reveal_server(self, name: str) -> dict:
+        """Resolve the RAW reveal payload (TRUSTED, REQ-037 family).
+
+        Same endpoint shapes as :meth:`get_execution_config` but WITHOUT
+        placeholder resolution: the raw headers/env/token values stay exactly
+        as stored by the registry so server-side checks (like the cron
+        unattended-safety user-placeholder scan) match them reliably.
+        """
         entry = await self._reveal_entry(name)
         if not isinstance(entry, dict):
             raise McpRegistryRequestError(ErrorMessage.MCP_REGISTRY_REQUEST_FAILED.format(status="shape"))
-        return _to_execution_config(entry, name)
+        return entry
 
     async def _reveal_entry(self, name: str) -> Any:
         """Fetch the revealed registry entry, trying the accepted URL shapes."""

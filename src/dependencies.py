@@ -10,6 +10,7 @@ from miniopy_async.api import Minio
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import AsyncAdaptedQueuePool
 
+from src.application.services.agent_import_service import AgentImportService
 from src.application.services.effective_builtin_agent import EffectiveBuiltinAgentService
 from src.application.use_cases.api_key.create_api_key import CreateApiKeyUseCase
 from src.application.use_cases.api_key.list_api_keys import ListApiKeysUseCase
@@ -97,6 +98,7 @@ from src.domain.ports.trace_summary_repository import TraceSummaryRepository
 from src.domain.ports.trace_usage_repository import TraceUsageRepository
 from src.domain.ports.tracing_provider import TracingProvider
 from src.domain.ports.user_llm_settings_repository import UserLlmSettingsRepository
+from src.domain.services.mcp_execution_resolution import build_mcp_refs_resolver
 from src.infrastructure.auth.jwt_adapter import JwtAdapter
 from src.infrastructure.crypto.fernet_crypto import FernetCrypto
 from src.infrastructure.database.rls_context import current_auth_context, current_user_id
@@ -337,6 +339,7 @@ async def init_persistence() -> None:
         override_store=_root.builtin_agent_override_store,
         prompt_repository=_root.prompt_repository,
         model_repository=_root.model_repository,
+        mcp_registry=get_mcp_registry_client(),
     )
     _root.cron_repository = PostgresCronRepository(engine=_root.async_engine)
     _root.cron_run_repository = PostgresCronRunRepository(engine=_root.async_engine)
@@ -426,6 +429,7 @@ async def init_persistence() -> None:
                 builtin_mcp_base_url_provider=lambda: settings.builtin_mcp_base_url,
             ),
             config_provider=effective_builtin.get_effective_config,
+            mcp_registry_client=get_mcp_registry_client(),
         ),
     )
 
@@ -573,6 +577,7 @@ def get_temporary_document_cleaner() -> TemporaryDocumentCleaner | None:
             files_client=get_files_mcp_client(),
             config_store=_require_persistence_store(),
             config_loader=agent_config_loader,
+            mcp_refs_resolver=get_mcp_refs_resolver(),
         )
     except StorageError:
         logger.exception(LogMessage.CHAT_TEMP_CLEANER_UNAVAILABLE)
@@ -609,6 +614,7 @@ def get_chat_attachments_service():
             files_client=get_files_mcp_client(),
             limits=get_attachment_limits(),
             builtin_config_provider=get_effective_builtin_agent_service().get_effective_config,
+            mcp_refs_resolver=get_mcp_refs_resolver(),
         )
     except StorageError:
         logger.exception(LogMessage.CHAT_ATTACHMENTS_UNAVAILABLE)
@@ -710,6 +716,18 @@ def get_mcp_registry_client() -> McpRegistryClient:
     return _mcp_registry_client
 
 
+def get_mcp_refs_resolver():
+    """Return the shared ``mcp_refs`` execution-config resolver (REQ-MCP-003).
+
+    The SINGLE domain-wide closure (built by
+    :func:`build_mcp_refs_resolver`) maps registry identities to their
+    trusted, decrypted execution configs, resolving each unique reference
+    exactly ONCE per construction (NFR). Used by the chat attachment policy —
+    the agent registry builds the same resolver through the shared builder.
+    """
+    return build_mcp_refs_resolver(get_mcp_registry_client())
+
+
 def get_get_thread_use_case() -> GetThreadUseCase:
     """Provide a GetThreadUseCase instance."""
     return GetThreadUseCase(_require_thread_repository())
@@ -760,14 +778,29 @@ def get_effective_builtin_agent_service() -> EffectiveBuiltinAgentService:
 
 
 def get_create_agent_config_use_case() -> CreateAgentConfigUseCase:
-    """Provide a CreateAgentConfigUseCase instance."""
+    """Provide a CreateAgentConfigUseCase instance.
+
+    The production wiring makes creation an IMPORT: the YAML-import
+    materialization service creates the explicitly declared resources in
+    their registries and persists a resource-only configuration (spec
+    agent-resource-import).
+    """
     store, repo = _require_persistence()
+    import_service = AgentImportService(
+        config_store=store,
+        config_repository=repo,
+        prompt_repository=_require_prompt_repository(),
+        model_repository=_require_model_repository(),
+        mcp_registry=get_mcp_registry_client(),
+        store_files=get_store_file_repository(),
+    )
     return CreateAgentConfigUseCase(
         config_loader=agent_config_loader,
         config_store=store,
         config_repository=repo,
         prompt_repository=_require_prompt_repository(),
         model_repository=_require_model_repository(),
+        import_service=import_service,
     )
 
 
@@ -781,6 +814,7 @@ def get_update_agent_config_use_case() -> UpdateAgentConfigUseCase:
         agent_registry=_require_agent_registry(),
         prompt_repository=_require_prompt_repository(),
         model_repository=_require_model_repository(),
+        mcp_registry=get_mcp_registry_client(),
     )
 
 
@@ -934,6 +968,7 @@ def get_create_cron_use_case() -> CreateCronUseCase:
         cron_repository=_require_cron_repository(),
         agent_config_repository=repo,
         config_store=store,
+        mcp_registry=get_mcp_registry_client(),
     )
 
 
@@ -954,6 +989,7 @@ def get_update_cron_use_case() -> UpdateCronUseCase:
         cron_repository=_require_cron_repository(),
         agent_config_repository=repo,
         config_store=store,
+        mcp_registry=get_mcp_registry_client(),
     )
 
 
@@ -972,6 +1008,7 @@ def get_execute_cron_run_use_case() -> ExecuteCronRunUseCase:
         trace_repository=_require_trace_event_repository(),
         agent_registry=_require_agent_registry(),
         config_store=store,
+        mcp_registry=get_mcp_registry_client(),
     )
 
 

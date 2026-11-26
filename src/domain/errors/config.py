@@ -17,27 +17,27 @@ class ConfigNotFoundError(ConfigError):
 
 
 class ConfigValidationError(ConfigError):
-    """Schema validation error carrying structured error details."""
+    """Schema validation error carrying structured error details.
+
+    Structured details are sanitized on construction: pydantic error entries
+    echo the REJECTED INPUT (which may carry credential material), so every
+    payload is projected onto ``{loc, msg, type}`` — the same rule as the
+    request-validation handler. Nothing the YAML declared inline leaks into
+    a 422 body or a log.
+    """
 
     status_code = ErrorCode.UNPROCESSABLE_ENTITY
 
     def __init__(self, errors: list[dict]) -> None:
-        self.errors = [_jsonable(e) for e in errors]
-        messages = [f"  - {e.get('loc', '?')}: {e.get('msg', '?')}" for e in errors]
+        self.errors = [_sanitized_error(e) for e in errors]
+        messages = [f"  - {e.get('loc', '?')}: {e.get('msg', '?')}" for e in self.errors]
         super().__init__("Validation errors:\n" + "\n".join(messages))
 
 
-def _jsonable(value):
-    """Deeply coerce pydantic error payloads into JSON-serializable values.
-
-    Pydantic wraps ``ctx`` exceptions (e.g. ``ValueError`` instances raised by
-    model validators) into the error dict; without coercion the response layer
-    crashes serializing them.
-    """
-    if isinstance(value, dict):
-        return {k: _jsonable(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(v) for v in value]
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    return str(value)
+def _sanitized_error(error: dict) -> dict:
+    """Project one error entry onto its safe fields (never echo the input)."""
+    return {
+        "loc": list(error.get("loc", [])) if isinstance(error.get("loc"), (list, tuple)) else error.get("loc", []),
+        "msg": str(error.get("msg", "")),
+        "type": str(error.get("type", "value_error")),
+    }

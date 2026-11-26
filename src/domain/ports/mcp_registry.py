@@ -18,6 +18,7 @@ Two families of operations with deliberately different secrecy guarantees:
   never appear in management responses, traces or logs.
 """
 
+import asyncio
 from abc import ABC, abstractmethod
 
 from src.domain.entities.mcp_server_config import McpServerConfig
@@ -72,6 +73,24 @@ class McpRegistryClient(ABC):
         TRUSTED path (REQ-037): used only for server-side tool loading inside
         the runner. Decrypted headers/env/tokens are never exposed through
         management responses, traces or logs.
+
+        Raises:
+            McpRegistryNotFoundError: Missing or foreign server.
+        """
+        ...
+
+    @abstractmethod
+    async def reveal_server(self, name: str) -> dict:
+        """Resolve the RAW (decrypted) registry entry of a registered server.
+
+        TRUSTED path (REQ-037 family): returns the reveal payload WITHOUT
+        placeholder resolution, so caller-side checks (e.g. the cron
+        unattended-safety scan) can pattern-match service-side placeholders
+        exactly as stored. The payload is consumed server-side only and its
+        secret material is never logged.
+
+        Raises:
+            McpRegistryNotFoundError: Missing or foreign server.
         """
         ...
 
@@ -79,8 +98,8 @@ class McpRegistryClient(ABC):
         """Release any owned HTTP resources (composition-root lifecycle hook).
 
         Concrete adapters with a persistent connection pool override this;
-        stateless clients keep the default no-op. The ``async`` shape is
-        part of the protocol contract even though the no-op body awaits
-        nothing (S7503 false positive, documented).
+        stateless clients keep the default cooperative no-op. The ``async``
+        shape is part of the protocol contract even though the no-op body
+        awaits nothing (S7503 false positive, documented).
         """
-        return None
+        await asyncio.sleep(0)

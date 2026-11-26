@@ -45,11 +45,13 @@ from src.domain.ports.agent_config_repository import AgentConfigRepository
 from src.domain.ports.agent_config_store import AgentConfigStore
 from src.domain.ports.agent_registry import AgentRegistry
 from src.domain.ports.agent_runner import AgentRunner
+from src.domain.ports.mcp_registry import McpRegistryClient
 from src.domain.ports.mcp_tool_loader import McpToolLoader
 from src.domain.ports.model_repository import ModelRepository
 from src.domain.ports.prompt_repository import PromptRepository
 from src.domain.ports.runner_freshness import RunnerFreshness
 from src.domain.ports.tracing_provider import TracingProvider
+from src.domain.services.mcp_execution_resolution import build_mcp_refs_resolver
 from src.infrastructure.database.rls_context import current_credential, current_user_id
 from src.infrastructure.deepagent.adapter import DeepAgentRunner
 from src.infrastructure.deepagent.builtin_resolution import BuiltinToolsetResolver
@@ -106,14 +108,16 @@ class LlmRuntimeDependencies:
 
 @dataclass
 class BuiltinRuntimeDependencies:
-    """Optional built-in assistant runtime collaborators.
+    """Optional built-in and registry runtime collaborators.
 
     Grouping them keeps the registry constructor below Sonar's parameter
-    threshold while making the built-in resolution path explicit.
+    threshold while making the built-in resolution and trusted MCP references
+    explicit.
     """
 
     resolver: BuiltinToolsetResolver | None = None
     config_provider: Callable[[], Awaitable[AgentConfig]] | None = None
+    mcp_registry_client: McpRegistryClient | None = None
 
 
 @dataclass
@@ -158,6 +162,9 @@ class PersistentAgentRegistry(AgentRegistry):
         self._builtin_resolver = builtin_runtime.resolver if builtin_runtime else None
         self._builtin_config_provider = builtin_runtime.config_provider if builtin_runtime else None
         self._platform_toolset = platform_toolset or AgentPlatformToolsetBuilder()
+        # REQ-MCP-003: resource-only agents persist ``mcp_refs`` identities; the
+        # runner resolves them against the user's registry at build time.
+        self._mcp_registry_client = builtin_runtime.mcp_registry_client if builtin_runtime else None
         # CACHE-001: keyed by (user_id, agent_name).
         self._runners: dict[tuple[str, str], _CacheEntry] = {}
         self._lock = asyncio.Lock()
@@ -285,7 +292,8 @@ class PersistentAgentRegistry(AgentRegistry):
         platform tools INCLUDING one-shot execution (REQ-011/036 — the
         assistant may run OTHER user agents; self-invocation is refused by
         the invocation chain and by the run tool itself, REQ-030), built-in
-        MCP mounts, every MCP server the user registered (per-server failure
+        MCP mounts, ONLY the MCP servers explicitly selected in the user's
+        customization via ``mcp_refs`` (REQ-BUILTIN-003; per-server failure
         isolation, REQ-040; deterministic collision namespacing, REQ-039),
         the builtin ``create_pdf`` tool, and the standard non-sensitive
         runtime tools supplied by the deep-agent framework.
@@ -306,11 +314,21 @@ class PersistentAgentRegistry(AgentRegistry):
         dynamic_tools: list = []
         degraded: list[dict] = []
         if self._builtin_resolver is not None:
-            dynamic_tools, degraded = await self._builtin_resolver.resolve_dynamic_tools(reserved_names=reserved)
+            dynamic_tools, degraded = await self._builtin_resolver.resolve_dynamic_tools(
+                reserved_names=reserved,
+                selected_refs=config.mcp_refs,
+            )
         self._record_degraded_capabilities(uid, degraded)
 
+        # The SELECTED servers are already mounted (and namespaced) by the
+        # dynamic resolver above: the graph must NOT resolve ``mcp_refs`` a
+        # second time (NFR: one resolution per MCP per construction), must not
+        # bind a second raw-named copy of the same tools, and must keep the
+        # per-source degradation isolation of REQ-040 (a resolution error in
+        # the generic path would hard-fail the build instead of degrading).
+        graph_config = config.model_copy(update={"mcp_refs": []})
         runner = await self._construct_runner(
-            config,
+            graph_config,
             config_resolver=None,
             extra_tools=[*platform_tools, *dynamic_tools],
             middleware=[BuiltInToolsetGuardMiddleware()],
@@ -356,6 +374,7 @@ class PersistentAgentRegistry(AgentRegistry):
             model_resolver=self._build_model_resolver(),
             extra_tools=extra_tools,
             middleware=middleware or (),
+            mcp_refs_resolver=self._build_mcp_refs_resolver(),
         )
         # LLM-usage capture identity (dashboard spec §1): the resolved
         # serving model name (AGT-003 precedence) and the user's configured
@@ -386,6 +405,16 @@ class PersistentAgentRegistry(AgentRegistry):
             return version.content
 
         return resolve
+
+    def _build_mcp_refs_resolver(self):
+        """The shared ``mcp_refs`` resolver (REQ-MCP-003), or None.
+
+        The closure is built ONCE (one implementation domain-wide — NFR: a
+        drift would silently change the "resolved exactly once" guarantee) and
+        resolves each unique registry identity through the trusted
+        execution-config path exactly once per construction.
+        """
+        return build_mcp_refs_resolver(self._mcp_registry_client)
 
     def _build_model_resolver(self):
         """Build the catalog-backed ``model_ref`` resolver (AGT-003), or None."""

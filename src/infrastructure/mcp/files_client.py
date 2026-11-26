@@ -193,6 +193,7 @@ class McpFilesTemporaryCleaner(TemporaryDocumentCleaner):
         files_client: FilesMcpClient,
         config_store: AgentConfigStore,
         config_loader: AgentConfigLoader,
+        mcp_refs_resolver=None,
     ) -> None:
         """Initialize the cleaner.
 
@@ -200,10 +201,14 @@ class McpFilesTemporaryCleaner(TemporaryDocumentCleaner):
             files_client: The direct Files MCP client used for deletions.
             config_store: Agent YAML store (resolves the Files server).
             config_loader: Agent YAML loader (same chain as the agents routes).
+            mcp_refs_resolver: Optional resolver of ``mcp_refs`` registry
+                identities into trusted execution configs — resource-only
+                agents keep their MCP selection in the registry (REQ-MCP-003).
         """
         self._files_client = files_client
         self._config_store = config_store
         self._config_loader = config_loader
+        self._mcp_refs_resolver = mcp_refs_resolver
 
     async def delete_temporary_documents(self, agent_name: str, refs: list) -> None:  # noqa: ANN401 (TemporaryDocumentRef)
         """Delete all refs via the agent's Files MCP server (idempotent, REQ-045).
@@ -252,14 +257,20 @@ class McpFilesTemporaryCleaner(TemporaryDocumentCleaner):
     async def _resolve_files_server(self, agent_name: str) -> McpServerConfig | None:
         """Resolve the agent's Files MCP server through the store + loader chain.
 
-        Uses the same domain policy helper as the preparation flow (REQ-009).
-        Any resolution failure logs and returns ``None`` (never raises).
+        Uses the same domain policy helper as the preparation flow (REQ-009);
+        a resource-only agent's ``mcp_refs`` selection is merged from the
+        registry first (REQ-MCP-003). Any resolution failure logs and returns
+        ``None`` (never raises).
         """
         from src.domain.services.chat.mcp_files_policy import find_files_mcp_server
 
         try:
             yaml_content = await self._config_store.get(agent_name)
             config = self._config_loader.load_from_string(yaml_content)
+            if config.mcp_refs and self._mcp_refs_resolver is not None:
+                resolved = await self._mcp_refs_resolver(config.mcp_refs)
+                if resolved:
+                    config = config.model_copy(update={"mcp_servers": [*config.mcp_servers, *resolved]})
         except Exception:  # noqa: BLE001 — cleanup NEVER masks the turn (REQ-046)
             logger.exception(LogMessage.CHAT_TEMP_CLEANUP_FAILED, "(agent config)", agent_name, "resolution failed")
             return None

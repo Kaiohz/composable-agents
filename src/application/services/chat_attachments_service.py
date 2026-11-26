@@ -84,6 +84,7 @@ class ChatAttachmentsService:
         files_client: FilesMcpClient,
         limits: AttachmentLimits,
         builtin_config_provider: Callable[[], Awaitable[AgentConfig]] | None = None,
+        mcp_refs_resolver: Callable[[list[str]], Awaitable[list[McpServerConfig]]] | None = None,
     ) -> None:
         """Wire the ports (no per-request state).
 
@@ -94,6 +95,9 @@ class ChatAttachmentsService:
             store_files: User-namespaced LangGraph Store file repository.
             files_client: Direct Files MCP temporary tool client.
             limits: Env-configured attachment limits (REQ-092).
+            mcp_refs_resolver: Optional resolver of ``mcp_refs`` registry
+                identities into trusted execution configs — resource-only
+                agents keep their MCP selection in the registry (REQ-MCP-003).
         """
         self._threads = threads
         self._config_store = config_store
@@ -102,6 +106,7 @@ class ChatAttachmentsService:
         self._files_client = files_client
         self._limits = limits
         self._builtin_config_provider = builtin_config_provider
+        self._mcp_refs_resolver = mcp_refs_resolver
 
     async def prepare_for_request(
         self,
@@ -133,7 +138,7 @@ class ChatAttachmentsService:
             return None
         validated = decode_and_validate_attachments([att.model_dump() for att in attachments], self._limits)
         thread = await self._threads.get(thread_id)
-        config = await self._load_agent_config(thread.agent_name)
+        config = await self._merge_selected_mcp(await self._load_agent_config(thread.agent_name))
 
         metadata: list[dict] = []
         blocks: list[dict] = []
@@ -268,6 +273,22 @@ class ChatAttachmentsService:
                 )
             )
         return TemporaryDocumentRef(attachment_id=att.id, filename=att.filename, object_path=object_path)
+
+    async def _merge_selected_mcp(self, config: AgentConfig) -> AgentConfig:
+        """Append the agent's resolved ``mcp_refs`` configs to its legacy list.
+
+        The Files-MCP policy (EDG-008) reads ``mcp_servers``: for a
+        resource-only agent (REQ-MCP-003) the selection lives in the registry,
+        so the trusted execution configs are resolved and merged before the
+        policy lookup. A resolution failure propagates as a controlled error
+        (never a silent no-Files fallback).
+        """
+        if not config.mcp_refs or self._mcp_refs_resolver is None:
+            return config
+        resolved = await self._mcp_refs_resolver(config.mcp_refs)
+        if not resolved:
+            return config
+        return config.model_copy(update={"mcp_servers": [*config.mcp_servers, *resolved]})
 
     async def _load_agent_config(self, agent_name: str) -> AgentConfig:
         """Load the agent YAML through the same chain as the agents routes.

@@ -160,11 +160,11 @@ The virtual, centrally managed agent `composable-ai-assistant` is overlaid into 
 
 - the platform management/execution tools;
 - the built-in Files, Classical RAG, Web, and Memories MCP servers;
-- every MCP server registered by the current user;
+- the MCP Registry servers explicitly selected in `mcp_refs` (not the entire user's registry);
 - `create_pdf`; and
 - the user's other composable agents through one-shot execution (excluding self-invocation).
 
-A built-in customization is a full snapshot, but server invariants are re-applied at write time and read time: `tools`, `subagents`, and `mcp_servers` are rejected/forced empty because the dynamic toolset is authoritative, and the destructive-delete HITL floor must stay enabled. Its destructive delete tools are configured with HITL rules. Direct MCP management tool calls are explicit client commands and execute normally, subject to authorization.
+A built-in customization is a full snapshot, but server invariants are re-applied at write time and read time: `tools`, `subagents`, and inline `mcp_servers` are rejected/forced empty; its explicit `mcp_refs` selection is validated owner-scoped and persisted. The destructive-delete HITL floor must stay enabled. Its destructive delete tools are configured with HITL rules. Direct MCP management tool calls are explicit client commands and execute normally, subject to authorization.
 
 ---
 
@@ -370,16 +370,19 @@ Every agent is defined by a single YAML file validated against the `AgentConfig`
 |---|---|---|---|
 | `name` | `string` (required) | -- | Unique agent name (1-100 characters). |
 | `description` | `string` | `null` | Optional human-readable description of the agent (max 500 characters). Stored in the `agent_configs` table and exposed via `AgentConfigMetadata`. |
-| `model` | `string` | `"claude-sonnet-4-5-20250929"` | LLM model identifier. See [Supported Models](#supported-models). |
-| `system_prompt` | `string` | `null` | Inline system prompt. Mutually exclusive with `system_prompt_file`. |
-| `system_prompt_file` | `string` | `null` | Path to a text file containing the system prompt (resolved relative to the YAML file). Mutually exclusive with `system_prompt`. |
+| `model` | `string` | `"claude-sonnet-4-5-20250929"` | Legacy serving-model string. For new REST-created/imported agents this is materialized to `model_ref`; legacy agents keep it unchanged. See [Supported Models](#supported-models). |
+| `model_ref` | `UUID` | `null` | Model Catalog resource used at runtime. Prefer this field for resource-only agents. |
+| `system_prompt` | `string` | `null` | Legacy inline system prompt. Mutually exclusive with `system_prompt_file`. On import it is materialized to a `prompt_ref`. |
+| `system_prompt_file` | `string` | `null` | Path to a text file containing the system prompt (resolved relative to the YAML file). Mutually exclusive with `system_prompt`; not accepted in an uploaded YAML string. |
+| `prompt_ref` | `PromptRef` | `null` | Prompt Registry resource. Omit `version` for Latest or pin an immutable version. |
 | `tools` | `list[string]` | `[]` | Python tool references in `module.path:attribute` format. |
 | `backend` | `BackendConfig` | `{"type": "state", "store_backend": "memory", "checkpoint_backend": "postgres"}` | Persistence backend. See [Backends](#backends). |
 | `hitl` | `HITLConfig` | `{"rules": {}}` | Human-in-the-loop interrupt rules. |
 | `memory` | `list[string]` | `[]` | Paths to memory files (e.g. `"./AGENTS.md"`). |
 | `skills` | `list[string]` | `[]` | Paths to skill directories (e.g. `"./skills/"`). |
 | `subagents` | `list[SubAgentConfig]` | `[]` | Sub-agent definitions for delegation. |
-| `mcp_servers` | `list[McpServerConfig]` | `[]` | MCP server connections. See [MCP Servers](#mcp-servers). |
+| `mcp_servers` | `list[McpServerConfig]` | `[]` | Legacy inline MCP connections. Resource-only/imported agents store `mcp_refs` instead. See [MCP Servers](#mcp-servers). |
+| `mcp_refs` | `list[string]` | `[]` | Selected MCP Registry server identities. Resolved owner-scoped at runner build; secrets stay in the registry. |
 | `debug` | `bool` | `false` | Enable debug mode. |
 | `response_format` | `dict` | `null` | Inline JSON Schema dict for structured output. See [Structured Output (response_format)](#structured-output-response_format). |
 
@@ -436,6 +439,49 @@ subagents:
 | `url` | `string` | `null` | Server URL (required for `http` transport). |
 | `headers` | `dict[string, string]` | `{}` | HTTP headers (for `http` transport). |
 | `env` | `dict[string, string]` | `{}` | Environment variables for the server process. Supports `${VAR_NAME}` syntax for resolving env vars. |
+
+### Resource-Only Agents and YAML Import
+
+REST-created and REST-imported agents compose **registered resources**:
+
+- a Model Catalog resource (`model_ref`) provides the serving model;
+- a Prompt Registry resource (`prompt_ref`) provides the prompt;
+- MCP Registry identities (`mcp_refs`) provide the selected user servers;
+- Store File paths (`skills` / `memory`) provide Markdown assets;
+- an existing agent (`agent_ref`) provides a sub-agent.
+
+Manual form edits therefore select existing resources. YAML import remains a one-shot
+provisioning path: when a create request explicitly declares inline `model`,
+`system_prompt`, `mcp_servers`, the new `skills`/`memory` `{path, content}`
+syntax, or an inline sub-agent, the backend materializes each declaration in
+its owning registry and rewrites the stored agent to resource-only references.
+The agent is created only after complete and compensating import; failing refs
+or resource-name conflicts create nothing and never overwrite an existing
+resource.
+
+```yaml
+name: research-agent
+model: openai:anthropic/claude-haiku-4.5:nitro   # -> Model "research-agent-model" -> model_ref
+system_prompt: "Research recent papers."          # -> Prompt v1 "research-agent-prompt" -> prompt_ref
+mcp_refs:
+  - files
+subagents:
+  - name: summarizer
+    description: Summarize sources
+    model: openai:gpt-4o                          # -> sub-agent model resource
+    instructions: "Summarize concisely."          # -> sub-agent prompt resource
+skills:
+  - skills/existing-skill/                        # referenced, must exist
+  - path: skills/new-skill/                       # -> SKILL.md created, persisted as path
+    content: "# New skill\n..."
+memory:
+  - path: memories/project.md
+    content: "# Project memory\n"
+```
+
+Updates keep the configured resource identities. They refuse NEW inline model,
+prompt or MCP connection definitions — including nested `subagents[].mcp_servers`
+— while legacy agents without stored references remain editable for compatibility.
 
 ### HITL Rules
 
@@ -863,7 +909,35 @@ curl -X DELETE http://localhost:8000/api/v1/agents/composable-ai-assistant/custo
 
 Response: `204 No Content`.
 
-Server-managed built-in fields are rejected or forced: non-empty `tools`, `subagents`, or `mcp_servers` return `422`, and disabling a destructive-delete HITL rule returns `422`. Deleting the assistant itself returns `403`.
+Server-managed built-in fields are rejected or forced: non-empty `tools`, `subagents`, or `mcp_servers` return `422`, and disabling a destructive-delete HITL rule returns `422`. Its explicit `mcp_refs` selection is accepted after owner-scoped registry validation. Deleting the assistant itself returns `403`.
+
+### 3b. Import a Resource-Only Agent from YAML
+
+This creation path provisions the resources explicitly declared in the file:
+
+```bash
+cat > research-agent.yaml <<'EOF'
+name: research-agent
+model: openai:anthropic/claude-haiku-4.5:nitro
+description: "Paper assistant"
+system_prompt: "Research and summarize recent papers."
+mcp_refs:
+  - files
+skills:
+  - path: skills/research-agent/
+    content: "# Research workflow\n..."
+memory:
+  - path: memories/research-project.md
+    content: "# Project memory\n"
+EOF
+
+curl -X POST http://localhost:8000/api/v1/agents \
+  -H "X-API-Key: <API_KEY>" \
+  -F "agent_name=research-agent" \
+  -F "file=@research-agent.yaml;type=text/yaml"
+```
+
+Success is `201`; the persisted response contains `model_ref`, `prompt_ref` and `mcp_refs` instead of raw inline connection data. Unknown/foreign references, duplicate resource names or registry failures fail atomically.
 
 ### 4. Create a Thread
 
@@ -1675,6 +1749,17 @@ skills:
   - "skills/my-skill/"
 ```
 
+At create-time YAML import, an object form can provision the Markdown file inline, then the
+persisted agent keeps only the path reference:
+
+```yaml
+skills:
+  - path: "skills/imported-skill/"
+    content: "# Imported skill\n..."
+```
+
+The object accepts exactly `path` and `content`; it never overwrites an existing Store file.
+
 In the frontend agent form, the Skills field is a **multi-select dropdown** (`PillMultiSelect`) that lists all available skills discovered in the store (paths matching `/skills/`), replacing the previous free-text input.
 
 ---
@@ -1701,6 +1786,16 @@ name: my-agent
 memory:
   - "memories/AGENTS.md"
 ```
+
+At create-time YAML import, define an inline memory as exactly:
+
+```yaml
+memory:
+  - path: "memories/project.md"
+    content: "# Project memory\n"
+```
+
+The object creates the file only if it does not already exist; a plain string is validated as an existing Store reference.
 
 In the frontend agent form, the Memory field is a **multi-select dropdown** (`PillMultiSelect`) that lists all available memories from the store, replacing the previous free-text input.
 
@@ -2358,11 +2453,8 @@ Prompt storage, listing, versioning, and agent lookup no longer use Phoenix. The
 
 ### Local prompts and metadata-only models
 
-`AgentConfig` accepts optional `prompt_ref` / `model_ref`. `prompt_ref` is mutually exclusive with `system_prompt` / `system_prompt_file`. `model_ref` takes precedence over legacy `model`, selects the catalog's `provider_model`, and stores no credential or connection data. Existing YAML without these references remains valid.
 
-### Model catalog is identity-only
-
-`models.provider` and `models.base_url` were removed (migration `024`). `POST` / `PATCH /api/v1/models` now accept only the editable fields `name` and `provider_model`; `provider`, `base_url`, and `base_url: null` are rejected with `422`. The user's LLM Settings is the **single source** of the provider connection (`provider`, `base_url`, `api_key`), so a Model can no longer override the Settings endpoint at runtime.
+`AgentConfig` accepts optional `prompt_ref` / `model_ref`. `prompt_ref` is mutually exclusive with `system_prompt` / `system_prompt_file`. `model_ref` takes precedence over legacy `model` and stores no credential data. Existing YAML without these references remains valid. Create-time REST/YAML imports turn explicit legacy `model` and `system_prompt` declarations into these resource identities; update requests with new inline definitions are refused, while legacy agents remain editable and executable.
 
 ### Immutable thread source
 

@@ -463,9 +463,10 @@ class StubRegistryApp:
                 return
 
         if path == f"{self.PREFIX}/validate" and method == "POST":
-            await self._json(
-                send, 200, {"name": payload.get("name", "candidate"), "valid": True, "tool_count": 1, "errors": []}
-            )
+            # The REAL mcp-raganything contract (BUG-001): the deployed
+            # registry answers McpServerValidateResponse{tool_count} on a
+            # validated candidate — it carries neither `name` nor `valid`.
+            await self._json(send, 200, {"tool_count": 1})
             return
 
         if (
@@ -650,9 +651,10 @@ class StubMcpServer:
         from mcp.server.fastmcp import FastMCP
 
         self.name = name
+        self.tool_name = tool_name
         mcp = FastMCP(name)
 
-        @mcp.tool()
+        @mcp.tool(name=tool_name)
         def ping() -> str:  # noqa: ANN202 — decorated FastMCP tool
             return tool_result
 

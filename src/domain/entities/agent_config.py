@@ -80,6 +80,13 @@ class AgentConfig(BaseModel):
     skills: list[str] = Field(default_factory=list)
     subagents: list[SubAgentConfig] = Field(default_factory=list)
     mcp_servers: list[McpServerConfig] = Field(default_factory=list)
+    # Registry identities of SELECTED user MCP servers (spec agent-resource-
+    # import REQ-MCP-003): persisted as additive references (e.g.
+    # ``mcp_refs: ["server-name"]``), resolved through the trusted registry
+    # execution-config path at runner build time. Connection parameters and
+    # secrets stay in the registry; legacy inline ``mcp_servers`` remain only
+    # for agents created before the resource-only rule (REQ-LEGACY-001).
+    mcp_refs: list[str] = Field(default_factory=list)
     response_format: dict[str, Any] | None = None
     debug: bool = False
     # Overlay-computed marker (REQ-033): ``True`` only when this configuration

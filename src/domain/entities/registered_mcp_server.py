@@ -65,9 +65,17 @@ class McpServerWrite(BaseModel):
 
 
 class McpServerValidationReport(BaseModel):
-    """Result of validating a candidate MCP server without persisting it."""
+    """Result of validating a candidate MCP server without persisting it.
 
-    name: str
-    valid: bool
+    Shaped by the REAL registry contract (``mcp-raganything``'s
+    ``McpServerValidateResponse``): the deployed registry answers
+    ``{"tool_count": N}`` on a validated candidate and raises an explicit
+    error (non-2xx) otherwise. ``name`` and ``valid`` are therefore
+    OPTIONAL with sane defaults — a 200 answer is a validated candidate —
+    while fuller deployments may still populate the full report shape.
+    """
+
+    name: str = ""
+    valid: bool = True
     tool_count: int = 0
     errors: list[str] = Field(default_factory=list)

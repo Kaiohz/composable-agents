@@ -21,6 +21,7 @@ from src.domain.errors.config import ConfigError
 from src.domain.errors.mcp import McpError
 from src.domain.logging.messages import LogMessage
 from src.domain.ports.mcp_tool_loader import McpToolLoader
+from src.domain.services.mcp_execution_resolution import McpRefsResolver
 from src.infrastructure.deepagent.namespace import user_namespaced
 from src.infrastructure.deepagent.schema_utils import schema_to_pydantic_model
 
@@ -30,6 +31,8 @@ logger = logging.getLogger(__name__)
 # * prompt_resolver: PromptRef → verbatim system prompt content (Latest or
 #   pinned version) from the local prompt registry.
 # * model_resolver: model UUID → catalog ModelMetadata (metadata only).
+# * mcp_refs_resolver: registry identities → trusted execution configs
+#   (resource-only agents, REQ-MCP-003).
 PromptResolver = Callable[[Any], Awaitable[str]]
 ModelResolver = Callable[[Any], Awaitable[ModelMetadata]]
 
@@ -421,6 +424,7 @@ async def _resolve_subagents(
     config: AgentConfig,
     mcp_tool_loader: McpToolLoader | None = None,
     config_resolver: Callable[[str], Awaitable[AgentConfig]] | None = None,
+    mcp_refs_resolver: McpRefsResolver | None = None,
 ) -> list | None:
     """Convertit les configs de sous-agents.
 
@@ -429,6 +433,8 @@ async def _resolve_subagents(
         mcp_tool_loader: Loader MCP optionnel pour les sous-agents.
         config_resolver: Résolveur optionnel permettant de charger la
             ``AgentConfig`` référencée par ``SubAgentConfig.agent_ref``.
+        mcp_refs_resolver: Résolveur optionnel des sélections ``mcp_refs``
+            (REQ-MCP-003) pour les sous-agents référencés.
 
     Returns:
         Liste de dicts de sous-agents ou None.
@@ -438,7 +444,7 @@ async def _resolve_subagents(
     subagents = []
     for sa in config.subagents:
         if sa.agent_ref is not None:
-            spec = await _resolve_referenced_subagent(sa, mcp_tool_loader, config_resolver)
+            spec = await _resolve_referenced_subagent(sa, mcp_tool_loader, config_resolver, mcp_refs_resolver)
             subagents.append(spec)
             continue
 
@@ -467,6 +473,7 @@ async def _resolve_referenced_subagent(
     sa: SubAgentConfig,
     mcp_tool_loader: McpToolLoader | None,
     config_resolver: Callable[[str], Awaitable[AgentConfig]] | None,
+    mcp_refs_resolver: McpRefsResolver | None = None,
 ) -> dict:
     """Build a subagent spec from a SubAgentConfig that references another agent.
 
@@ -474,6 +481,8 @@ async def _resolve_referenced_subagent(
         sa: The subagent configuration carrying ``agent_ref``.
         mcp_tool_loader: Optional MCP tool loader.
         config_resolver: Async callable returning the referenced AgentConfig.
+        mcp_refs_resolver: Optional resolver for the referenced agent's
+            ``mcp_refs`` selection (REQ-MCP-003).
 
     Returns:
         Dict spec ready for ``create_deep_agent``.
@@ -500,10 +509,7 @@ async def _resolve_referenced_subagent(
 
     local_tools = _resolve_tools_list(sa.tools) if sa.tools else None
     ref_tools = _resolve_tools_list(ref.tools) if ref.tools else None
-    mcp_tools: list = []
-    servers = list(sa.mcp_servers) + list(ref.mcp_servers)
-    if servers and mcp_tool_loader:
-        mcp_tools = await _load_mcp_tools_resilient(mcp_tool_loader, servers, sa.name)
+    mcp_tools = await _resolve_reference_mcp_tools(sa, ref, mcp_tool_loader, mcp_refs_resolver)
     all_tools = (local_tools or []) + (ref_tools or []) + mcp_tools if (local_tools or ref_tools or mcp_tools) else None
 
     return {
@@ -514,6 +520,29 @@ async def _resolve_referenced_subagent(
         "tools": all_tools,
         "response_format": sa.response_format if sa.response_format else ref.response_format,
     }
+
+
+async def _resolve_reference_mcp_tools(
+    sa: SubAgentConfig,
+    ref: AgentConfig,
+    mcp_tool_loader: McpToolLoader | None,
+    mcp_refs_resolver: McpRefsResolver | None,
+) -> list:
+    """Combine the MCP tool sources of a referenced subagent (legacy + refs).
+
+    The legacy inline ``mcp_servers`` of the entry and of the referenced config
+    load exactly as before; the referenced config's ``mcp_refs`` selection is
+    resolved through the trusted registry path (REQ-MCP-003).
+    """
+    tools: list = []
+    servers = list(sa.mcp_servers) + list(ref.mcp_servers)
+    if servers and mcp_tool_loader:
+        tools = tools + await _load_mcp_tools_resilient(mcp_tool_loader, servers, sa.name)
+    if ref.mcp_refs and mcp_refs_resolver is not None and mcp_tool_loader:
+        ref_configs = await mcp_refs_resolver(ref.mcp_refs)
+        if ref_configs:
+            tools = tools + await _load_mcp_tools_resilient(mcp_tool_loader, ref_configs, sa.name)
+    return tools
 
 
 def _resolve_tools_list(tool_paths: list[str]) -> list | None:
@@ -662,6 +691,19 @@ async def _safe_delete(store, ns: tuple[str, ...], key: str, label: str) -> None
         logger.exception("Failed to delete %s: %s", label, key)
 
 
+def _store_lookup_key(path: str) -> str:
+    """The canonical Store lookup key of an authored file reference (C5).
+
+    The Store File API persists files under CANONICAL keys (the REST routes
+    normalize every path with a leading slash), while an agent YAML may
+    reference a skill or a memory with or without the leading slash. The
+    runtime lookup contract is: authored reference → canonical store key,
+    in ONE place, so an imported resource is looked up exactly where it was
+    written — regardless of the slash convention of the persisted reference.
+    """
+    return path if path.startswith("/") else f"/{path}"
+
+
 async def _copy_skills_to_agent_ns(
     store,
     ns: tuple[str, ...],
@@ -674,11 +716,11 @@ async def _copy_skills_to_agent_ns(
         store: The shared LangGraph BaseStore instance.
         ns: The resolved user namespace.
         agent_skills_dir: Agent skills directory prefix.
-        skills: List of skill directory paths.
+        skills: List of skill directory paths (slash convention-agnostic).
     """
     for skill_dir in skills:
         skill_name = skill_dir.rstrip("/").split("/")[-1]
-        src_path = f"{skill_dir.rstrip('/')}/SKILL.md"
+        src_path = _store_lookup_key(f"{skill_dir.rstrip('/')}/SKILL.md")
         dst_path = f"{agent_skills_dir}{skill_name}/SKILL.md"
         item = await store.aget(ns, src_path)
         if item is not None:
@@ -697,7 +739,7 @@ async def _copy_memories_to_agent_ns(
         store: The shared LangGraph BaseStore instance.
         ns: The resolved user namespace.
         agent_memories_dir: Agent memories directory prefix.
-        memory: List of memory file paths.
+        memory: List of memory file paths (slash convention-agnostic).
 
     Returns:
         List of destination paths written into the agent namespace.
@@ -706,7 +748,7 @@ async def _copy_memories_to_agent_ns(
     for mem_path in memory:
         filename = mem_path.split("/")[-1]
         dst_path = f"{agent_memories_dir}{filename}"
-        item = await store.aget(ns, mem_path)
+        item = await store.aget(ns, _store_lookup_key(mem_path))
         if item is not None:
             await store.aput(ns, dst_path, item.value)
         new_memory_paths.append(dst_path)
@@ -722,6 +764,7 @@ async def create_agent_from_config(
     model_resolver: ModelResolver | None = None,
     extra_tools: list | None = None,
     middleware: Sequence[Any] = (),
+    mcp_refs_resolver: McpRefsResolver | None = None,
 ):
     """Create a compiled Deep Agent from configuration.
 
@@ -770,7 +813,7 @@ async def create_agent_from_config(
     # per-agent store_backend setting.
     store = await _get_shared_store()
 
-    all_tools = await _resolve_agent_tools(config, mcp_tool_loader, extra_tools)
+    all_tools = await _resolve_agent_tools(config, mcp_tool_loader, extra_tools, mcp_refs_resolver)
     system_prompt = await _resolve_system_prompt(config, prompt_resolver)
     skills_source, memory_paths = await _resolve_skills_and_memory(store, config)
 
@@ -801,7 +844,7 @@ async def create_agent_from_config(
     else:
         response_format_model = None
 
-    subagents = await _resolve_subagents(config, mcp_tool_loader, config_resolver)
+    subagents = await _resolve_subagents(config, mcp_tool_loader, config_resolver, mcp_refs_resolver)
     if subagents:
         kwargs["subagents"] = subagents
         logger.info(LogMessage.AGENT_SUBAGENTS, config.name, len(subagents))
@@ -847,8 +890,15 @@ async def _resolve_agent_tools(
     config: AgentConfig,
     mcp_tool_loader: McpToolLoader | None,
     extra_tools: list | None = None,
+    mcp_refs_resolver: McpRefsResolver | None = None,
 ) -> list | None:
     """Resolve an agent's combined local + MCP + injected tool list.
+
+    The MCP section covers BOTH sources: the legacy inline ``mcp_servers``
+    (agents created before the resource-only rule, REQ-LEGACY-001) and the
+    ``mcp_refs`` registry selections resolved through the trusted
+    execution-config path (REQ-MCP-003). A ``mcp_refs`` selection without a
+    wired resolver is an explicit error — never a silent downgrade.
 
     Args:
         config: The agent configuration.
@@ -857,15 +907,28 @@ async def _resolve_agent_tools(
             registry — the built-in assistant's dynamic toolset (REQ-036) and
             custom agents' platform toolset (REQ-028) arrive through this
             parameter instead of module paths.
+        mcp_refs_resolver: Optional resolver of ``mcp_refs`` registry
+            identities into trusted execution configs.
 
     Returns:
         Combined tools list or ``None`` when the agent has no tools.
+
+    Raises:
+        ConfigError: When ``mcp_refs`` is declared but no resolver is wired.
+        McpRegistryError: When the registry selection cannot be resolved.
     """
     local_tools = _resolve_tools(config)
     mcp_tools: list = []
+    if config.mcp_refs:
+        if mcp_refs_resolver is None:
+            raise ConfigError(f"Agent '{config.name}' sets mcp_refs but no MCP registry resolver is wired.")
+        logger.info(LogMessage.AGENT_MCP_REFS_RESOLVING, config.name, len(config.mcp_refs))
+        resolved_configs = await mcp_refs_resolver(config.mcp_refs)
+        if resolved_configs and mcp_tool_loader:
+            mcp_tools.extend(await _load_mcp_tools_resilient(mcp_tool_loader, resolved_configs, config.name))
     if config.mcp_servers and mcp_tool_loader:
         logger.info(LogMessage.AGENT_MCP_TOOLS_LOADING, config.name, len(config.mcp_servers))
-        mcp_tools = await _load_mcp_tools_resilient(mcp_tool_loader, config.mcp_servers, config.name)
+        mcp_tools.extend(await _load_mcp_tools_resilient(mcp_tool_loader, config.mcp_servers, config.name))
         logger.info(LogMessage.AGENT_MCP_TOOLS_LOADED, len(mcp_tools), config.name)
     combined = (local_tools or []) + mcp_tools + (list(extra_tools) if extra_tools else [])
     all_tools = combined if combined else None
