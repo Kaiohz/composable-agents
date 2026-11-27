@@ -1,6 +1,7 @@
 import asyncio
 import importlib
 import logging
+import os
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
@@ -74,6 +75,7 @@ async def _resolve_model(
     config: AgentConfig,
     llm_credentials_resolver: Callable[[str], Awaitable[tuple[str, str] | None]] | None,
     model_resolver: ModelResolver | None = None,
+    reasoning_effort: str | None = None,
 ):
     """Resolve the ``model`` argument passed to ``create_deep_agent``.
 
@@ -148,6 +150,21 @@ async def _resolve_model(
         # still reads.
         streaming=True,
         stream_usage=True,
+        # Reasoning-mode payload (chat thinking-level selector): a
+        # per-request effort turns the reasoning payload ON with the level
+        # (OpenRouter ``reasoning: {enabled, effort}``); the env default
+        # (CHAT_REASONING_ENABLED) enables thinking without an effort level
+        # otherwise. Models that never emit ``delta.reasoning`` simply keep
+        # it inside ``content`` — no THINKING trace event either way.
+        **(
+            {"extra_body": {"reasoning": {"enabled": True, "effort": reasoning_effort}}}
+            if reasoning_effort
+            else (
+                {"extra_body": {"reasoning": {"enabled": True}}}
+                if os.environ.get("CHAT_REASONING_ENABLED", "").lower() in ("1", "true", "yes")
+                else {}
+            )
+        ),
     )
 
 
@@ -769,6 +786,7 @@ async def create_agent_from_config(
     extra_tools: list | None = None,
     middleware: Sequence[Any] = (),
     mcp_refs_resolver: McpRefsResolver | None = None,
+    reasoning_effort: str | None = None,
 ):
     """Create a compiled Deep Agent from configuration.
 
@@ -823,7 +841,9 @@ async def create_agent_from_config(
 
     kwargs = {
         "name": config.name,
-        "model": await _resolve_model(config, llm_credentials_resolver, model_resolver),
+        "model": await _resolve_model(
+            config, llm_credentials_resolver, model_resolver, reasoning_effort
+        ),
         "system_prompt": system_prompt,
         "tools": all_tools,
         "checkpointer": checkpointer,

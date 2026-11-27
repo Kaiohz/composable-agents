@@ -100,6 +100,7 @@ async def send_message(
         edits=body.edits,
         decisions=body.decisions,
         prepared=prepared,
+        reasoning_effort=body.reasoning_effort,
     )
     logger.info(LogMessage.CHAT_RESPONSE, thread_id, result.status, len(result.content or ""))
     return result
@@ -138,7 +139,9 @@ async def stream_message(
     async def event_generator():
         event_count = 0
         try:
-            async for event in use_case.execute(thread_id, body.message or "", prepared):
+            async for event in use_case.execute(
+                thread_id, body.message or "", prepared, reasoning_effort=body.reasoning_effort
+            ):
                 event_count += 1
                 yield {"data": event.model_dump_json()}
             yield {"data": "[DONE]"}

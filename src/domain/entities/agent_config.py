@@ -98,6 +98,14 @@ class AgentConfig(BaseModel):
     # Overlay-computed per-user marker: ``True`` only when this effective
     # built-in definition is the owning user's customization snapshot.
     is_customized: bool = False
+    # Server-declared capability flags (built-in assistant ONLY — never
+    # authored in YAML, never persisted): the DYNAMIC toolset (built-in
+    # mcp-raganything mounts) lives server-side and is FORCED out of
+    # ``mcp_servers`` by the invariant projection, so the UI cannot derive
+    # document attachments from the config alone. ``files_mcp=True`` lets the
+    # chat UI open its document picker (the backend upload policy stays the
+    # single authority).
+    capabilities: dict[str, bool] | None = None
 
     @model_validator(mode="after")
     def check_prompt_exclusivity(self) -> Self:

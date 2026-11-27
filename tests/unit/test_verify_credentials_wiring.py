@@ -73,7 +73,7 @@ async def app_with_overrides(db_engine) -> AsyncGenerator:
     from src.infrastructure.postgres_thread.adapter import PostgresThreadRepository
 
     class _StubRegistry(AgentRegistry):
-        async def get_runner(self, agent_name: str) -> AgentRunner:
+        async def get_runner(self, agent_name: str, reasoning_effort: str | None = None) -> AgentRunner:
             raise RuntimeError("not used")
 
         async def list_agents(self) -> list[str]:

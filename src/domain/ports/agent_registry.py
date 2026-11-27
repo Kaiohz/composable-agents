@@ -7,7 +7,7 @@ class AgentRegistry(ABC):
     """Registre d'agents permettant de recuperer un runner par nom."""
 
     @abstractmethod
-    async def get_runner(self, agent_name: str) -> AgentRunner:
+    async def get_runner(self, agent_name: str, reasoning_effort: str | None = None) -> AgentRunner:
         """Retourne le runner pour l'agent donne, le creant si necessaire.
 
         Raises:

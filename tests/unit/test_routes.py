@@ -79,7 +79,7 @@ class StubAgentRegistry(AgentRegistry):
         self._names = agent_names
         self._runner = runner
 
-    async def get_runner(self, agent_name: str) -> AgentRunner:
+    async def get_runner(self, agent_name: str, reasoning_effort: str | None = None) -> AgentRunner:
         if agent_name not in self._names:
             from src.domain.errors.agent import AgentNotFoundError
 

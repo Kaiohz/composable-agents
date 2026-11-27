@@ -234,5 +234,6 @@ class EffectiveBuiltinAgentService:
                 "hitl": HITLConfig(rules={**config.hitl.rules, **forced_rules}),
                 "is_builtin": True,
                 "is_customized": True,
+                "capabilities": {"files_mcp": True},
             }
         )
