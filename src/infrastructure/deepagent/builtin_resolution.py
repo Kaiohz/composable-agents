@@ -36,7 +36,7 @@ import logging
 from typing import Any
 
 from src.config import Settings
-from src.domain.entities.mcp_server_config import McpServerConfig, McpTransportType
+from src.domain.entities.mcp_server_config import McpAuthMode, McpServerConfig, McpTransportType
 from src.domain.logging.messages import LogMessage
 from src.domain.ports.mcp_registry import McpRegistryClient
 from src.domain.ports.mcp_tool_loader import McpToolLoader
@@ -176,7 +176,17 @@ class BuiltinToolsetResolver:
         if base_url:
             for mount_name, mount_path in BUILTIN_MOUNTS:
                 sources.append(
-                    McpServerConfig(name=mount_name, transport=McpTransportType.HTTP, url=f"{base_url}{mount_path}")
+                    McpServerConfig(
+                        name=mount_name,
+                        transport=McpTransportType.HTTP,
+                        url=f"{base_url}{mount_path}",
+                        # The built-in mcp-raganything mounts sit behind the
+                        # dual-auth guard: without the user-token mode the
+                        # loader injects NO credential and every initialize
+                        # is denied (401) — the RAG/web/memories toolset
+                        # silently degrades on every agent build.
+                        auth_mode=McpAuthMode.USER_TOKEN,
+                    )
                 )
         if selected_refs is None:
             sources.extend(await self._collect_registered_sources(degraded))

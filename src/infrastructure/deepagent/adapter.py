@@ -258,7 +258,11 @@ class DeepAgentRunner(AgentRunner):
     @staticmethod
     def _classify_thinking(additional: dict, chunk) -> tuple[ClassifiedEvent | None, bool]:
         """Classify thinking chunks. Returns (event, is_thinking)."""
-        reasoning = additional.get("reasoning_content")
+        # OpenRouter normalizes reasoning-capable models (GLM, DeepSeek, R1…)
+        # into ``delta.reasoning`` which langchain-openai maps to
+        # ``additional_kwargs["reasoning"]``; DeepSeek sends the legacy
+        # ``reasoning_content``; Anthropic uses ``type == "thinking"``.
+        reasoning = additional.get("reasoning_content") or additional.get("reasoning")
         if DeepAgentRunner._is_nonblank_str(reasoning):
             return (TraceEventType.THINKING, None, reasoning, None), True
         if additional.get("type") == "thinking" and DeepAgentRunner._is_nonblank_str(getattr(chunk, "content", "")):

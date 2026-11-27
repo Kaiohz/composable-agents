@@ -10,10 +10,11 @@ by registered servers, and the registry-outage degrade path.
 import asyncio
 from typing import Any
 
-from src.domain.entities.mcp_server_config import McpServerConfig
+from src.domain.entities.mcp_server_config import McpAuthMode, McpServerConfig
 from src.domain.errors.mcp import McpRegistryRequestError
 from src.domain.errors.messages import ErrorMessage
 from src.infrastructure.deepagent.builtin_resolution import (
+    BUILTIN_MOUNTS,
     MAX_CONCURRENT_MCP_SOURCES,
     BuiltinToolsetResolver,
     _namespaced_tool_name,
@@ -222,3 +223,31 @@ class TestDeterministicNamespacing:
         loader = _LoaderStub({"alpha": [_ResolvedTool("ping")]})
         tools, _ = await _resolver(loader)._load_sources([_config("alpha")], frozenset())
         assert tools[0].name == "ping"  # no reservation → raw name kept
+
+
+class TestBuiltinMountAuthMode:
+    """The built-in mounts sit BEHIND the dual-auth guard of mcp-raganything
+    (feat-mcp-oauth2): without ``auth_mode: user_token`` the loader injects no
+    credential and every initialize is denied (401), silently degrading the
+    RAG/web/memories toolset on every agent build."""
+
+    async def test_builtin_mounts_declare_user_token_auth_mode(self):
+        seen: list[McpServerConfig] = []
+
+        class _ConfigRecordingLoader:
+            async def load_tools(self, configs: list[McpServerConfig]) -> list:
+                seen.extend(configs)
+                return [_ResolvedTool("ping")]
+
+        resolver = _resolver(_ConfigRecordingLoader(), base_url="http://raganything.composables.svc:8000")
+
+        tools, degraded = await resolver.resolve_dynamic_tools()
+
+        assert degraded == []
+        assert "create_pdf" in {t.name for t in tools}
+        # Exactly ONE config per builtin mount, all declaring the user-token
+        # credential mode so the platform loader injects the caller's
+        # Authorization (the mounts' URLs ride the internal base URL).
+        assert {c.name for c in seen} == {mount for mount, _path in BUILTIN_MOUNTS}
+        assert all(c.auth_mode == McpAuthMode.USER_TOKEN for c in seen)
+        assert all(c.url.startswith("http://raganything.composables.svc:8000/") for c in seen)
