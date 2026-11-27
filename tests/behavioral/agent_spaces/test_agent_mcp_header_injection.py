@@ -346,24 +346,32 @@ class TestBuiltinAssistantPersonalScope:
             "mcp_refs:\n"
             '  - "hdr-builtin-stub"\n'
         )
-        customized = await client.put(
-            f"/api/v1/agents/{BUILTIN_NAME}",
-            headers=users["a"]["headers"],
-            files={"file": ("builtin.yaml", customization.encode(), "text/yaml")},
-        )
-        assert customized.status_code == 200, (
-            f"the built-in customization with the mcp_refs selection must be accepted: {customized.text}"
-        )
+        try:
+            customized = await client.put(
+                f"/api/v1/agents/{BUILTIN_NAME}",
+                headers=users["a"]["headers"],
+                files={"file": ("builtin.yaml", customization.encode(), "text/yaml")},
+            )
+            assert customized.status_code == 200, (
+                f"the built-in customization with the mcp_refs selection must be accepted: {customized.text}"
+            )
 
-        stub_llm.script(
-            assistant_tool_call("ping", {}),
-            assistant_text("used the registered server"),
-        )
-        result = await one_shot_run(mcp_base_url, users["a"]["headers"], BUILTIN_NAME)
-        assert result["ok"], f"the builtin assistant run must succeed: {result}"
-        assert "pong" in str(result["result"]), (
-            f"the builtin must resolve and execute the SELECTED user-registered server's tool: {result['result']}"
-        )
+            stub_llm.script(
+                assistant_tool_call("ping", {}),
+                assistant_text("used the registered server"),
+            )
+            result = await one_shot_run(mcp_base_url, users["a"]["headers"], BUILTIN_NAME)
+            assert result["ok"], f"the builtin assistant run must succeed: {result}"
+            assert "pong" in str(result["result"]), (
+                f"the builtin must resolve and execute the SELECTED user-registered server's tool: {result['result']}"
+            )
+        finally:
+            # The customization's SELECTED mcp_refs persist in the per-user
+            # override store: every other suite sharing this store resolves
+            # the builtin's effective config through them — reset to the
+            # default AFTER the run, unconditionally.
+            reset = await client.delete(f"/api/v1/agents/{BUILTIN_NAME}/customization", headers=users["a"]["headers"])
+            assert reset.status_code == 204, f"the customization must be reset (no cross-suite leakage): {reset.text}"
 
         assert hdr_mcp.recorder.requests_with(header="x-composable-agent") == [], (
             "the built-in assistant must NOT inject a custom agent header (personal scope); observed: "
