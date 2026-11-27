@@ -7,7 +7,6 @@ from typing import Any
 
 from deepagents import create_deep_agent
 from deepagents.backends import StoreBackend
-from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.memory import InMemoryStore
@@ -114,6 +113,7 @@ async def _resolve_model(
     from src.domain.errors.messages import ErrorMessage
     from src.domain.errors.model import ModelNotFoundError
     from src.infrastructure.database.rls_context import current_user_id
+    from src.infrastructure.deepagent.reasoning_llm import ReasoningAwareChatOpenAI
 
     model_name = config.model
 
@@ -134,7 +134,7 @@ async def _resolve_model(
         raise LlmNotConfiguredError(ErrorMessage.LLM_NOT_CONFIGURED.format(user_id=user_id))
 
     credentials_base_url, api_key = credentials
-    return ChatOpenAI(
+    return ReasoningAwareChatOpenAI(
         model=model_name,
         # RUNTIME-003: the ONLY base URL — always the Settings-resolved one;
         # a Model resource never participates in the provider connection.

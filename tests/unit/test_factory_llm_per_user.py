@@ -166,3 +166,72 @@ class TestReasoningToggle:
             assert model.extra_body["reasoning"] == {"enabled": True}
         finally:
             current_user_id.reset(token)
+
+
+class TestReasoningAwareModel:
+    """The per-user model is a ReasoningAwareChatOpenAI: provider reasoning
+    deltas (OpenRouter delta.reasoning / DeepSeek reasoning_content) survive
+    chunk conversion — the THINKING classifier's only signal channel."""
+
+    def test_per_user_model_is_reasoning_aware(self):
+        from langchain_core.messages import AIMessageChunk
+
+        from src.infrastructure.deepagent.reasoning_llm import ReasoningAwareChatOpenAI
+
+        model = ReasoningAwareChatOpenAI(model="m", api_key="sk", streaming=True, stream_usage=True)
+        chunk = {
+            "id": "x",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "m",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant", "reasoning": "je raisonne"},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        generation = model._convert_chunk_to_generation_chunk(chunk, AIMessageChunk, {})
+        assert generation is not None
+        message = generation.message
+        assert message.additional_kwargs["reasoning_content"] == "je raisonne"
+
+    def test_plain_content_chunks_are_untouched(self):
+        from langchain_core.messages import AIMessageChunk
+
+        from src.infrastructure.deepagent.reasoning_llm import ReasoningAwareChatOpenAI
+
+        model = ReasoningAwareChatOpenAI(model="m", api_key="sk", streaming=True, stream_usage=True)
+        chunk = {
+            "id": "x",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "m",
+            "choices": [{"index": 0, "delta": {"role": "assistant", "content": "91"}, "finish_reason": None}],
+        }
+        generation = model._convert_chunk_to_generation_chunk(chunk, AIMessageChunk, {})
+        assert generation.message.content == "91"
+        assert "reasoning_content" not in (generation.message.additional_kwargs or {})
+
+
+class TestReasoningAwareUsageChunk:
+    """The include_usage chunk (EMPTY choices) must not crash the override."""
+
+    def test_empty_choices_chunk_survives(self):
+        from langchain_core.messages import AIMessageChunk
+
+        from src.infrastructure.deepagent.reasoning_llm import ReasoningAwareChatOpenAI
+
+        model = ReasoningAwareChatOpenAI(model="m", api_key="sk", streaming=True, stream_usage=True)
+        chunk = {
+            "id": "x",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "m",
+            "choices": [],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+        generation = model._convert_chunk_to_generation_chunk(chunk, AIMessageChunk, {})
+        assert generation is not None
+        assert generation.message.usage_metadata is not None
