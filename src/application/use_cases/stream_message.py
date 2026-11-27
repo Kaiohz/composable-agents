@@ -69,6 +69,7 @@ class StreamMessageUseCase:
         thread_id: str,
         message: str,
         prepared: PreparedChatTurn | None = None,
+        reasoning_effort: str | None = None,
     ) -> AsyncGenerator[TraceEvent, None]:
         """Execute the use case.
 
@@ -79,6 +80,9 @@ class StreamMessageUseCase:
                 exact legacy string flow — REQ-003/REQ-017). When set, the
                 runner receives the multimodal content blocks (REQ-018) and the
                 HUMAN_MESSAGE event carries the attachment metadata (REQ-020).
+            reasoning_effort: Optional thinking level for THIS turn
+                (``low``/``medium``/``high``; ``None``/absent = thinking off)
+                — threaded to the runner's LLM call payload.
 
         Yields:
             Each :class:`TraceEvent` emitted by the runner (HUMAN_MESSAGE,
@@ -99,7 +103,9 @@ class StreamMessageUseCase:
         thread = None
         try:
             thread = await self._threads.get(thread_id)
-            runner = await self._registry.get_runner(thread.agent_name)
+            runner = await self._registry.get_runner(
+                thread.agent_name, reasoning_effort=reasoning_effort
+            )
             logger.info(LogMessage.CHAT_STREAM_STARTED, thread_id, thread.agent_name)
             turn_input = message if prepared is None else HumanTurnContent.from_prepared(prepared)
             async for event in runner.stream(thread_id, turn_input, turn_id):

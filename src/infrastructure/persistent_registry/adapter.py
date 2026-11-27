@@ -126,6 +126,7 @@ class _CacheEntry:
 
     runner: AgentRunner
     fingerprint: str
+    reasoning_effort: str | None = None
 
 
 class PersistentAgentRegistry(AgentRegistry):
@@ -173,7 +174,7 @@ class PersistentAgentRegistry(AgentRegistry):
         # per user so the worker memory stays flat over time.
         self._degraded: OrderedDict[str, list[dict]] = OrderedDict()
 
-    async def get_runner(self, agent_name: str) -> AgentRunner:
+    async def get_runner(self, agent_name: str, reasoning_effort: str | None = None) -> AgentRunner:
         """Return a runner for the CURRENT user's agent, rebuilding when stale.
 
         The built-in Composable AI Assistant follows a DELIBERATE REBUILD
@@ -201,7 +202,7 @@ class PersistentAgentRegistry(AgentRegistry):
             LlmNotConfiguredError: If the running user has no LLM credentials.
         """
         if is_builtin_agent_name(agent_name):
-            return await self._build_builtin_runner()
+            return await self._build_builtin_runner(reasoning_effort=reasoning_effort)
 
         uid = current_user_id.get() or ""
         key = (uid, agent_name)
@@ -209,7 +210,11 @@ class PersistentAgentRegistry(AgentRegistry):
         entry = self._runners.get(key)
         if entry is not None:
             current_fingerprint = await self._runner_fingerprint(agent_name)
-            if current_fingerprint == entry.fingerprint:
+            # The per-request reasoning effort is part of the identity: a
+            # changed effort EVICTS the cached runner so the rebuild pins the
+            # requested level on the LLM call (the fingerprint otherwise
+            # ignores the request-scoped knob).
+            if current_fingerprint == entry.fingerprint and entry.reasoning_effort == reasoning_effort:
                 logger.info(LogMessage.AGENT_CACHE_HIT, agent_name)
                 return entry.runner
             # CACHE-002 (or a rotated credential, feat-mcp-oauth2 M-3): a
@@ -240,9 +245,12 @@ class PersistentAgentRegistry(AgentRegistry):
                 config,
                 config_resolver=config_resolver,
                 extra_tools=extra_tools,
+                reasoning_effort=reasoning_effort,
             )
             fingerprint = await self._runner_fingerprint(agent_name)
-            self._runners[key] = _CacheEntry(runner=runner, fingerprint=fingerprint)
+            self._runners[key] = _CacheEntry(
+                runner=runner, fingerprint=fingerprint, reasoning_effort=reasoning_effort
+            )
             logger.info(LogMessage.AGENT_CACHED, agent_name)
             return runner
 
@@ -288,7 +296,7 @@ class PersistentAgentRegistry(AgentRegistry):
         logger.info(LogMessage.AGENT_MCP_TOOLS_LOADED, len(tools), config.name)
         return tools, adjusted
 
-    async def _build_builtin_runner(self) -> DeepAgentRunner:
+    async def _build_builtin_runner(self, reasoning_effort: str | None = None) -> DeepAgentRunner:
         """Resolve the built-in assistant dynamically and build a fresh runner.
 
         The dynamic toolset is resolved in the CURRENT user's context: the
@@ -341,6 +349,7 @@ class PersistentAgentRegistry(AgentRegistry):
             config_resolver=None,
             extra_tools=[*platform_tools, *dynamic_tools],
             middleware=[BuiltInToolsetGuardMiddleware()],
+            reasoning_effort=reasoning_effort,
         )
         logger.info(
             LogMessage.BUILTIN_AGENT_TOOLS_RESOLVED, uid, len(platform_tools) + len(dynamic_tools), len(degraded)
@@ -366,6 +375,7 @@ class PersistentAgentRegistry(AgentRegistry):
         config_resolver=None,
         extra_tools: list | None = None,
         middleware: list | None = None,
+        reasoning_effort: str | None = None,
     ) -> DeepAgentRunner:
         """Build one DeepAgentRunner from a resolved configuration (shared path).
 
@@ -384,6 +394,7 @@ class PersistentAgentRegistry(AgentRegistry):
             extra_tools=extra_tools,
             middleware=middleware or (),
             mcp_refs_resolver=self._build_mcp_refs_resolver(),
+            reasoning_effort=reasoning_effort,
         )
         # LLM-usage capture identity (dashboard spec §1): the resolved
         # serving model name (AGT-003 precedence) and the user's configured

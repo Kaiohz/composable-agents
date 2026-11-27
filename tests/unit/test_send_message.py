@@ -33,7 +33,7 @@ class _FakeRegistry(AgentRegistry):
     def __init__(self, runner: AgentRunner) -> None:
         self._runner = runner
 
-    async def get_runner(self, agent_name: str) -> AgentRunner:  # noqa: ARG002
+    async def get_runner(self, agent_name: str, reasoning_effort: str | None = None) -> AgentRunner:  # noqa: ARG002
         return self._runner
 
     async def list_agents(self) -> list[str]:
@@ -395,7 +395,7 @@ class _FailingRunnerRegistry(AgentRegistry):
     def __init__(self, error: Exception) -> None:
         self._error = error
 
-    async def get_runner(self, agent_name: str) -> AgentRunner:  # noqa: ARG002
+    async def get_runner(self, agent_name: str, reasoning_effort: str | None = None) -> AgentRunner:  # noqa: ARG002
         raise self._error
 
     async def list_agents(self) -> list[str]:

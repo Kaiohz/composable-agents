@@ -126,6 +126,7 @@ class SendMessageUseCase:
         edits: dict[str, Any] | None = None,
         decisions: list[HitlDecision] | None = None,
         prepared: PreparedChatTurn | None = None,
+        reasoning_effort: str | None = None,
     ) -> Message:
         """Dispatch the turn and guarantee the document cleanup (C1 no-orphan).
 
@@ -143,7 +144,9 @@ class SendMessageUseCase:
         thread = None
         try:
             thread = await self._threads.get(thread_id)
-            runner = await self._registry.get_runner(thread.agent_name)
+            runner = await self._registry.get_runner(
+                thread.agent_name, reasoning_effort=reasoning_effort
+            )
 
             if not is_hitl:
                 final_message = await self._run_human_turn(thread_id, thread, runner, message, prepared)

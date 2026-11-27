@@ -53,9 +53,16 @@ class ChatRequest(BaseModel):
 
     REQ-004: ``message`` may be absent ONLY when a non-empty ``attachments``
     list is provided. REQ-005 remains untouched (message XOR HITL fields).
+
+    ``reasoning_effort`` (optional): the thinking level for THIS turn
+    (``"low"``/``"medium"``/``"high"``). ``None``/absent = thinking off for
+    the turn. Applied to the OpenAI-compatible reasoning payload at the LLM
+    call level (OpenRouter ``reasoning: {enabled, effort}``).
     """
 
     message: str | None = Field(default=None, min_length=1)
+
+    reasoning_effort: Literal["low", "medium", "high"] | None = Field(default=None)
     tool_call_id: str | None = Field(default=None, min_length=1)
     action: Literal["approve", "reject", "edit"] | None = None
     reason: str | None = None

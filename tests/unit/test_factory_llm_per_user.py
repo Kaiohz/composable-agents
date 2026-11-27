@@ -135,3 +135,34 @@ class TestResolverSignature:
 
         sig = inspect.signature(create_agent_from_config)
         assert "llm_credentials_resolver" in sig.parameters
+
+
+class TestReasoningToggle:
+    """CHAT_REASONING_ENABLED passthrough (OpenRouter reasoning payload)."""
+
+    @patch("src.infrastructure.deepagent.factory.create_deep_agent")
+    async def test_disabled_by_default_no_reasoning_kwargs(self, mock_create):
+        mock_create.return_value = MagicMock()
+        config = AgentConfig(name="test-agent", model="gpt-4o-mini")
+        token = current_user_id.set("u1")
+        try:
+            resolver = AsyncMock(return_value=("https://api.openai.com/v1", "sk-test"))
+            await create_agent_from_config(config, llm_credentials_resolver=resolver)
+            model = mock_create.call_args.kwargs["model"]
+            assert "reasoning" not in (model.model_kwargs or {})
+        finally:
+            current_user_id.reset(token)
+
+    @patch.dict("os.environ", {"CHAT_REASONING_ENABLED": "true"})
+    @patch("src.infrastructure.deepagent.factory.create_deep_agent")
+    async def test_enabled_passes_openrouter_reasoning_payload(self, mock_create):
+        mock_create.return_value = MagicMock()
+        config = AgentConfig(name="test-agent", model="gpt-4o-mini")
+        token = current_user_id.set("u1")
+        try:
+            resolver = AsyncMock(return_value=("https://api.openai.com/v1", "sk-test"))
+            await create_agent_from_config(config, llm_credentials_resolver=resolver)
+            model = mock_create.call_args.kwargs["model"]
+            assert model.extra_body["reasoning"] == {"enabled": True}
+        finally:
+            current_user_id.reset(token)
