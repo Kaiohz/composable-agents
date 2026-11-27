@@ -162,8 +162,13 @@ class BuiltinToolsetResolver:
         """Collect the optional MCP sources in their stable, sorted order.
 
         The platform mounts always apply; user-registered servers are mounted
-        ONLY when explicitly selected (``mcp_refs``), resolved through the
-        trusted execution-config path with per-construction deduplication.
+        through the trusted execution-config path. An UNcustomized built-in
+        (``selected_refs is None``) keeps the LEGACY registry-list mounting —
+        every registered server in the running user's registry is resolved
+        (per-source degradation; REQ-004/REQ-005 credentials still apply). A
+        CUSTOMIZED built-in mounts ONLY its explicitly selected servers
+        (````mcp_refs`` — a selection also declares what is left OUT,
+        REQ-BUILTIN-003; an explicit empty selection mounts none).
         """
         sources: list[McpServerConfig] = []
         degraded: list[dict] = []
@@ -173,10 +178,33 @@ class BuiltinToolsetResolver:
                 sources.append(
                     McpServerConfig(name=mount_name, transport=McpTransportType.HTTP, url=f"{base_url}{mount_path}")
                 )
-        if selected_refs:
+        if selected_refs is None:
+            sources.extend(await self._collect_registered_sources(degraded))
+        elif selected_refs:
             sources.extend(await self._collect_selected_sources(list(selected_refs), degraded))
             logger.info(LogMessage.BUILTIN_MCP_SELECTION_APPLIED, len(selected_refs), _uid())
         return sources, degraded
+
+    async def _collect_registered_sources(self, degraded: list[dict]) -> list[McpServerConfig]:
+        """Legacy mounting: resolve EVERY registered server of the current
+        user's registry through the trusted execution-config path.
+
+        Malformed registry payloads or a registry outage degrade (never fail
+        the built-in build, REQ-040)."""
+        if self._registry_client is None:
+            return []
+        try:
+            servers = await self._registry_client.list_servers()
+        except Exception as exc:  # noqa: BLE001 — one bad registry must not brick the assistant
+            self._record_degradation(degraded, "mcp-registry", exc)
+            return []
+        configured: list[McpServerConfig] = []
+        for server in sorted(servers, key=lambda s: s.name):
+            try:
+                configured.append(await self._registry_client.get_execution_config(server.name))
+            except Exception as exc:  # noqa: BLE001 — malformed payload isolated per server
+                self._record_degradation(degraded, server.name, exc)
+        return configured
 
     async def _collect_selected_sources(self, selected_refs: list[str], degraded: list[dict]) -> list[McpServerConfig]:
         """Resolve ONLY the explicitly selected registered servers (REQ-BUILTIN-003).

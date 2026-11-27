@@ -81,9 +81,7 @@ class TestCreatePrompt:
 
     async def test_content_may_be_empty_string_and_stored_verbatim(self, client, users):
         verbatim = "  keep \n every \t whitespace  "
-        created = await client.post(
-            "/api/v1/prompts", headers=users["a"]["headers"], json=prompt_payload(content="")
-        )
+        created = await client.post("/api/v1/prompts", headers=users["a"]["headers"], json=prompt_payload(content=""))
         assert created.status_code == 201
 
         verbatim_created = await client.post(
@@ -124,7 +122,9 @@ class TestListPrompts:
 
 class TestGetPrompt:
     async def test_get_returns_owned_prompt(self, client, users):
-        created = await client.post("/api/v1/prompts", headers=users["a"]["headers"], json=prompt_payload(description="d"))
+        created = await client.post(
+            "/api/v1/prompts", headers=users["a"]["headers"], json=prompt_payload(description="d")
+        )
         got = await client.get(f"/api/v1/prompts/{created.json()['id']}", headers=users["a"]["headers"])
         assert got.status_code == 200
         body = got.json()
@@ -176,7 +176,9 @@ class TestPatchPrompt:
 
     async def test_patch_empty_name_rejected(self, client, users):
         created = await client.post("/api/v1/prompts", headers=users["a"]["headers"], json=prompt_payload())
-        resp = await client.patch(f"/api/v1/prompts/{created.json()['id']}", headers=users["a"]["headers"], json={"name": " "})
+        resp = await client.patch(
+            f"/api/v1/prompts/{created.json()['id']}", headers=users["a"]["headers"], json={"name": " "}
+        )
         assert resp.status_code in VALIDATION_CODES
 
     async def test_patch_unknown_id_404(self, client, users):
@@ -283,7 +285,9 @@ class TestVersionListShape:
     """QA BUG-004: the version list carries number + timestamp only."""
 
     async def test_version_list_payloads_have_no_content_or_user_id(self, client, users):
-        created = await client.post("/api/v1/prompts", headers=users["a"]["headers"], json=prompt_payload(content="full v1"))
+        created = await client.post(
+            "/api/v1/prompts", headers=users["a"]["headers"], json=prompt_payload(content="full v1")
+        )
         pid = created.json()["id"]
         await client.post(f"/api/v1/prompts/{pid}/versions", headers=users["a"]["headers"], json={"content": "full v2"})
 
@@ -305,7 +309,9 @@ class TestVersionListShape:
         assert new_version.status_code == 201
         assert "user_id" not in new_version.json(), f"owner id leaked in version payload: {new_version.json()}"
         # The immutable content stays reachable through the per-version GET.
-        got = await client.get(f"/api/v1/prompts/{pid}/versions/{new_version.json()['version']}", headers=users["a"]["headers"])
+        got = await client.get(
+            f"/api/v1/prompts/{pid}/versions/{new_version.json()['version']}", headers=users["a"]["headers"]
+        )
         assert got.status_code == 200
         assert got.json()["content"] == "v2"
         assert "user_id" not in got.json()
@@ -363,7 +369,9 @@ class TestExplicitNullNonNullableBoundary:
 
     async def test_patch_name_null_leaves_metadata_untouched(self, client, users):
         created = await client.post(
-            "/api/v1/prompts", headers=users["a"]["headers"], json={"name": "keep me", "description": "d", "content": "c"}
+            "/api/v1/prompts",
+            headers=users["a"]["headers"],
+            json={"name": "keep me", "description": "d", "content": "c"},
         )
         pid = created.json()["id"]
         await client.patch(f"/api/v1/prompts/{pid}", headers=users["a"]["headers"], json={"name": None})

@@ -13,7 +13,10 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query, status
 from pydantic import BaseModel, Field
 
-from src.application.services.route_validation import list_skill_usage_agent_names, normalize_store_path
+from src.application.services.route_validation import (
+    list_skill_usage_agent_names,
+    validate_memories_store_path,
+)
 from src.application.use_cases.manage_store_file import (
     DeleteStoreFileUseCase,
     GetStoreFileUseCase,
@@ -105,10 +108,14 @@ async def get_store_file(
     Raises:
         StoreFileNotFoundError: If the file does not exist in the store.
     """
-    content = await use_case.execute(path=normalize_store_path(path))
+    # QA BUG-005: /memories/... paths enforce REQ-015 exactly like the MCP
+    # boundary (agent segment + exactly one nesting segment); other prefixes
+    # keep the general normalize contract.
+    validated = validate_memories_store_path(path)
+    content = await use_case.execute(path=validated)
     if content is None:
         raise StoreFileNotFoundError(f"File not found: {path}")
-    return StoreFileResponse(path=normalize_store_path(path), content=content)
+    return StoreFileResponse(path=validated, content=content)
 
 
 @router.put("/files/{path:path}", status_code=status.HTTP_200_OK)
@@ -127,9 +134,12 @@ async def put_store_file(
     Returns:
         A ``StoreFileResponse`` with the path and stored content.
     """
-    normalized = normalize_store_path(path)
-    content = await use_case.execute(path=normalized, content=body.content)
-    return StoreFileResponse(path=normalized, content=content)
+    # QA BUG-005: /memories/... paths enforce REQ-015 exactly like the MCP
+    # boundary (agent segment + exactly one nesting segment); other prefixes
+    # keep the general normalize contract.
+    validated = validate_memories_store_path(path)
+    content = await use_case.execute(path=validated, content=body.content)
+    return StoreFileResponse(path=validated, content=content)
 
 
 @router.delete("/files/{path:path}", status_code=status.HTTP_204_NO_CONTENT)
@@ -143,7 +153,11 @@ async def delete_store_file(
         path: The file path (captured from the URL, no leading slash).
         use_case: Injected delete file use case.
     """
-    await use_case.execute(path=normalize_store_path(path))
+    # QA BUG-005: /memories/... paths enforce REQ-015 exactly like the MCP
+    # boundary (agent segment + exactly one nesting segment); other prefixes
+    # keep the general normalize contract.
+    validated = validate_memories_store_path(path)
+    await use_case.execute(path=validated)
 
 
 @router.get("/skills/{skill_name}/usage", status_code=status.HTTP_200_OK)

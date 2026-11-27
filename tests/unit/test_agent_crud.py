@@ -243,6 +243,10 @@ class TestUpdateAgentConfigUseCase:
 
     @pytest.fixture
     def use_case(self, yaml_loader, mock_agent_config_store, mock_agent_config_repository, mock_registry):
+        # REQ-018: the update DIFFS the subagent spaces against the CURRENTLY
+        # stored YAML — the mock serves a parseable stored snapshot by default
+        # (individual tests may still override ``store.get`` for their case).
+        mock_agent_config_store.get.return_value = VALID_YAML
         return UpdateAgentConfigUseCase(
             config_loader=yaml_loader,
             config_store=mock_agent_config_store,

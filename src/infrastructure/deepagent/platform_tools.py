@@ -232,7 +232,7 @@ class AgentPlatformToolsetBuilder:
     repositories instead of capturing stale instances.
     """
 
-    def build(self, *, include_run: bool) -> list[StructuredTool]:
+    def build(self, *, include_run: bool, agent_scope: str | None = None) -> list[StructuredTool]:
         """Return the LangChain platform toolset for an agent.
 
         Args:
@@ -241,12 +241,17 @@ class AgentPlatformToolsetBuilder:
                 guarded by the invocation chain and the built-in target guard).
                 Self-invocation remains impossible even when the tool is present
                 (REQ-030).
+            agent_scope: The calling agent's name, bound at TOOLSET BUILD time
+                (REQ-020): the memories tools close over it so the agent
+                operates on ``/memories/{agent_scope}/...`` without any scope
+                parameter (the tool schemas stay unchanged). ``None`` keeps
+                the flat personal namespace (built-in assistant, REQ-019).
         """
         tools: list[StructuredTool] = [
             *self._agents_family(),
             *self._registry_family(),
             *self._skills_family(),
-            *self._memories_family(),
+            *self._memories_family(agent_scope),
             *self._prompts_family(),
             *self._models_family(),
             *self._crons_family(),
@@ -256,7 +261,7 @@ class AgentPlatformToolsetBuilder:
         ]
         if include_run:
             tools.append(self._run_tool())
-        logger.info(LogMessage.AGENT_TOOLS_TOTAL, "platform-toolset", len(tools))
+        logger.info(LogMessage.AGENT_TOOLS_TOTAL, agent_scope or "platform-toolset", len(tools))
         return tools
 
     # ------------------------------------------------------------------
@@ -498,21 +503,31 @@ class AgentPlatformToolsetBuilder:
         ]
 
     # ------------------------------------------------------------------
-    def _memories_family(self) -> list[StructuredTool]:
+    def _memories_family(self, agent_scope: str | None = None) -> list[StructuredTool]:
+        """Build the memories tools, closed over the calling agent's scope.
+
+        REQ-020: ``agent_scope`` is captured at TOOLSET BUILD time (closure);
+        the tool input schemas stay unchanged (no scope/agent parameter) and
+        every operation resolves inside ``/memories/{agent_scope}/``. The
+        unbound (built-in assistant / personal) shape keeps using the flat
+        ``/memories/`` namespace, including REQ-015's nested personal-session
+        path validation.
+        """
         deps_lazy = self._deps
 
         async def composable_memories_list() -> str:
-            """List the current user's global memory files."""
+            """List the memory files of the calling agent's scope."""
             from src.application.services.route_validation import memories_prefix
 
-            files = await deps_lazy().get_list_store_files_use_case().execute(prefix=memories_prefix())
+            prefix = memories_prefix(agent_scope)
+            files = await deps_lazy().get_list_store_files_use_case().execute(prefix=prefix)
             return _json({"memories": files})
 
         async def composable_memories_get(filename: str) -> str:
-            """Read one global memory file."""
+            """Read one memory file of the calling agent's scope."""
             from src.application.services.route_validation import memory_store_path
 
-            path = memory_store_path(filename)
+            path = memory_store_path(filename, agent_scope)
             content = await deps_lazy().get_get_store_file_use_case().execute(path=path)
             if content is None:
                 from src.domain.errors.store_file import StoreFileNotFoundError
@@ -521,18 +536,18 @@ class AgentPlatformToolsetBuilder:
             return _json({"path": path, "content": content})
 
         async def composable_memories_upsert(filename: str, content: str) -> str:
-            """Create or replace a global memory file."""
+            """Create or replace a memory file in the calling agent's scope."""
             from src.application.services.route_validation import memory_store_path
 
-            path = memory_store_path(filename)
+            path = memory_store_path(filename, agent_scope)
             await deps_lazy().get_put_store_file_use_case().execute(path=path, content=content)
             return _json({"path": path, "content": content})
 
         async def composable_memories_delete(filename: str) -> str:
-            """Delete one global memory file (destructive, requires care)."""
+            """Delete one memory file of the calling agent's scope (destructive)."""
             from src.application.services.route_validation import memory_store_path
 
-            path = memory_store_path(filename)
+            path = memory_store_path(filename, agent_scope)
             await deps_lazy().get_delete_store_file_use_case().execute(path=path)
             return _json({"deleted": path})
 
@@ -621,14 +636,19 @@ class AgentPlatformToolsetBuilder:
             model = await deps_lazy().get_get_model_use_case().execute(model_id)
             return _json(_data(model))
 
-        async def composable_models_create(name: str, provider_model: str) -> str:
-            """Create a model identity (name + provider_model only)."""
-            model = await deps_lazy().get_create_model_use_case().execute(name=name, provider_model=provider_model)
+        async def composable_models_create(name: str, provider: str = "openai", provider_model: str = "") -> str:
+            """Create a model identity (serving provider + name + provider_model)."""
+            model = (
+                await deps_lazy()
+                .get_create_model_use_case()
+                .execute(name=name, provider=provider, provider_model=provider_model)
+            )
             return _json(_data(model))
 
         async def composable_models_update(
             model_id: str,
             name: str | None = None,
+            provider: str | None = None,
             provider_model: str | None = None,
         ) -> str:
             """Update model identity fields (REST-validated presence semantics)."""
@@ -639,6 +659,8 @@ class AgentPlatformToolsetBuilder:
             changes: dict[str, Any] = {}
             if name is not None:
                 changes["name"] = name
+            if provider is not None:
+                changes["provider"] = provider
             if provider_model is not None:
                 changes["provider_model"] = provider_model
             model = await deps_lazy().get_update_model_use_case().execute(model_id, changes)

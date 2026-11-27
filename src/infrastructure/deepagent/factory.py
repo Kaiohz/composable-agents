@@ -350,7 +350,7 @@ def _resolve_backend(store):
 async def _load_mcp_tools_resilient(
     mcp_tool_loader: McpToolLoader,
     servers: list[McpServerConfig],
-    agent_name: str,
+    agent_scope: str,
 ) -> list:
     """Load MCP tools SERVER BY SERVER, degrading gracefully per server.
 
@@ -363,10 +363,15 @@ async def _load_mcp_tools_resilient(
     semantics are preserved — the first failure is re-raised instead of
     booting a silently tool-less agent.
 
+    REQ-016: ``agent_scope`` names the SPACE the connections belong to — the
+    top-level agent's name for its own servers, the SUBAGENT's own name for a
+    subagent's (or a referenced agent's, merged under the referencing
+    subagent's) servers. It is injected server-side at tool-load time.
+
     Args:
         mcp_tool_loader: The tool loader (each call receives ONE config).
         servers: The agent's MCP server configs.
-        agent_name: The agent name (log context).
+        agent_scope: The owning agent/subagent name (scope binding + logs).
 
     Returns:
         The tools of every reachable server (empty only when NO server is
@@ -379,10 +384,10 @@ async def _load_mcp_tools_resilient(
     failures: list[tuple[McpServerConfig, McpError]] = []
     for server in servers:
         try:
-            tools.extend(await mcp_tool_loader.load_tools([server]))
+            tools.extend(await mcp_tool_loader.load_tools([server], agent_scope=agent_scope))
         except McpError as exc:
             failures.append((server, exc))
-            logger.warning(LogMessage.AGENT_MCP_TOOLS_SKIPPED_SERVER, agent_name, server.name, exc)
+            logger.warning(LogMessage.AGENT_MCP_TOOLS_SKIPPED_SERVER, agent_scope, server.name, exc)
     if servers and not tools and failures:
         # Every declared server is unreachable: fail loudly (legacy behavior)
         # rather than boot an agent that silently lost all its MCP tools.

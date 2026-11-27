@@ -84,9 +84,7 @@ class CronRunModel(Base):
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
-    cron_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("crons.id", ondelete="CASCADE"), nullable=False
-    )
+    cron_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("crons.id", ondelete="CASCADE"), nullable=False)
     trigger: Mapped[str] = mapped_column(String(20), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     occurrence_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

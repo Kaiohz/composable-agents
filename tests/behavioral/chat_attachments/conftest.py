@@ -204,9 +204,7 @@ async def agent_with_thread(
             agent_name = derived.strip()
 
     resolved_name = agent_name or f"att-{uuid.uuid4().hex[:8]}"
-    default_yaml = (
-        yaml_text if yaml_text is not None else files_mcp_yaml(resolved_name, mcp_url=mcp_files_stub().url)
-    )
+    default_yaml = yaml_text if yaml_text is not None else files_mcp_yaml(resolved_name, mcp_url=mcp_files_stub().url)
     await create_agent(client, headers, resolved_name, default_yaml)
     await configure_llm_credentials(client, headers)
     thread_resp = await create_thread(client, headers, resolved_name)

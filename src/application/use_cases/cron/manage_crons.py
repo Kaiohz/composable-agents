@@ -28,6 +28,7 @@ from src.domain.services.cron_schedule import (
 
 logger = logging.getLogger(__name__)
 
+
 def compute_next_run(cron_expression: str, timezone: str, enabled: bool, now: datetime) -> datetime | None:
     """Frontier for a definition state: ``None`` when disabled, else the next occurrence."""
     if not enabled:
@@ -72,9 +73,7 @@ async def assert_agent_unattended_safe(
     sources = await find_user_placeholder_sources(yaml_text, mcp_registry, agent_name)
     if sources:
         raise CronValidationError(
-            ErrorMessage.CRON_AGENT_UNATTENDED_PLACEHOLDER.format(
-                agent_name=f"{agent_name} ({', '.join(sources)})"
-            )
+            ErrorMessage.CRON_AGENT_UNATTENDED_PLACEHOLDER.format(agent_name=f"{agent_name} ({', '.join(sources)})")
         )
     return yaml_text
 
@@ -187,10 +186,7 @@ class UpdateCronUseCase:
             "enabled": changes.get("enabled", current.enabled),
         }
         schedule_changed = (
-            "cron_expression" in changes
-            or "timezone" in changes
-            or "enabled" in changes
-            or "agent_name" in changes
+            "cron_expression" in changes or "timezone" in changes or "enabled" in changes or "agent_name" in changes
         )
         if "cron_expression" in changes:
             validate_expression(merged["cron_expression"])

@@ -273,6 +273,9 @@ class PersistentAgentRegistry(AgentRegistry):
         resolver. The platform tools (including the one-shot execution tool,
         REQ-029-guarded) are injected as pre-resolved objects.
 
+        REQ-020: the memories tools are bound at build time to the calling
+        agent's scope (``/memories/{config.name}/...`` closure).
+
         Returns:
             ``(extra_tools, adjusted_config)``.
         """
@@ -281,7 +284,7 @@ class PersistentAgentRegistry(AgentRegistry):
             return [], config
         remaining = [t for t in config.tools if t != PLATFORM_TOOLS_SELECTOR]
         adjusted = config.model_copy(update={"tools": remaining})
-        tools = self._platform_toolset.build(include_run=True)
+        tools = self._platform_toolset.build(include_run=True, agent_scope=config.name)
         logger.info(LogMessage.AGENT_MCP_TOOLS_LOADED, len(tools), config.name)
         return tools, adjusted
 
@@ -308,15 +311,21 @@ class PersistentAgentRegistry(AgentRegistry):
         # Platform tools are built FIRST so their names are reserved BEFORE
         # the dynamic MCP resolution: a registered server advertising a
         # composable_* tool name is namespaced instead of shadowing it (I3).
+        # REQ-019: the built-in assistant keeps the PERSONAL memories scope —
+        # no agent closure is bound on its platform tools.
         platform_tools = self._platform_toolset.build(include_run=True)
         reserved = frozenset(tool.name for tool in platform_tools)
 
         dynamic_tools: list = []
         degraded: list[dict] = []
         if self._builtin_resolver is not None:
+            # Rebase semantics: an UNcustomized built-in (the platform
+            # default config) keeps the LEGACY full-registry mounting (the
+            # REQ-004/005 auth-mode behavioral contract); a CUSTOMIZED one
+            # mounts exactly its explicitly selected servers (REQ-BUILTIN-003).
             dynamic_tools, degraded = await self._builtin_resolver.resolve_dynamic_tools(
                 reserved_names=reserved,
-                selected_refs=config.mcp_refs,
+                selected_refs=config.mcp_refs if config.is_customized else None,
             )
         self._record_degraded_capabilities(uid, degraded)
 

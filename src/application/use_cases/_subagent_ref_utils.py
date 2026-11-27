@@ -75,9 +75,7 @@ async def invalidate_dependent_agents(
     try:
         all_names = await config_store.list_all()
     except Exception:
-        logger.exception(
-            "Failed to list stored agent configs during dependent invalidation for '%s'", agent_name
-        )
+        logger.exception("Failed to list stored agent configs during dependent invalidation for '%s'", agent_name)
         return
 
     dependent_agents: dict[str, str] = {}

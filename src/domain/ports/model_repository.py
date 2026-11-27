@@ -34,7 +34,7 @@ class ModelRepository(ABC):
 
     @abstractmethod
     async def update(self, model: ModelMetadata) -> ModelMetadata:
-        """Persist editable identity changes (name/provider_model).
+        """Persist editable identity changes (name/provider/provider_model).
 
         Referencing agents observe the edit on their next invocation
         (CACHE-002 fingerprint).

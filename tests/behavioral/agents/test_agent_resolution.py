@@ -175,7 +175,7 @@ class TestModelResolution:
             f"name: {name}\ntools: []\ndebug: false\n"
             f"model_ref: {model_id}\n"
             "model: legacy-should-be-ignored\n"
-            "system_prompt: \"Catalog serving prompt.\"\n"
+            'system_prompt: "Catalog serving prompt."\n'
         )
         thread = await _configured_stack(client, users, yaml_text, name)
         resp = await invoke_agent(client, users["a"]["headers"], thread["id"])

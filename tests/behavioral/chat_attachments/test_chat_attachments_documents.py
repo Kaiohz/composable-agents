@@ -39,9 +39,7 @@ async def _invoke_document(client, headers, thread_id, attachment, message="Anal
 class TestDocumentPolicyFrontier:
     """REQ-009/010, EC-006, AC-005, EDG-008/009."""
 
-    async def test_document_on_agent_without_files_mcp_rejected_before_graph(
-        self, client, users, stub_llm
-    ):
+    async def test_document_on_agent_without_files_mcp_rejected_before_graph(self, client, users, stub_llm):
         """EC-006 / AC-005: explicit 4xx, the graph is never invoked."""
         yaml_text = files_mcp_yaml("no-files-agent")  # no MCP servers at all
         thread_id = await agent_with_thread(client, users["a"]["headers"], yaml_text)
@@ -51,17 +49,13 @@ class TestDocumentPolicyFrontier:
 
     async def test_document_on_classical_only_agent_rejected(self, client, users, stub_llm):
         """EDG-009: /classical/mcp alone is not sufficient for documents."""
-        yaml_text = files_mcp_yaml(
-            "classical-only-agent", extra_servers=["http://127.0.0.1:59998/classical-mcp"]
-        )
+        yaml_text = files_mcp_yaml("classical-only-agent", extra_servers=["http://127.0.0.1:59998/classical-mcp"])
         thread_id = await agent_with_thread(client, users["a"]["headers"], yaml_text)
         resp = await _invoke_document(client, users["a"]["headers"], thread_id, document_attachment())
         assert 400 <= resp.status_code < 500, resp.text
         assert not stub_llm.app.requests
 
-    async def test_document_accepted_with_files_mcp_and_uses_the_files_server(
-        self, client, users, stub_llm, mcp_files
-    ):
+    async def test_document_accepted_with_files_mcp_and_uses_the_files_server(self, client, users, stub_llm, mcp_files):
         """EDG-008: with several MCP servers, the backend picks the /files/mcp"""
         yaml_text = files_mcp_yaml(
             "multi-server-agent",
@@ -90,9 +84,7 @@ class TestDocumentPolicyFrontier:
 class TestTemporaryDocumentUpload:
     """REQ-0011, REQ-031, REQ-038, REQ-015, REQ-016, NFR-007."""
 
-    async def test_upload_sent_to_mcp_with_user_isolated_prefix(
-        self, client, users, stub_llm, mcp_files
-    ):
+    async def test_upload_sent_to_mcp_with_user_isolated_prefix(self, client, users, stub_llm, mcp_files):
         """REQ-038/NFR-007: prefix = chat_tmp/<user_id>/<thread_id>/..."""
         thread_id = await agent_with_thread(client, users["a"]["headers"])
         attachment = document_attachment(filename="rapport.pdf")
@@ -108,9 +100,7 @@ class TestTemporaryDocumentUpload:
         # decoded bytes match what the client sent (strict base64 handling)
         assert call["decoded_bytes"].startswith(b"%PDF")
 
-    async def test_prompt_references_temp_path_and_read_file_never_the_bytes(
-        self, client, users, stub_llm, mcp_files
-    ):
+    async def test_prompt_references_temp_path_and_read_file_never_the_bytes(self, client, users, stub_llm, mcp_files):
         """REQ-015 / REQ-016 / REQ-017: graph input = reference text block."""
         thread_id = await agent_with_thread(client, users["a"]["headers"])
         unique_marker = f"UNIQUE-DOCUMENT-{uuid.uuid4().hex[:8]}"

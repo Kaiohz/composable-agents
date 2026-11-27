@@ -154,9 +154,7 @@ class ExecuteCronRunUseCase:
             if latest is None:
                 latest = cron.next_run_at or finished_at
             frontier = next_occurrence(cron.cron_expression, cron.timezone, latest)
-            await self._run_repository.mark_finished_and_advance(
-                run_id, status, finished_at, error, cron.id, frontier
-            )
+            await self._run_repository.mark_finished_and_advance(run_id, status, finished_at, error, cron.id, frontier)
             logger.info(LogMessage.CRON_RUN_FRONTIER_ADVANCED, cron.id, frontier)
         else:
             await self._run_repository.mark_finished(run_id, status, finished_at, error)
@@ -195,9 +193,7 @@ class RunCronNowUseCase:
         active = await self._run_repository.get_active_run(cron_id)
         if active is not None:
             raise CronRunConflictError(ErrorMessage.CRON_RUN_CONFLICT.format(cron_id=cron_id))
-        run = await self._run_repository.create_manual(
-            CronRun(cron_id=cron_id, trigger=CronTrigger.MANUAL)
-        )
+        run = await self._run_repository.create_manual(CronRun(cron_id=cron_id, trigger=CronTrigger.MANUAL))
         if run is None:
             # Lost the race for the single active slot (concurrent Run now).
             raise CronRunConflictError(ErrorMessage.CRON_RUN_CONFLICT.format(cron_id=cron_id))
@@ -296,9 +292,7 @@ class SchedulerTickUseCase:
                 if claimed is not None:
                     # Defensive: the claim won the occurrence index but not the
                     # single-active slot (the active run finished mid-flight).
-                    await self._run_repository.mark_finished(
-                        claimed.id, CronRunStatus.SKIPPED, datetime.now(UTC)
-                    )
+                    await self._run_repository.mark_finished(claimed.id, CronRunStatus.SKIPPED, datetime.now(UTC))
                 else:
                     await self._run_repository.record_skipped(candidate)
                 logger.info(LogMessage.CRON_TICK_OVERLAP_SKIPPED, cron.id, occurrence)

@@ -164,7 +164,11 @@ class TestMessageAttachmentsRules:
         resp = await client.post(
             f"/api/v1/chat/{thread_id}",
             headers=users["a"]["headers"],
-            json={"message": "hi", "attachments": [image_attachment()], "decisions": [{"tool_call_id": "tc_1", "action": "approve"}]},
+            json={
+                "message": "hi",
+                "attachments": [image_attachment()],
+                "decisions": [{"tool_call_id": "tc_1", "action": "approve"}],
+            },
         )
         assert resp.status_code in VALIDATION_CODES, resp.text
 
@@ -181,9 +185,7 @@ class TestBackwardCompatibility:
     """REQ-003 / AC-011: payloads without attachments behave exactly as before."""
 
     async def test_plain_message_accepted_unchanged(self, client, users, stub_llm):
-        thread_id = await agent_with_thread(
-            client, users["a"]["headers"], files_mcp_yaml("compat-agent")
-        )
+        thread_id = await agent_with_thread(client, users["a"]["headers"], files_mcp_yaml("compat-agent"))
         resp = await invoke_agent(client, users["a"]["headers"], thread_id, message="hello")
         assert resp.status_code == 200, resp.text
         assert resp.json()["role"] == "ai"

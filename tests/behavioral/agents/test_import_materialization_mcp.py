@@ -40,7 +40,9 @@ def _name(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
 
 
-def http_server(name: str, url: str, *, headers: dict | None = None, env: dict | None = None, token: str | None = None) -> dict:
+def http_server(
+    name: str, url: str, *, headers: dict | None = None, env: dict | None = None, token: str | None = None
+) -> dict:
     server: dict = {"name": name, "transport": "http", "url": url}
     if headers:
         server["headers"] = headers
@@ -55,9 +57,18 @@ def stdio_server(name: str, command: str, args: list[str]) -> dict:
     return {"name": name, "transport": "stdio", "command": command, "args": args}
 
 
-def import_yaml(name: str, *, mcp_servers: list[dict], model: str = "gpt-4o", system_prompt: str = "You are helpful.") -> str:
+def import_yaml(
+    name: str, *, mcp_servers: list[dict], model: str = "gpt-4o", system_prompt: str = "You are helpful."
+) -> str:
     return yaml.safe_dump(
-        {"name": name, "model": model, "system_prompt": system_prompt, "tools": [], "debug": False, "mcp_servers": mcp_servers},
+        {
+            "name": name,
+            "model": model,
+            "system_prompt": system_prompt,
+            "tools": [],
+            "debug": False,
+            "mcp_servers": mcp_servers,
+        },
         sort_keys=False,
     )
 
@@ -132,12 +143,12 @@ class TestMcpMaterialization:
     async def test_empty_selection_creates_no_registry_entries(self, client, users, stub_registry):
         """REQ-MCP-004: an empty MCP selection is valid and creates nothing."""
         agent = _name("imp-mcp-empty")
-        resp = await import_agent(
-            client, users["a"]["headers"], import_yaml(agent, mcp_servers=[]), agent
-        )
+        resp = await import_agent(client, users["a"]["headers"], import_yaml(agent, mcp_servers=[]), agent)
         assert resp.status_code == 201, resp.text
 
-        creates = [r for r in stub_registry.app.requests if r["method"] == "POST" and r["path"] == "/api/v1/mcp/servers"]
+        creates = [
+            r for r in stub_registry.app.requests if r["method"] == "POST" and r["path"] == "/api/v1/mcp/servers"
+        ]
         assert creates == [], "an empty MCP selection must not create registry resources"
         body = (await client.get(f"/api/v1/agents/{agent}", headers=users["a"]["headers"])).json()
         assert not (body.get("mcp_refs") or [])

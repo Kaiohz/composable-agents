@@ -19,7 +19,13 @@ from src.domain.services.agent_import_plan import (
 
 def plan_of(**overrides) -> dict:
     """A minimal VALID import mapping; tests override single fields."""
-    data = {"name": "my-agent", "model": "anthropic:claude-x", "system_prompt": "Prompt body.", "tools": [], "debug": False}
+    data = {
+        "name": "my-agent",
+        "model": "anthropic:claude-x",
+        "system_prompt": "Prompt body.",
+        "tools": [],
+        "debug": False,
+    }
     data.update(overrides)
     return {key: value for key, value in data.items() if value is not None}
 
@@ -508,9 +514,7 @@ class TestSubagentMcpOwnership:
 
     async def test_derived_resource_names_cover_root_and_subagents(self):
         raw = plan_of(
-            subagents=[
-                {"name": "helper", "description": "Child", "instructions": "i", "model": "m", "tools": []}
-            ]
+            subagents=[{"name": "helper", "description": "Child", "instructions": "i", "model": "m", "tools": []}]
         )
         plan = build_agent_import_plan(raw, "my-agent")
         assert set(derived_resource_names(plan)) == {

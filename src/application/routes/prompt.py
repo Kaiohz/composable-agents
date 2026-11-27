@@ -129,9 +129,7 @@ async def list_prompt_versions(
     Raises:
         PromptNotFoundError: Missing or foreign prompt.
     """
-    return [
-        PromptVersionSummary.model_validate(summary) for summary in await use_case.execute(prompt_id)
-    ]
+    return [PromptVersionSummary.model_validate(summary) for summary in await use_case.execute(prompt_id)]
 
 
 @router.post("/{prompt_id}/versions", status_code=status.HTTP_201_CREATED)

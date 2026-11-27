@@ -19,15 +19,22 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class ModelMetadata(BaseModel):
-    """A reusable, user-owned model identity (display name + provider_model)."""
+    """A reusable, user-owned model identity (provider + display name + provider_model).
+
+    ``provider`` is the catalog identity of the serving provider (the serving
+    prefix, e.g. ``anthropic`` from ``anthropic:claude-3-7-sonnet``, the
+    default OpenAI-compatible chain otherwise) — the provider CONNECTION
+    (``base_url``/``api_key``) remains exclusively Settings-owned (MODEL-009).
+    """
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
+    provider: str = Field(default="openai", min_length=1, max_length=100)
     provider_model: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
-    @field_validator("name", "provider_model")
+    @field_validator("name", "provider_model", "provider")
     @classmethod
     def required_fields_non_empty(cls, value: str) -> str:
         """Display name and provider model identifier must be non-empty (MODEL-002)."""

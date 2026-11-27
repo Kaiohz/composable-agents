@@ -1,8 +1,9 @@
-"""Model catalog CRUD use cases (spec §B MODEL-001…008).
+"""Model catalog CRUD use cases (spec §B MODEL-001…008, provider restored).
 
-Models are identity-only: UUID, display name, ``provider_model`` identifier
-and timestamps. No credential or Settings connection field exists and none are
-accepted anywhere in this catalog (MODEL-009).
+Models are identity rows: UUID, serving ``provider``, display name,
+``provider_model`` identifier and timestamps. No credential or Settings
+connection field exists and none are accepted anywhere in this catalog
+(MODEL-009).
 """
 
 import logging
@@ -25,9 +26,10 @@ class CreateModelUseCase:
         self,
         name: str,
         provider_model: str,
+        provider: str = "openai",
     ) -> ModelMetadata:
         """Persist the identity configuration and return it (MODEL-002)."""
-        model = ModelMetadata(name=name, provider_model=provider_model)
+        model = ModelMetadata(name=name, provider=provider, provider_model=provider_model)
         created = await self._model_repository.create(model)
         logger.info(LogMessage.MODEL_CREATED, created.id)
         return created
@@ -61,7 +63,7 @@ class ListModelsUseCase:
 
 
 class UpdateModelUseCase:
-    """Edit the display name or the ``provider_model`` identifier.
+    """Edit the display name, the serving provider or the ``provider_model``.
 
     Only explicitly-provided fields are applied (``exclude_unset`` semantics),
     so an omitted field keeps its current value (MODEL-006).

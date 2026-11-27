@@ -244,9 +244,7 @@ class AgentImportService:
             the reference is never fetched a second time).
         """
         referenced_model = (
-            await self._model_repository.get(str(_parse_uuid(plan.model_ref)))
-            if plan.model_ref is not None
-            else None
+            await self._model_repository.get(str(_parse_uuid(plan.model_ref))) if plan.model_ref is not None else None
         )
         # Reuse of the reference-validation rules for the prompt side (the
         # model side above performs exactly the same owner-scoped fetch).

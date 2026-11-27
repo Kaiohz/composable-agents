@@ -113,9 +113,7 @@ class ErrorMessage(StrEnum):
         "MCP server '{name}' (mcp_servers) is already registered: the import never overwrites an existing "
         "registration. Rename the inline definition or reuse the registered one."
     )
-    AGENT_IMPORT_SUBAGENT_CYCLE = (
-        "Circular sub-agent reference (cycle) detected before any creation: {names}"
-    )
+    AGENT_IMPORT_SUBAGENT_CYCLE = "Circular sub-agent reference (cycle) detected before any creation: {names}"
     AGENT_IMPORT_SUBAGENT_SELF_REFERENCE = (
         "Sub-agent '{name}' references its own agent '{agent}' (self-reference is not allowed)."
     )
@@ -216,6 +214,18 @@ class ErrorMessage(StrEnum):
     MCP_TOOL_MESSAGE_EMPTY = "message must be a non-empty string"
     MCP_SKILL_NAME_INVALID = "Invalid skill name '{name}': use a plain directory name (no path separators, no '..')."
     MCP_MEMORY_NAME_INVALID = "Invalid memory filename '{name}': use a plain file name (no path separators, no '..')."
+    MCP_MEMORY_AGENT_SEGMENT_INVALID = (
+        "Invalid agent memory segment {slug!r}: must match ^[a-z0-9][a-z0-9-]{{0,99}}$ (exactly one agent segment)."
+    )
+    AGENT_SPACE_SLUG_COLLISION = (
+        "RAG space slug '{slug}' (from '{name}') is already claimed by '{other}' — names mapping to the "
+        "same scope slug would share one RAG space. Rename one of the agents or adjust the topology "
+        "(there is no rename on agents: delete the unwanted one and re-create it) to resolve the conflict."
+    )
+    AGENT_SPACE_SLUG_RESERVED = (
+        "RAG space slug '{slug}' is reserved by the platform (from '{name}') — the 'personal' scope is the "
+        "user's own default space and can never be owned by an agent; use a distinct name."
+    )
 
     # --- Prompt management (Phoenix, removed) ---
     # Legacy Phoenix prompt templates removed with the Phoenix prompt path.

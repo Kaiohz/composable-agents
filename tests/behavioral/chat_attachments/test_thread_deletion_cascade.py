@@ -44,7 +44,13 @@ class TestThreadDeletionCascade:
             "/api/v1/agents",
             headers=headers,
             data={"agent_name": agent_name},
-            files={"file": ("agent.yaml", f"name: {agent_name}\nmodel: stub-model\nsystem_prompt: \"Cascade agent.\"\ntools: []\n".encode(), "text/yaml")},
+            files={
+                "file": (
+                    "agent.yaml",
+                    f'name: {agent_name}\nmodel: stub-model\nsystem_prompt: "Cascade agent."\ntools: []\n'.encode(),
+                    "text/yaml",
+                )
+            },
         )
         assert resp.status_code == 201, resp.text
         thread_id = (await create_thread(client, headers, agent_name)).json()["id"]
@@ -69,7 +75,13 @@ class TestThreadDeletionCascade:
                 "/api/v1/agents",
                 headers=headers,
                 data={"agent_name": name},
-                files={"file": ("agent.yaml", f"name: {name}\nmodel: stub-model\nsystem_prompt: \"Cascade agent.\"\ntools: []\n".encode(), "text/yaml")},
+                files={
+                    "file": (
+                        "agent.yaml",
+                        f'name: {name}\nmodel: stub-model\nsystem_prompt: "Cascade agent."\ntools: []\n'.encode(),
+                        "text/yaml",
+                    )
+                },
             )
             assert resp.status_code == 201, resp.text
         thread_a = (await create_thread(client, headers, name_a)).json()["id"]
@@ -92,7 +104,13 @@ class TestThreadDeletionCascade:
             "/api/v1/agents",
             headers=headers,
             data={"agent_name": agent_name},
-            files={"file": ("agent.yaml", f"name: {agent_name}\nmodel: stub-model\nsystem_prompt: \"Cascade agent.\"\ntools: []\n".encode(), "text/yaml")},
+            files={
+                "file": (
+                    "agent.yaml",
+                    f'name: {agent_name}\nmodel: stub-model\nsystem_prompt: "Cascade agent."\ntools: []\n'.encode(),
+                    "text/yaml",
+                )
+            },
         )
         assert resp.status_code == 201, resp.text
         thread_id = (await create_thread(client, headers, agent_name)).json()["id"]
@@ -116,7 +134,13 @@ class TestThreadDeletionCascade:
             "/api/v1/agents",
             headers=headers,
             data={"agent_name": agent_name},
-            files={"file": ("agent.yaml", f"name: {agent_name}\nmodel: stub-model\nsystem_prompt: \"Cascade agent.\"\ntools: []\n".encode(), "text/yaml")},
+            files={
+                "file": (
+                    "agent.yaml",
+                    f'name: {agent_name}\nmodel: stub-model\nsystem_prompt: "Cascade agent."\ntools: []\n'.encode(),
+                    "text/yaml",
+                )
+            },
         )
         assert resp.status_code == 201, resp.text
         thread_id = (await create_thread(client, headers, agent_name)).json()["id"]
@@ -137,7 +161,6 @@ class TestThreadDeletionCascade:
         assert deleted.status_code in {200, 204}, deleted.text
         listing = await client.get("/api/v1/threads", headers=headers)
         assert all(t["id"] != thread_id for t in listing.json()), "thread row must be deleted"
-        assert any(
-            record.levelno >= 30 and thread_id in record.getMessage()
-            for record in caplog.records
-        ), "the cascade failure must be explicitly logged (REQ-100)"
+        assert any(record.levelno >= 30 and thread_id in record.getMessage() for record in caplog.records), (
+            "the cascade failure must be explicitly logged (REQ-100)"
+        )

@@ -98,9 +98,9 @@ class TestCreatePdfHappyPath:
 
             assert payload["mime_type"] == "application/pdf"
             assert payload["filename"] == "rapport.pdf"  # REQ-051 auto-extension
-            assert re.fullmatch(
-                rf"/documents/{re.escape(thread_id)}/[0-9a-f-]{{36}}/rapport\.pdf", payload["path"]
-            ), payload["path"]
+            assert re.fullmatch(rf"/documents/{re.escape(thread_id)}/[0-9a-f-]{{36}}/rapport\.pdf", payload["path"]), (
+                payload["path"]
+            )
 
             listed = await file_store.list_files(prefix=f"/documents/{thread_id}/")
             assert listed, "the PDF must be stored under /documents/<thread_id>/"
@@ -160,9 +160,7 @@ class TestCreatePdfConstraints:
         token = current_user_id.set("user-a")
         try:
             tool = _tool_factory()(file_store=file_store, thread_id=thread_id)
-            rejected = await _invoke_and_error_seen(
-                tool, {"filename": "big.pdf", "markdown_content": "x" * 101}
-            )
+            rejected = await _invoke_and_error_seen(tool, {"filename": "big.pdf", "markdown_content": "x" * 101})
             assert rejected, "oversized markdown must be rejected (error to the LLM, no PDF written)"
         finally:
             current_user_id.reset(token)
@@ -191,9 +189,7 @@ class TestCreatePdfConstraints:
         token = current_user_id.set("user-a")
         try:
             tool = _tool_factory()(file_store=file_store, thread_id=thread_id)
-            rejected = await _invoke_and_error_seen(
-                tool, {"filename": bad_name, "markdown_content": "# x\n"}
-            )
+            rejected = await _invoke_and_error_seen(tool, {"filename": bad_name, "markdown_content": "# x\n"})
             assert rejected, f"invalid filename {bad_name!r} must be rejected"
         finally:
             current_user_id.reset(token)

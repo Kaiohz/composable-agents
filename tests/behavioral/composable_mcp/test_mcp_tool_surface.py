@@ -69,10 +69,11 @@ EXPECTED_TOOLS = {
 FORBIDDEN_TOOL_FRAGMENTS = ("settings", "api_key", "api_keys", "reveal", " credential", "llm")
 
 # MODEL-001 — the exactly-allowed identity field set of a Model resource; the
-# Settings-owned connection fields ``provider`` and ``base_url`` are removed
-# from every Model contract (REST, MCP control plane, agent-facing toolset).
-MODEL_IDENTITY_FIELDS = {"id", "name", "provider_model", "created_at", "updated_at"}
-REMOVED_MODEL_FIELDS = ("provider", "base_url")
+# serving ``provider`` is RESTORED as identity (migration 025) while the
+# Settings-owned connection field ``base_url`` stays removed from every Model
+# contract (REST, MCP control plane, agent-facing toolset).
+MODEL_IDENTITY_FIELDS = {"id", "name", "provider", "provider_model", "created_at", "updated_at"}
+REMOVED_MODEL_FIELDS = ("base_url",)
 
 
 async def _tools_map(mcp_base_url, headers):
@@ -241,9 +242,10 @@ class TestStorePathSafety:
 
 class TestModelToolsTwoFieldContract:
     """MODEL-007 (real ``tools/list`` + ``tools/call`` entry points): the MCP
-    Model create/update tools carry exactly the REST two-field business
-    contract — same fields, same trim/non-empty rules, removed (Settings-owned)
-    fields exposed nowhere, and the same ownership rules as REST.
+    Model create/update tools carry exactly the REST identity business
+    contract (name, serving ``provider`` + ``provider_model``) — same fields,
+    same trim/non-empty rules, the Settings-owned ``base_url`` exposed nowhere,
+    and the same ownership rules as REST.
 
     The mcp SDK wraps a pydantic-model parameter (``args: CreateModelRequest``)
     in a dynamic arguments model, so the tool schema nests the DTO under
@@ -256,8 +258,8 @@ class TestModelToolsTwoFieldContract:
         tools = await _tools_map(mcp_base_url, users["a"]["headers"])
         create_props, create_def = _tool_args_properties(tools["composable_models_create"].inputSchema)
         update_props, update_def = _tool_args_properties(tools["composable_models_update"].inputSchema)
-        assert set(create_props) == {"name", "provider_model"}, f"create DTO fields: {sorted(create_props)}"
-        assert set(update_props) == {"name", "provider_model"}, f"update DTO fields: {sorted(update_props)}"
+        assert set(create_props) == {"name", "provider", "provider_model"}, f"create DTO fields: {sorted(create_props)}"
+        assert set(update_props) == {"name", "provider", "provider_model"}, f"update DTO fields: {sorted(update_props)}"
         for removed in REMOVED_MODEL_FIELDS:
             assert removed not in create_props, f"removed field '{removed}' exposed by the create tool schema"
             assert removed not in update_props, f"removed field '{removed}' exposed by the update tool schema"
@@ -273,20 +275,40 @@ class TestModelToolsTwoFieldContract:
             "composable_models_create",
             {"args": {"name": "  Via MCP  ", "provider_model": "  mcp-create-x  "}},
         )
-        assert created["ok"], f"valid two-field create must succeed: {created}"
+        assert created["ok"], f"valid identity create must succeed: {created}"
         body = created["result"]
         assert set(body) == MODEL_IDENTITY_FIELDS, f"identity-only result expected, got: {sorted(body)}"
         for removed in REMOVED_MODEL_FIELDS:
             assert removed not in body, f"removed field '{removed}' leaked through the MCP create result"
         assert body["name"] == "Via MCP", "the tool must apply the same trim rule as REST"
+        assert body["provider"] == "openai", "the omitted provider must default to the OpenAI-compatible chain"
         assert body["provider_model"] == "mcp-create-x"
+
+    async def test_create_persists_an_explicit_provider(self, mcp_base_url, users):
+        """The serving provider is an identity field and flows through the MCP
+        create exactly like through REST (import materialization parity)."""
+        created = await call_mcp_tool(
+            mcp_base_url,
+            users["a"]["headers"],
+            "composable_models_create",
+            {"args": {"name": "Anthropic MCP", "provider": "anthropic", "provider_model": "mcp-anthropic-x"}},
+        )
+        assert created["ok"], f"a valid provider create must succeed: {created}"
+        assert created["result"]["provider"] == "anthropic", "the explicit provider must be persisted"
 
     async def test_create_rejects_a_removed_field_and_persists_nothing(self, mcp_base_url, users):
         rejected = await call_mcp_tool(
             mcp_base_url,
             users["a"]["headers"],
             "composable_models_create",
-            {"args": {"name": "Smuggled", "provider_model": "mcp-reject-x", "provider": "openai"}},
+            {
+                "args": {
+                    "name": "Smuggled",
+                    "provider": "openai",
+                    "provider_model": "mcp-reject-x",
+                    "base_url": "https://api.example.com/v1",
+                }
+            },
         )
         assert not rejected["ok"], "a Settings-owned field must be rejected on the MCP Model create surface"
         listed = await call_mcp_tool(mcp_base_url, users["a"]["headers"], "composable_models_list")
@@ -297,10 +319,11 @@ class TestModelToolsTwoFieldContract:
     async def test_update_rejects_removed_unknown_and_invalid_fields(self, mcp_base_url, users):
         model = await self._create_model(mcp_base_url, users)
         for payload in (
-            {"provider": "anthropic"},
             {"base_url": "https://api.example.com/v1"},
             {"unknown_field": "x"},
             {"name": "   "},
+            {"provider": None},
+            {"provider": "  "},
             {"provider_model": None},
         ):
             rejected = await call_mcp_tool(
@@ -316,6 +339,26 @@ class TestModelToolsTwoFieldContract:
         body = got["result"]
         assert body["name"] == model["name"] and body["provider_model"] == model["provider_model"], (
             "no invalid update may be applied"
+        )
+
+    async def test_update_applies_a_provider_only_patch(self, mcp_base_url, users):
+        """MODEL-006 parity: ``provider`` is an editable identity field, so a
+        provider-only PATCH is valid and leaves the other fields untouched."""
+        model = await self._create_model(mcp_base_url, users)
+        patched = await call_mcp_tool(
+            mcp_base_url,
+            users["a"]["headers"],
+            "composable_models_update",
+            {"model_id": model["id"], "args": {"provider": "anthropic"}},
+        )
+        assert patched["ok"], f"a provider-only PATCH is a valid identity edit: {patched}"
+        got = await call_mcp_tool(
+            mcp_base_url, users["a"]["headers"], "composable_models_get", {"model_id": model["id"]}
+        )
+        body = got["result"]
+        assert body["provider"] == "anthropic", "the provider edit must be applied"
+        assert body["name"] == model["name"] and body["provider_model"] == model["provider_model"], (
+            "the omitted fields keep their value"
         )
 
     async def test_update_keeps_omitted_field_and_trims_like_rest(self, mcp_base_url, users):

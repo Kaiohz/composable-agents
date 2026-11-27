@@ -81,7 +81,10 @@ from src.domain.errors.messages import ErrorMessage
 from src.domain.errors.security import AuthenticationError
 from src.domain.errors.storage import StorageError
 from src.domain.logging.messages import LogMessage
+from src.domain.ports.agent_config_repository import AgentConfigRepository
+from src.domain.ports.agent_config_store import AgentConfigStore
 from src.domain.ports.agent_registry import AgentRegistry
+from src.domain.ports.agent_topology_resolver import AgentTopologyResolver
 from src.domain.ports.auth.api_key_repository import ApiKeyRepository
 from src.domain.ports.builtin_agent_override_store import BuiltinAgentOverrideStore
 from src.domain.ports.cron_repository import CronRepository, CronRunRepository
@@ -90,6 +93,7 @@ from src.domain.ports.llm_price_repository import LlmPriceRepository
 from src.domain.ports.mcp_registry import McpRegistryClient
 from src.domain.ports.model_repository import ModelRepository
 from src.domain.ports.prompt_repository import PromptRepository
+from src.domain.ports.rag_space_provisioner import RagSpaceProvisioner
 from src.domain.ports.store_file_repository import StoreFileRepository
 from src.domain.ports.temporary_document_cleaner import TemporaryDocumentCleaner
 from src.domain.ports.thread_repository import ThreadRepository
@@ -98,7 +102,9 @@ from src.domain.ports.trace_summary_repository import TraceSummaryRepository
 from src.domain.ports.trace_usage_repository import TraceUsageRepository
 from src.domain.ports.tracing_provider import TracingProvider
 from src.domain.ports.user_llm_settings_repository import UserLlmSettingsRepository
+from src.domain.services.agent_rag_spaces import AgentRagSpaces, drain_pending_lifecycle_tasks
 from src.domain.services.mcp_execution_resolution import build_mcp_refs_resolver
+from src.infrastructure.agent_topology.adapter import StoreAgentTopologyResolver
 from src.infrastructure.auth.jwt_adapter import JwtAdapter
 from src.infrastructure.crypto.fernet_crypto import FernetCrypto
 from src.infrastructure.database.rls_context import current_auth_context, current_user_id
@@ -123,6 +129,7 @@ from src.infrastructure.postgres_trace.adapter import PostgresTraceEventReposito
 from src.infrastructure.postgres_trace.summary_repository import PostgresTraceSummaryRepository
 from src.infrastructure.postgres_trace.usage_repository import PostgresTraceUsageRepository
 from src.infrastructure.postgres_user_llm.adapter import PostgresUserLlmSettingsRepository
+from src.infrastructure.rag_spaces.adapter import HttpRagSpaceProvisioner
 from src.infrastructure.runner_freshness.adapter import PostgresRunnerFreshness
 from src.infrastructure.rustfs_store.adapter import RustfsAgentConfigStore
 from src.infrastructure.store_file.adapter import LangGraphStoreFileRepository
@@ -189,6 +196,11 @@ tracing_provider = _create_tracing_provider(settings)
 # Trusted MCP-registry client singleton (I2): created lazily by
 # ``get_mcp_registry_client()``, closed by ``close_persistence``.
 _mcp_registry_client: HttpMcpRegistryClient | None = None
+
+# RAG-space provisioning client (REQ-010/018): ONE shared httpx client, base
+# URL read at call time (test/di seam retargetable), closed by
+# ``close_persistence``.
+_rag_space_provisioner: HttpRagSpaceProvisioner | None = None
 
 # Security instance shared across all routes (HTTP + WebSocket).
 security = ComposableAgentsSecurity(master_key=settings.api_key)
@@ -492,6 +504,17 @@ async def close_persistence() -> None:
     event loop scope) starts clean instead of encountering connections pinned
     to a shut-down engine/loop.
     """
+    # Review I-2 (fold-in 2): drain the fire-and-forget RAG-space lifecycle
+    # tasks FIRST — a pending cascade still needs the DB (ownership set) and
+    # the store (memories listing), both of which the steps below tear down.
+    try:
+        drained = await drain_pending_lifecycle_tasks()
+        if drained:
+            logger.info(LogMessage.RAG_SPACE_PENDING_DRAINED, drained)
+    except Exception:  # noqa: BLE001
+        # A failing drain must never block the shutdown steps below the drain.
+        logger.exception(LogMessage.RAG_SPACE_CLIENT_CLOSE_FAILED)
+
     if _root.agent_registry and isinstance(_root.agent_registry, PersistentAgentRegistry):
         await _root.agent_registry.close()
         logger.info(LogMessage.PERSISTENT_REGISTRY_CLOSED)
@@ -515,6 +538,18 @@ async def close_persistence() -> None:
         except Exception:
             logger.exception(LogMessage.MCP_REGISTRY_CLIENT_CLOSE_FAILED)
         _mcp_registry_client = None
+
+    global _rag_space_provisioner
+    if _rag_space_provisioner is not None:
+        # The lifecycle tasks were already drained at the top of this
+        # function (before the engine dispose) — only the HTTP client is
+        # released here. Contained like every other shutdown step.
+        try:
+            await _rag_space_provisioner.aclose()
+            logger.info(LogMessage.RAG_SPACE_CLIENT_CLOSED)
+        except Exception:
+            logger.exception(LogMessage.RAG_SPACE_CLIENT_CLOSE_FAILED)
+        _rag_space_provisioner = None
 
 
 def reset() -> None:
@@ -728,6 +763,55 @@ def get_mcp_refs_resolver():
     return build_mcp_refs_resolver(get_mcp_registry_client())
 
 
+def get_rag_space_provisioner() -> RagSpaceProvisioner:
+    """Provide the mcp-raganything spaces-API client (REQ-010/018) as a singleton.
+
+    Same seam and pooling contract as the registry client: the spaces base
+    URL is read at CALL time and the originating credential is forwarded by
+    the adapter. The lifecycle calls run in fire-and-forget background tasks
+    with the SHORT dedicated ``rag_space_timeout`` (review C-3) — never the
+    MCP tool timeout. The lifecycle is closed by :func:`close_persistence`.
+    """
+    global _rag_space_provisioner
+    if _rag_space_provisioner is None:
+        _rag_space_provisioner = HttpRagSpaceProvisioner(
+            base_url_provider=lambda: settings.mcp_registry_base_url,
+            timeout=settings.rag_space_timeout,
+        )
+    return _rag_space_provisioner
+
+
+def _agent_rag_spaces(
+    config_repository: AgentConfigRepository | None,
+    config_store: AgentConfigStore | None = None,
+) -> AgentRagSpaces:
+    """Provide the agent RAG-space lifecycle rules over the shared provisioner.
+
+    Args:
+        config_repository: The owner-scoped agent metadata repository
+            powering the C-2 ownership validation and cascade guard.
+        config_store: The stored agent YAML object store, backing the peer
+            topology resolver that extends the owned set with each agent's
+            DECLARED subagent slugs (review C-2b).
+
+    Returns:
+        The domain service (``None``-safe ports: a missing store degrades
+        the memories purge, a missing repository degrades the ownership
+        guard fail-safe, a missing store degrades the topology resolver to
+        top-level slugs only).
+    """
+    store_files: StoreFileRepository | None
+    try:
+        store_files = _require_store_file_repository()
+    except StorageError:
+        logger.exception(LogMessage.THREAD_STORE_CASCADE_UNAVAILABLE)
+        store_files = None
+    topologies: AgentTopologyResolver | None = None
+    if config_store is not None:
+        topologies = StoreAgentTopologyResolver(config_store, agent_config_loader)
+    return AgentRagSpaces(get_rag_space_provisioner(), store_files, config_repository, topologies)
+
+
 def get_get_thread_use_case() -> GetThreadUseCase:
     """Provide a GetThreadUseCase instance."""
     return GetThreadUseCase(_require_thread_repository())
@@ -801,6 +885,7 @@ def get_create_agent_config_use_case() -> CreateAgentConfigUseCase:
         prompt_repository=_require_prompt_repository(),
         model_repository=_require_model_repository(),
         import_service=import_service,
+        rag_spaces=_agent_rag_spaces(repo, store),
     )
 
 
@@ -815,16 +900,19 @@ def get_update_agent_config_use_case() -> UpdateAgentConfigUseCase:
         prompt_repository=_require_prompt_repository(),
         model_repository=_require_model_repository(),
         mcp_registry=get_mcp_registry_client(),
+        rag_spaces=_agent_rag_spaces(repo, store),
     )
 
 
 def get_delete_agent_config_use_case() -> DeleteAgentConfigUseCase:
-    """Provide a DeleteAgentConfigUseCase instance."""
+    """Provide a DeleteAgentConfigUseCase instance (REQ-018 cascade wiring)."""
     store, repo = _require_persistence()
     return DeleteAgentConfigUseCase(
         config_store=store,
         config_repository=repo,
         agent_registry=_require_agent_registry(),
+        config_loader=agent_config_loader,
+        rag_spaces=_agent_rag_spaces(repo, store),
     )
 
 

@@ -147,17 +147,13 @@ class TestPrevalidationReferencesAndSelections:
         model_repo.get.side_effect = ModelNotFoundError("not found")
         service = _fake_service(model_repo=model_repo)
         with pytest.raises(ModelNotFoundError):
-            await service._prevalidate_io(
-                _plan(model=None, model_ref="0f4c66b4-1c6f-4c05-89f2-cdc6f3277c07")
-            )
+            await service._prevalidate_io(_plan(model=None, model_ref="0f4c66b4-1c6f-4c05-89f2-cdc6f3277c07"))
 
     async def test_model_ref_metadata_is_returned_for_the_display_projection(self):
         model_repo = AsyncMock(spec=ModelRepository)
         model_repo.get.return_value = _model("referenced-model")
         service = _fake_service(model_repo=model_repo)
-        referenced = await service._prevalidate_io(
-            _plan(model=None, model_ref="0f4c66b4-1c6f-4c05-89f2-cdc6f3277c07")
-        )
+        referenced = await service._prevalidate_io(_plan(model=None, model_ref="0f4c66b4-1c6f-4c05-89f2-cdc6f3277c07"))
         assert referenced is not None and referenced.name == "referenced-model"
 
     async def test_declared_mcp_refs_are_validated_against_the_registry(self):
@@ -222,8 +218,12 @@ class TestMcpOwnershipAtMaterialization:
         registry = AsyncMock(spec=McpRegistryClient)
         service = _fake_service(registry=registry)
         creations = [
-            McpMaterialization(writer=McpServerWrite(name="root-srv", transport="http", url="http://a/mcp"), owner_agent="my-agent"),
-            McpMaterialization(writer=McpServerWrite(name="child-srv", transport="http", url="http://b/mcp"), owner_agent="helper"),
+            McpMaterialization(
+                writer=McpServerWrite(name="root-srv", transport="http", url="http://a/mcp"), owner_agent="my-agent"
+            ),
+            McpMaterialization(
+                writer=McpServerWrite(name="child-srv", transport="http", url="http://b/mcp"), owner_agent="helper"
+            ),
         ]
         refs = await service._materialize_mcp(creations, "my-agent", _CompensationLedger())
         assert refs == ["root-srv"], "only the ROOT-owned identities are returned (review C1)"

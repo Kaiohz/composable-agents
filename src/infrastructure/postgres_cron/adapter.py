@@ -43,6 +43,7 @@ async def _execute_dml(session: AsyncSession, stmt: Update | Insert) -> CursorRe
     """
     return cast("CursorResult[Any]", await session.execute(stmt))
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -147,14 +148,18 @@ class PostgresCronRepository(CronRepository):
         async with AsyncSession(self._engine, expire_on_commit=False) as session:
             try:
                 rows = (
-                    await session.execute(
-                        select(CronModel).where(
-                            CronModel.enabled.is_(True),
-                            CronModel.next_run_at.is_not(None),
-                            CronModel.next_run_at <= now,
+                    (
+                        await session.execute(
+                            select(CronModel).where(
+                                CronModel.enabled.is_(True),
+                                CronModel.next_run_at.is_not(None),
+                                CronModel.next_run_at <= now,
+                            )
                         )
                     )
-                ).scalars().all()
+                    .scalars()
+                    .all()
+                )
                 return [_to_cron(m) for m in rows]
             except SQLAlchemyError as e:
                 raise StorageError(ErrorMessage.CRON_FAILED_LIST.format(error=e)) from e
@@ -393,9 +398,7 @@ class PostgresCronRunRepository(CronRunRepository):
                 stmt = (
                     update(CronRunModel)
                     .where(
-                        CronRunModel.status.in_(
-                            [CronRunStatus.QUEUED.value, CronRunStatus.RUNNING.value]
-                        ),
+                        CronRunModel.status.in_([CronRunStatus.QUEUED.value, CronRunStatus.RUNNING.value]),
                         CronRunModel.created_at < older_than,
                         or_(
                             CronRunModel.started_at.is_(None),
@@ -508,13 +511,17 @@ class PostgresCronRunRepository(CronRunRepository):
                 # client input, this keeps every internal caller safe too.
                 safe_limit = max(1, min(limit, 200))
                 rows = (
-                    await session.execute(
-                        select(CronRunModel)
-                        .where(CronRunModel.cron_id == UUID(cron_id))
-                        .order_by(CronRunModel.created_at.desc(), CronRunModel.id.desc())
-                        .limit(safe_limit)
+                    (
+                        await session.execute(
+                            select(CronRunModel)
+                            .where(CronRunModel.cron_id == UUID(cron_id))
+                            .order_by(CronRunModel.created_at.desc(), CronRunModel.id.desc())
+                            .limit(safe_limit)
+                        )
                     )
-                ).scalars().all()
+                    .scalars()
+                    .all()
+                )
                 return [_to_run(m) for m in rows]
             except SQLAlchemyError as e:
                 raise StorageError(ErrorMessage.CRON_RUN_LIST_FAILED.format(cron_id=cron_id, error=e)) from e

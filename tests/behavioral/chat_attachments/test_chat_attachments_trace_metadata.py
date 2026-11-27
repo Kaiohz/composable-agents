@@ -38,9 +38,7 @@ async def _invoke_mixed(client, headers, thread_id):
 class TestHumanMessageTraceMetadata:
     """REQ-020 / REQ-021."""
 
-    async def test_human_message_event_records_attachment_metadata(
-        self, client, users, stub_llm, mcp_files
-    ):
+    async def test_human_message_event_records_attachment_metadata(self, client, users, stub_llm, mcp_files):
         thread_id = await agent_with_thread(client, users["a"]["headers"])
         resp = await _invoke_mixed(client, users["a"]["headers"], thread_id)
         assert resp.status_code == 200, resp.text
@@ -121,9 +119,9 @@ class TestMessageProjection:
             assert not extra_keys, f"internal refs must not leak into the projection: {extra_keys}"
 
         # The projected metadata must not contain the temporary rustfs path.
-        assert (
-            "chat_tmp/" not in json.dumps(attachments)
-        ), "the internal cleanup ref (chat_tmp/...) must not be exposed (REQ-023)"
+        assert "chat_tmp/" not in json.dumps(attachments), (
+            "the internal cleanup ref (chat_tmp/...) must not be exposed (REQ-023)"
+        )
 
         # History (turn-based projection) exposes the same metadata.
         history = await client.get(f"/api/v1/threads/{thread_id}/history", headers=users["a"]["headers"])

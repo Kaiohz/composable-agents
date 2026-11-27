@@ -105,7 +105,9 @@ class TestRunNow:
         stub_llm.reset()
         cron = await _cron_with_fast_agent(client, users)
         cron_id = cron["id"]
-        disabled = await client.patch(f"/api/v1/crons/{cron_id}", headers=users["a"]["headers"], json={"enabled": False})
+        disabled = await client.patch(
+            f"/api/v1/crons/{cron_id}", headers=users["a"]["headers"], json={"enabled": False}
+        )
         assert disabled.status_code == 200
 
         run_now = await client.post(f"/api/v1/crons/{cron_id}/run", headers=users["a"]["headers"])
@@ -228,8 +230,7 @@ class TestManualOverlap:
         assert len(succeeded) == 1, f"Overlap must not produce concurrent invocations: {runs}"
         # The overlap outcome is explicit: rejected with 409 or recorded skipped.
         assert second.status_code == 409 or len(skipped) >= 1, (
-            f"Manual overlap must be an explicit conflict/skipped outcome: "
-            f"http={second.status_code}, runs={runs}"
+            f"Manual overlap must be an explicit conflict/skipped outcome: http={second.status_code}, runs={runs}"
         )
 
         # A skipped overlap does not create a thread (CRN-004) — exactly one
@@ -261,6 +262,7 @@ def terminal_run_predicate(client, headers, cron_id: str, status: str, expected_
 
 async def _has_terminal_run(client, headers, cron_id: str, status: str, expected_min: int = 1, timeout: float = 20.0):
     """Poll run history until ``expected_min`` runs reach ``status`` (or timeout)."""
+
     async def check():
         runs = await _runs_for(client, headers, cron_id)
         matches = [r for r in runs if r["status"] == status]

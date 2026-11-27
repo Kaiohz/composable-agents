@@ -84,9 +84,7 @@ def upgrade() -> None:
     op.execute("CREATE INDEX IF NOT EXISTS ix_cron_runs_history ON cron_runs (cron_id, created_at);")
     op.execute("CREATE INDEX IF NOT EXISTS ix_cron_runs_user_id ON cron_runs (user_id);")
     op.execute("CREATE INDEX IF NOT EXISTS ix_crons_user_id ON crons (user_id);")
-    op.execute(
-        "CREATE INDEX IF NOT EXISTS ix_crons_due_scan ON crons (next_run_at) WHERE enabled IS TRUE;"
-    )
+    op.execute("CREATE INDEX IF NOT EXISTS ix_crons_due_scan ON crons (next_run_at) WHERE enabled IS TRUE;")
     for table in _TABLES:
         op.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;")
         op.execute(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY;")

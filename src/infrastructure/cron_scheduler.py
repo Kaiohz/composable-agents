@@ -70,7 +70,7 @@ async def stop_scheduler_loop(task: asyncio.Task | None) -> None:
         return
     task.cancel()
     results = await asyncio.gather(task, return_exceptions=True)
-    for result in (results if isinstance(results, list) else [results]):
+    for result in results if isinstance(results, list) else [results]:
         if isinstance(result, asyncio.CancelledError):
             # Expected: the loop was cancelled on shutdown (this pass).
             logger.info(LogMessage.CRON_SCHEDULER_LOOP_STOPPED)

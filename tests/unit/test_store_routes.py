@@ -348,6 +348,72 @@ class TestDeleteStoreFileRoute:
 # -- GET /api/v1/store/skills/{skill_name}/usage --------------------------------
 
 
+class TestMemoriesPathShapeValidation:
+    """QA BUG-005: ``/memories/...`` paths on the REST store-file route
+    enforce REQ-015 EXACTLY like the MCP memories boundary (agent-segment
+    charset + exactly one nesting segment); deeper nesting and invalid
+    segments are rejected, and every OTHER prefix keeps the general
+    ``normalize_store_path`` contract (skills, agent namespaces)."""
+
+    async def test_put_rejects_invalid_agent_segment(self, client: AsyncClient, mock_put_use_case: AsyncMock) -> None:
+        # Act
+        resp = await client.put("/api/v1/store/files/memories/Bad_Slug!/qa-bad.md", json={"content": "x"})
+
+        # Assert — StoreFileNotFoundError (mapped to 404), nothing stored
+        assert resp.status_code == 404
+        mock_put_use_case.execute.assert_not_awaited()
+
+    async def test_put_rejects_deeper_nesting(self, client: AsyncClient, mock_put_use_case: AsyncMock) -> None:
+        # Act
+        resp = await client.put("/api/v1/store/files/memories/agent-x/deeper/qa-too-deep.md", json={"content": "x"})
+
+        # Assert
+        assert resp.status_code == 404
+        mock_put_use_case.execute.assert_not_awaited()
+
+    async def test_get_rejects_invalid_agent_segment(self, client: AsyncClient, mock_get_use_case: AsyncMock) -> None:
+        # Act
+        resp = await client.get("/api/v1/store/files/memories/Bad_Slug!/qa-bad.md")
+
+        # Assert
+        assert resp.status_code == 404
+        mock_get_use_case.execute.assert_not_awaited()
+
+    async def test_delete_rejects_deeper_nesting(self, client: AsyncClient, mock_delete_use_case: AsyncMock) -> None:
+        # Act
+        resp = await client.delete("/api/v1/store/files/memories/agent-x/deeper/obsolete.md")
+
+        # Assert
+        assert resp.status_code == 404
+        mock_delete_use_case.execute.assert_not_awaited()
+
+    async def test_put_accepts_flat_and_single_segment_agent_shapes(
+        self, client: AsyncClient, mock_put_use_case: AsyncMock
+    ) -> None:
+        # Arrange
+        mock_put_use_case.execute = AsyncMock(return_value="x")
+
+        # Act + Assert — the two REQ-015 shapes stay accepted
+        for path, expected in (
+            ("memories/notes.md", "/memories/notes.md"),
+            ("memories/agent-x/notes.md", "/memories/agent-x/notes.md"),
+        ):
+            resp = await client.put(f"/api/v1/store/files/{path}", json={"content": "x"})
+            assert resp.status_code == 200, (path, resp.text)
+            assert resp.json()["path"] == expected
+
+    async def test_non_memories_prefixes_keep_the_general_contract(
+        self, client: AsyncClient, mock_put_use_case: AsyncMock
+    ) -> None:
+        """Skills and agent namespaces are NOT scoped by REQ-015: deeper
+        shapes keep working (unchanged general-store behavior)."""
+        mock_put_use_case.execute = AsyncMock(return_value="x")
+
+        resp = await client.put("/api/v1/store/files/skills/rag/sub/deep/SKILL.md", json={"content": "x"})
+        assert resp.status_code == 200
+        assert resp.json()["path"] == "/skills/rag/sub/deep/SKILL.md"
+
+
 class TestSkillUsageRoute:
     """Tests for GET /api/v1/store/skills/{skill_name}/usage."""
 

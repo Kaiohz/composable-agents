@@ -72,6 +72,59 @@ class LogMessage(StrEnum):
     AGENT_CONFIG_METADATA_SAVED = "Saved agent config metadata '%s'"
     AGENT_CONFIG_METADATA_DELETED = "Deleted agent config metadata '%s'"
     AGENT_CONFIG_LOADED_FROM_STORE = "Loaded agent config '%s' from store"
+    # --- RAG spaces lifecycle (scope-rag-memories REQ-010/018) ---
+    RAG_SPACE_FORWARDING = "RAG spaces request forwarded (method=%s url=%s)"
+    RAG_SPACE_FORWARD_FAILED = "RAG spaces request failed (reason=%s)"
+    RAG_SPACE_PROVISION_FAILED = (
+        "RAG space provisioning failed for '%s' (reason=%s); continuing best-effort — the space is "
+        "created lazily on first use (REQ-018)"
+    )
+    RAG_SPACE_DEPROVISION_FAILED = (
+        "RAG space deprovisioning failed for '%s' (reason=%s); continuing best-effort (REQ-018)"
+    )
+    RAG_SPACE_OWNERSHIP_SKIPPED = (
+        "Skipping RAG-space cascade for slug '%s' (agent '%s'): an existing top-level agent owns that "
+        "space — intra-user isolation guard (C-2)"
+    )
+    RAG_SPACE_OWNERSHIP_UNRESOLVED = (
+        "Could not resolve the agent-name set for the RAG-space ownership guard of '%s' (reason=%s); "
+        "cascading fails safe"
+    )
+    RAG_SPACE_DIFF_BASIS_UNAVAILABLE = (
+        "Stored agent YAML unreadable for '%s' — the spaces update diff degrades to provision-only (reason=%s)"
+    )
+    RAG_SPACE_TASK_FAILED = "RAG-space lifecycle background task failed unexpectedly (reason=%s)"
+    RAG_SPACE_PENDING_DRAINED = "Drained %d pending RAG-space lifecycle background task(s) on shutdown"
+    RAG_SPACE_CLIENT_CLOSED = "RAG-space provisioning HTTP client closed"
+    RAG_SPACE_CLIENT_CLOSE_FAILED = "Error closing the RAG-space provisioning HTTP client"
+    RAG_SPACE_SLUG_COLLISION_LEGACY = (
+        "Agent '%s' shares the mapped space slug '%s' with the pre-existing agent '%s' (legacy pair "
+        "predating the create-time validation) — the update proceeds; new subagent collisions are still "
+        "rejected and the documented escape is renaming one agent (delete + re-create)"
+    )
+    RAG_SPACE_PROVISION_SKIPPED_GONE = (
+        "Skipping RAG-space provisioning for '%s' — the agent no longer exists (create→delete race, "
+        "review iter-5 I-5); no orphan space is left behind"
+    )
+    RAG_SPACE_RESERVED_SLUG_SKIPPED = (
+        "Refusing to cascade the reserved scope slug '%s' (agent '%s') — the personal default scope is "
+        "never deprovisioned or purged (review N-1)"
+    )
+    AGENT_TOPOLOGY_UNRESOLVED = (
+        "Peer agent topology could not be resolved for '%s' (reason=%s) — the OWNED SET is unresolvable "
+        "and the cascade narrows to the agent's own slug (fail-safe, review F-1)"
+    )
+    AGENT_TOPOLOGY_YAML_OVERSIZED = (
+        "Stored agent YAML for '%s' exceeds the %d-byte write cap — the peer topology is treated as "
+        "unresolvable to keep the cascade read bounded (review NV-1)"
+    )
+    AGENT_TOPOLOGY_FOREIGN_DEFINITION = (
+        "Stored agent definition for '%s' self-identifies as '%s' (name-keyed store) — the foreign "
+        "definition never influences the owned set (review F-2)"
+    )
+    AGENT_MEMORIES_PURGE_FAILED = (
+        "Agent memories purge of prefix '%s' failed (reason=%s); continuing best-effort (REQ-018)"
+    )
     BUILTIN_AGENT_RESOLVED = "Resolved built-in assistant definition (user=%s customized=%s)"
     BUILTIN_CUSTOMIZATION_UPDATING = "Updating built-in assistant customization (user=%s)"
     BUILTIN_CUSTOMIZATION_UPDATED = "Updated built-in assistant customization (user=%s)"
@@ -213,9 +266,7 @@ class LogMessage(StrEnum):
     AGENT_MCP_REFS_RESOLVED = "Resolved %d MCP registry configs (%d refs requested)"
 
     # --- Builtin selective MCP mounting (REQ-BUILTIN-003) ---
-    BUILTIN_MCP_SELECTION_APPLIED = (
-        "Built-in assistant mounts %d selected user MCP server(s) (user=%s)"
-    )
+    BUILTIN_MCP_SELECTION_APPLIED = "Built-in assistant mounts %d selected user MCP server(s) (user=%s)"
 
     # --- Agent import (create-time YAML materialization, spec agent-resource-import) ---
     AGENT_IMPORT_PREVALIDATION_FAILED = "Agent import prevalidation failed (agent=%s): %s"

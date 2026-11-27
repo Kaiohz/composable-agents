@@ -64,7 +64,7 @@ class _StripPrefix:
     async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001
         if scope["type"] in ("http", "websocket") and scope.get("path", "").startswith(self._prefix):
             scope = dict(scope)
-            remainder = scope["path"][len(self._prefix):]
+            remainder = scope["path"][len(self._prefix) :]
             scope["path"] = f"/mcp{remainder}"
         await self._app(scope, receive, send)
 
