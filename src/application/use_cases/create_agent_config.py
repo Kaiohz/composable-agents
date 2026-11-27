@@ -1,6 +1,8 @@
 import logging
 from datetime import UTC, datetime
 
+import yaml  # type: ignore[import-untyped]
+
 from src.application.services.agent_import_service import AgentImportService
 from src.application.use_cases._subagent_ref_utils import validate_subagent_refs
 from src.domain.entities.agent_config import AgentConfig
@@ -85,10 +87,16 @@ class CreateAgentConfigUseCase:
             # C-2 (option a): reject a topology whose mapped slugs collide
             # with another existing agent's slug — shared slugs mean shared
             # RAG spaces. Fail-fast BEFORE any flow persists anything.
-            pre_parsed = self._config_loader.load_from_string(yaml_content)
-            await self._rag_spaces.validate_space_ownership(
-                pre_parsed.name, [subagent.name for subagent in pre_parsed.subagents]
-            )
+            # The topology is read from the RAW mapping (NOT pydantic): the
+            # import's inline file-definitions only normalize INSIDE the
+            # import flow, so a preliminary pydantic load would reject valid
+            # imports (main PR #47's normalized-target contract).
+            topology = self._raw_topology(yaml_content)
+            if topology is not None:
+                yaml_name, subagent_names = topology
+                await self._rag_spaces.validate_space_ownership(
+                    yaml_name if isinstance(yaml_name, str) and yaml_name else name, subagent_names
+                )
         if self._import_service is not None:
             config = await self._import_service.import_agent(name, yaml_content)
         else:
@@ -101,6 +109,27 @@ class CreateAgentConfigUseCase:
 
         logger.info(LogMessage.AGENT_CONFIG_CREATED_UC, name)
         return config
+
+    def _raw_topology(self, yaml_content: str) -> tuple[object, list[str]] | None:
+        """Best-effort raw read of one import yaml's topology for the guard.
+
+        Returns ``(yaml_name, subagent_names)`` or ``None`` when the document
+        is not a mapping (the import itself will produce the proper error).
+        Deliberately NOT pydantic: the raw definitions normalize only inside
+        the import flow.
+        """
+        try:
+            raw = yaml.safe_load(yaml_content)
+        except yaml.YAMLError:
+            return None
+        if not isinstance(raw, dict):
+            return None
+        subagent_names = [
+            sub["name"]
+            for sub in (raw.get("subagents") or [])
+            if isinstance(sub, dict) and isinstance(sub.get("name"), str)
+        ]
+        return raw.get("name"), subagent_names
 
     async def _legacy_create(self, name: str, yaml_content: str) -> AgentConfig:
         """Parse, validate then store the YAML as-is (pre-materialization flow).
