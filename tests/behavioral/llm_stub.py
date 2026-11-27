@@ -109,20 +109,28 @@ class StubLlmApp:
         if self.mode.startswith("slow:"):
             await asyncio.sleep(float(self.mode.split(":", 1)[1]))
 
-        # Scripted non-streaming completions (composable-mcp suite only):
-        # a streaming request deliberately falls through to the default path,
-        # so existing streaming behaviour is untouched.
-        if self._script and not payload.get("stream"):
+        # Scripted completions (composable-mcp suite + one-shot runs): consumed
+        # BOTH for non-streaming and streaming requests. With the streaming
+        # agent factory the request body carries ``stream: true`` and expects
+        # SSE chunks — the script is converted into a chunk stream (content
+        # split progressively, tool_call deltas, usage chunk when the client
+        # requests include_usage).
+        script_mode = bool(self._script)
+        include_usage = bool((payload.get("stream_options") or {}).get("include_usage"))
+        if script_mode:
             await self._record(headers, payload)
-            await self._json(send, 200, self._scripted_completion(payload))
+            scripted = self._scripted_completion(payload)
+            if payload.get("stream"):
+                await self._scripted_stream_reply(payload, scripted, send, include_usage)
+            else:
+                await self._json(send, 200, scripted)
             return
-
-        await self._record(headers, payload)
 
         model = payload.get("model", "stub-model")
         created = int(time.time())
+        await self._record(headers, payload)
         if payload.get("stream"):
-            await self._stream_reply(send, model, created)
+            await self._stream_reply(send, model, created, include_usage and self._usage is not None)
         else:
             await self._json(send, 200, self._completion(model, created))
 
@@ -190,7 +198,7 @@ class StubLlmApp:
         }
         return f"data: {json.dumps(chunk)}\n\n"
 
-    async def _stream_reply(self, send, model: str, created: int) -> None:
+    async def _stream_reply(self, send, model: str, created: int, include_usage: bool = False) -> None:
         await send(
             {
                 "type": "http.response.start",
@@ -205,10 +213,90 @@ class StubLlmApp:
             self._chunk(model, created, {"role": "assistant"}, None),
             self._chunk(model, created, {"content": "stub-ok"}, None),
             self._chunk(model, created, {}, "stop"),
-            "data: [DONE]\n\n",
         ]
+        if include_usage:
+            chunks.append(
+                "data: "
+                + json.dumps(
+                    {
+                        "id": "chatcmpl-stub",
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [],
+                        "usage": dict(self._usage),
+                    }
+                )
+                + "\n\n"
+            )
+        chunks.append("data: [DONE]\n\n")
         for chunk in chunks:
             await send({"type": "http.response.body", "body": chunk.encode(), "more_body": True})
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    async def _scripted_stream_reply(self, payload: dict, scripted: dict, send, include_usage: bool) -> None:
+        """Stream one SCRIPTED completion (converted from its non-streaming
+        shape) as SSE chunks: progressive content, one delta per tool_call,
+        closing usage chunk when the client requested ``include_usage``."""
+        model = scripted["model"]
+        created = scripted["created"]
+        message = scripted["choices"][0]["message"]
+        finish = scripted["choices"][0].get("finish_reason") or "stop"
+        carry_usage = include_usage and scripted.get("usage") is not None
+
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [
+                    (b"content-type", b"text/event-stream"),
+                    (b"cache-control", b"no-cache"),
+                ],
+            }
+        )
+
+        content = message.get("content") or ""
+        if content:
+            # Progressive content: the first fragment rides the role chunk,
+            # the second arrives as its own delta (real streaming contract).
+            split = max(1, len(content) // 2)
+            first = self._chunk(model, created, {"role": "assistant", "content": content[:split]}, None)
+            await send({"type": "http.response.body", "body": first.encode(), "more_body": True})
+            fragment = content[split:]
+            if fragment:
+                second = self._chunk(model, created, {"content": fragment}, None)
+                await send({"type": "http.response.body", "body": second.encode(), "more_body": True})
+        else:
+            first = self._chunk(model, created, {"role": "assistant"}, None)
+            await send({"type": "http.response.body", "body": first.encode(), "more_body": True})
+
+        for index, call in enumerate(message.get("tool_calls") or []):
+            delta = {
+                "index": index,
+                "id": call.get("id") or f"call_{index}",
+                "type": "function",
+                "function": {
+                    "name": call.get("name") or (call.get("function") or {}).get("name") or "",
+                    "arguments": call.get("arguments") or (call.get("function") or {}).get("arguments") or "{}",
+                },
+            }
+            chunk = self._chunk(model, created, {"tool_calls": [delta]}, None)
+            await send({"type": "http.response.body", "body": chunk.encode(), "more_body": True})
+
+        stop = self._chunk(model, created, {}, finish)
+        await send({"type": "http.response.body", "body": stop.encode(), "more_body": True})
+        if carry_usage:
+            usage_chunk = {
+                "id": "chatcmpl-stub",
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [],
+                "usage": dict(scripted["usage"]),
+            }
+            body = f"data: {json.dumps(usage_chunk)}\n\n"
+            await send({"type": "http.response.body", "body": body.encode(), "more_body": True})
+        await send({"type": "http.response.body", "body": b"data: [DONE]\n\n", "more_body": False})
         await send({"type": "http.response.body", "body": b"", "more_body": False})
 
     @staticmethod

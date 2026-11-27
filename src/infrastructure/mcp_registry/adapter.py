@@ -174,6 +174,7 @@ class HttpMcpRegistryClient(McpRegistryClient):
         timeout: float = 30.0,
         prefix: str = REGISTRY_PREFIX,
         transport: httpx.AsyncBaseTransport | None = None,
+        internal_rewrite_provider=None,
     ) -> None:
         """Wire the adapter.
 
@@ -186,15 +187,42 @@ class HttpMcpRegistryClient(McpRegistryClient):
             prefix: REST prefix of the registry server API.
             transport: Optional httpx transport override (used by tests to
                 drive the adapter without a real socket).
+            internal_rewrite_provider: Optional zero-arg callable returning a
+                ``(public_origin, internal_base)`` pair. When set, reveal URLs
+                starting with the public origin are rewritten onto the
+                internal base for SERVER-SIDE executions — the pod egress to
+                the public ingress (DNS/cloudflared) is unreliable while the
+                ClusterIP route always works.
         """
         self._base_url_provider = base_url_provider
         self._timeout = timeout
         self._prefix = prefix.rstrip("/")
+        self._internal_rewrite_provider = internal_rewrite_provider
         self._client = httpx.AsyncClient(
             timeout=timeout,
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
             transport=transport,
         )
+
+    def _rewrite_to_internal(self, config: McpServerConfig) -> McpServerConfig:
+        """Rewrite a public-origin URL onto the internal service base.
+
+        Registered MCP servers store their PUBLIC url; server-side tool loads
+        keep failing on flaky pod egress (DNS flakes / unreachable network)
+        while the internal ClusterIP route is always reachable. When the
+        rewrite pair is configured and the URL starts with the public origin,
+        the SCHEME+HOST are swapped and the path rides the internal base.
+        """
+        if not config.url or self._internal_rewrite_provider is None:
+            return config
+        pair = self._internal_rewrite_provider() or None
+        if not pair:
+            return config
+        public_origin, internal_base = pair
+        if config.url.startswith(public_origin):
+            rewritten = internal_base.rstrip("/") + config.url[len(public_origin):]
+            return config.model_copy(update={"url": rewritten})
+        return config
 
     async def aclose(self) -> None:
         """Release the shared HTTP client (composition-root lifecycle hook)."""
@@ -341,7 +369,7 @@ class HttpMcpRegistryClient(McpRegistryClient):
                 payload (status-only detail).
         """
         entry = await self.reveal_server(name)
-        return _to_execution_config(entry, name)
+        return self._rewrite_to_internal(_to_execution_config(entry, name))
 
     async def reveal_server(self, name: str) -> dict:
         """Resolve the RAW reveal payload (TRUSTED, REQ-037 family).

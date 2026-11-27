@@ -152,6 +152,11 @@ class Settings(BaseSettings):
     # (/files/mcp, /classical/mcp, /web/mcp, /memories/mcp) used server-side
     # when assembling the built-in assistant's toolset (REQ-036).
     builtin_mcp_base_url: str = ""
+    # PUBLIC origin stored inside registered MCP-server URLs
+    # (e.g. https://raganything.soludev.tech). server-side execution configs
+    # starting with this origin are rewritten onto builtin_mcp_base_url for
+    # tool loading (public ingress egress from the pod is unreliable).
+    mcp_registry_public_host: str = ""
     tracing: TracingSettings = TracingSettings()
     # Agent execution timeouts (seconds). The per-tool timeout isolates a hung
     # MCP tool as a recoverable ToolMessage error (agent continues). The graph

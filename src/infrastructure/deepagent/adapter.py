@@ -434,12 +434,22 @@ class DeepAgentRunner(AgentRunner):
         self,
         stream_iter,
         thread_id: str,
+        usage_sink: dict[str, Any] | None = None,
     ) -> AsyncIterator[
         tuple[
             str | None, TraceEventType, str | None, str | None, dict[str, Any] | None, str | None, dict[str, Any] | None
         ]
     ]:
-        """Yield (source, ev_type, ev_name, ev_content, ev_meta, thinking_content, usage_metadata) from the stream."""
+        """Yield (source, ev_type, ev_name, ev_content, ev_meta, thinking_content, usage_metadata) from the stream.
+
+        Args:
+            stream_iter: The graph item iterator (astream messages mode).
+            thread_id: Log context thread id.
+            usage_sink: Optional mutable dict receiving EVERY chunk's
+                ``usage_metadata`` (last chunk wins) — the terminal usage-only
+                chunk emits no trace event, so the side channel is the only
+                way the collector sees it (dashboard §1-§2).
+        """
         import time
 
         stream_start = time.monotonic()
@@ -467,6 +477,12 @@ class DeepAgentRunner(AgentRunner):
 
             source = self._extract_source(metadata)
             usage_metadata = self._extract_usage(chunk)
+            # Side-channel capture (dashboard §1-§2): the terminal usage-only
+            # chunk (empty choices) classifies into NO trace event — recording
+            # it here keeps every chunk's usage visible to the collector even
+            # when no event is emitted.
+            if usage_metadata is not None and usage_sink is not None:
+                usage_sink["usage"] = usage_metadata
             for ev_type, ev_name, ev_content, ev_meta in self._classify(chunk, metadata, source):
                 thinking_content = ev_content if ev_type == TraceEventType.THINKING and ev_content else None
                 yield source, ev_type, ev_name, ev_content, ev_meta, thinking_content, usage_metadata
@@ -523,6 +539,8 @@ class DeepAgentRunner(AgentRunner):
                 subgraphs=True,
             )
         )
+        # Side channel for per-chunk usage: see _stream_intermediate_events.
+        usage_sink: dict[str, Any] = {}
         try:
             async for (
                 source,
@@ -532,7 +550,7 @@ class DeepAgentRunner(AgentRunner):
                 ev_meta,
                 thinking_content,
                 usage_metadata,
-            ) in self._stream_intermediate_events(stream_iter, thread_id):
+            ) in self._stream_intermediate_events(stream_iter, thread_id, usage_sink):
                 if usage_metadata is not None:
                     captured_usage = usage_metadata
                 if thinking_content:
@@ -566,7 +584,9 @@ class DeepAgentRunner(AgentRunner):
         # AI_MESSAGE TraceEvent metadata under ``llm_usage`` — preserving the
         # legacy event shape otherwise (no usage ⇒ metadata stays None).
         ai_ts = datetime.now(UTC)
-        llm_usage = self._build_llm_usage(captured_usage, turn_start_ts, ai_ts)
+        # The sink is authoritative: it sees EVERY chunk (including the
+        # terminal usage-only chunk that emits no trace event).
+        llm_usage = self._build_llm_usage(usage_sink.get("usage") or captured_usage, turn_start_ts, ai_ts)
         yield self._make_trace_event(
             thread_id,
             turn_id,
