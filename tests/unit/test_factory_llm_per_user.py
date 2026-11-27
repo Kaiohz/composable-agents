@@ -53,6 +53,26 @@ class TestPerUserLlmCredentials:
             current_user_id.reset(token)
 
     @patch("src.infrastructure.deepagent.factory.create_deep_agent")
+    async def test_model_streams_with_usage_capture(self, mock_create):
+        """The provider call MUST be streamed (chat spec): tokens and reasoning
+        (GLM/OpenRouter delta.reasoning → THINKING events) land progressively in
+        the UI; ``stream_usage=True`` keeps the dashboard usage capture working
+        on the final streamed chunk."""
+        mock_create.return_value = MagicMock()
+        config = AgentConfig(name="test-agent", model="gpt-4o-mini")
+        token = current_user_id.set("u1")
+        try:
+            resolver = AsyncMock(return_value=("https://api.openai.com/v1", "sk-test"))
+
+            await create_agent_from_config(config, llm_credentials_resolver=resolver)
+
+            model = mock_create.call_args.kwargs["model"]
+            assert model.streaming is True
+            assert model.stream_usage is True
+        finally:
+            current_user_id.reset(token)
+
+    @patch("src.infrastructure.deepagent.factory.create_deep_agent")
     async def test_resolver_returns_none_raises_llm_not_configured(self, mock_create):
         # Arrange
         mock_create.return_value = MagicMock()

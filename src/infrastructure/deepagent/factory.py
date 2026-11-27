@@ -138,17 +138,16 @@ async def _resolve_model(
         # a Model resource never participates in the provider connection.
         base_url=credentials_base_url,
         api_key=SecretStr(api_key),
-        # LLM-usage capture (dashboard spec §1-§2): the LangGraph agent node
-        # invokes the model with ``ainvoke`` — a NON-streaming provider call —
-        # so the completion carries ``usage_metadata``, which the capture
-        # reads. ``streaming`` is pinned to the langchain-openai DEFAULT
-        # (False) only to keep that guarantee explicit: setting it to True
-        # would switch the provider call to a streamed one, where usage is
-        # only returned when the provider honours stream_options.include_usage
-        # (the SSE event stream itself is unaffected either way — TraceEvents
-        # still stream in turn order, and per-token realtime updates are an
-        # explicit dashboard non-goal).
-        streaming=False,
+        # REAL STREAMING (chat spec): the graph node invokes the model with
+        # ``astream`` semantics and the provider call MUST be streamed so
+        # tokens and reasoning (GLM/OpenRouter delta.reasoning → THINKING
+        # events) land progressively in the chat UI — a non-streamed call
+        # burst the whole answer in one chunk (message appeared all at once).
+        # ``stream_usage=True`` keeps the LLM-usage capture (dashboard §1-§2):
+        # the final streamed chunk carries usage_metadata, which the capture
+        # still reads.
+        streaming=True,
+        stream_usage=True,
     )
 
 
