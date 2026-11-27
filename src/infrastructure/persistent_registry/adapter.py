@@ -319,9 +319,13 @@ class PersistentAgentRegistry(AgentRegistry):
         dynamic_tools: list = []
         degraded: list[dict] = []
         if self._builtin_resolver is not None:
+            # Rebase semantics: an UNcustomized built-in (the platform
+            # default config) keeps the LEGACY full-registry mounting (the
+            # REQ-004/005 auth-mode behavioral contract); a CUSTOMIZED one
+            # mounts exactly its explicitly selected servers (REQ-BUILTIN-003).
             dynamic_tools, degraded = await self._builtin_resolver.resolve_dynamic_tools(
                 reserved_names=reserved,
-                selected_refs=config.mcp_refs,
+                selected_refs=config.mcp_refs if config.is_customized else None,
             )
         self._record_degraded_capabilities(uid, degraded)
 
