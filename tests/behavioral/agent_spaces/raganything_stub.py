@@ -228,6 +228,19 @@ class RagAnythingStubApp:
             self.entries[name] = entry
             await self._json(send, 201, self._masked_entry(entry))
             return
+        if path == REGISTRY_PREFIX + "/validate" and method == "POST":
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            # The deployed registry answers a validated candidate with the
+            # McpServerValidationReport shape (name/valid/tool_count).
+            await self._json(
+                send,
+                200,
+                {"name": str(payload.get("name") or ""), "valid": True, "tool_count": 1, "errors": []},
+            )
+            return
         segments = [segment for segment in path.split("/") if segment]
         if len(segments) == 6 and segments[:3] == ["api", "v1", "mcp"] and segments[3] == "servers":
             name = segments[4]

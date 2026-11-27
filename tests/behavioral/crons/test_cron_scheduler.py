@@ -263,7 +263,9 @@ class TestFailurePolicy:
         runs_after_second = await _scheduled_runs(client, users["a"]["headers"], cron_id)
         assert len(runs_after_second) == 1, f"Failed occurrence must not be retried: {runs_after_second}"
 
-    async def test_agent_gaining_user_placeholder_fails_run_explicitly(self, stack, client, users, stub_llm, stub_registry):
+    async def test_agent_gaining_user_placeholder_fails_run_explicitly(
+        self, stack, client, users, stub_llm, stub_registry
+    ):
         """§10.13 / §9: an agent edited LATER to require ${USER_JWT} must fail
         its next accepted run explicitly — never borrowing the interactive
         user's JWT/API key. Under the resource-only regime the edit registers
@@ -297,7 +299,7 @@ class TestFailurePolicy:
         prompt_id = current.json()["prompt_ref"]["id"]
         yaml_with_placeholder = (
             f"name: {agent_name}\n"
-            "description: \"Now credential-hungry.\"\n"
+            'description: "Now credential-hungry."\n'
             "tools: []\n"
             "debug: false\n"
             "mcp_refs:\n"

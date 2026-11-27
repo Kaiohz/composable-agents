@@ -43,6 +43,7 @@ import pytest
 from tests.behavioral.agent_spaces.conftest import (
     create_agent_ok,
     delete_agent,
+    lifecycle_update_yaml,
     lifecycle_yaml,
     store_get,
     store_list,
@@ -246,6 +247,7 @@ class TestDeleteCascadesSpacesAndMemories:
         for path, content in (
             (f"/memories/{agent}/notes.md", "AGENT NOTES"),
             (f"/memories/{agent}/prefs.md", "AGENT PREFS"),
+            (f"/memories/{sub}/prefs.md", "SUB PREFS"),  # the materialized sub-agent's own memory
         ):
             seeded = await store_put(client, headers_a, path, content)
             assert seeded.status_code == 200, seeded.text
@@ -258,11 +260,15 @@ class TestDeleteCascadesSpacesAndMemories:
         deleted = await delete_agent(client, headers_a, agent)
         assert deleted.status_code == 204, deleted.text
 
+        # Rebase semantics (origin/main PR #47): inline sub-agents are
+        # MATERIALIZED into real agents named after themselves — the parent's
+        # DELETE cascades ONLY the parent's OWN space. The materialized
+        # real agent survives and keeps owning its space + memories.
         async def _deprovisioned():
             deletes = [call for call in raganything_stub.app.space_calls() if call["method"] == "DELETE"]
-            return {agent, sub} <= set(raganything_stub.app.call_slugs("DELETE")), deletes
+            return agent in set(raganything_stub.app.call_slugs("DELETE")), deletes
 
-        await _poll_for(_deprovisioned, "the agent and subagent spaces must be deprovisioned on agent deletion")
+        await _poll_for(_deprovisioned, "the parent's own space must be deprovisioned on agent deletion")
 
         async def _purged():
             remaining = await store_list(client, headers_a, f"/memories/{agent}/")
@@ -274,6 +280,20 @@ class TestDeleteCascadesSpacesAndMemories:
         foreign_kept = await store_get(client, headers_b, f"/memories/{agent}/b-notes.md")
         assert foreign_kept.status_code == 200, (
             "another user's same-named /memories/{agent}/ namespace must never be purged"
+        )
+
+        sub_kept = await store_get(client, headers_a, f"/memories/{sub}/prefs.md")
+        assert sub_kept.status_code == 200, (
+            "the MATERIALIZED sub-agent's memories must survive the parent deletion "
+            "(the real sub-agent still owns its space; review F-1/C-2b parity)"
+        )
+
+        async def _sub_space_never_deleted():
+            return sub not in raganything_stub.app.call_slugs("DELETE"), None
+
+        await _poll_for(
+            _sub_space_never_deleted,
+            "the materialized sub-agent's space must never be cascade-deleted by the parent deletion",
         )
 
     async def test_delete_succeeds_even_when_space_api_is_failing(self, client, users, raganything_stub):
@@ -298,7 +318,12 @@ class TestDeleteCascadesSpacesAndMemories:
     async def test_delete_then_recreate_starts_a_fresh_space(self, client, users, raganything_stub):
         """Spec edge (documented no-rename semantics): deleting and re-creating
         the same agent name deprovisions, purges, then re-provisions — the
-        recreated agent starts with an EMPTY space."""
+        recreated agent starts with an EMPTY space.
+
+        Rebase semantics (origin/main PR #47): the first creation MATERIALIZES
+        the inline sub-agent into a real persisted agent named after it — the
+        re-creation therefore declares it as an ``agent_ref`` (a re-inlined
+        body would collide with the materialized row's name)."""
         unique = uuid.uuid4().hex[:8]
         agent = f"agent-{unique}"
         sub = f"sub-{unique}"
@@ -321,8 +346,27 @@ class TestDeleteCascadesSpacesAndMemories:
 
         await _poll_for(_deprovisioned, "the space must be deprovisioned on deletion")
 
-        # Re-create the SAME name: the space starts fresh.
-        await create_agent_ok(client, users["a"]["headers"], lifecycle_yaml(agent, [sub]), agent)
+        # Re-create the SAME name: the materialized sub-agent is a real
+        # INDEPENDENT agent now (re-referencing it from the recreated
+        # topology would be a self-cycle: subagent name == agent_ref), and
+        # the imported materialization REFUSES to re-create the derived
+        # `<agent>-model` resource (REQ-TX-002: the first import's model
+        # resource survives its agent's deletion). The re-creation therefore
+        # REUSES the surviving model via `model_ref` (resolved from the
+        # first creation's provisioning log via the model catalog lookup)
+        # — resolved dynamically here from the model repository listing.
+        # Both derived resources of the FIRST import survive it: re-declare
+        # them BY REFERENCE (model_ref + prompt_ref) instead of re-materializing.
+        models = await client.get("/api/v1/models", headers=users["a"]["headers"])
+        prompts = await client.get("/api/v1/prompts", headers=users["a"]["headers"])
+        assert models.status_code == 200 and prompts.status_code == 200, (models.text, prompts.text)
+        model_ref = [m["id"] for m in models.json() if m["name"] == f"{agent}-model"]
+        prompt_ref = [p["id"] for p in prompts.json() if p["name"] == f"{agent}-prompt"]
+        assert model_ref and prompt_ref, (
+            f"the surviving derived resources must be reusable: {models.text} {prompts.text}"
+        )
+        recreate_yaml = f"name: {agent}\nmodel_ref: {model_ref[0]}\nprompt_ref: {{id: {prompt_ref[0]}}}\ndebug: false\n"
+        await create_agent_ok(client, users["a"]["headers"], recreate_yaml, agent)
 
         async def _reprovisioned():
             posts = [call for call in raganything_stub.app.space_calls() if call["method"] == "POST"]
@@ -340,9 +384,15 @@ class TestDeleteCascadesSpacesAndMemories:
 class TestUpdateDiffsSubagentSpaces:
     async def test_update_removes_and_provisions_subagent_spaces(self, client, users, raganything_stub):
         """REQ-018: ``UpdateAgentConfigUseCase`` diffs the subagent spaces —
-        a removed subagent's space is DEPROVISIONED, a newly added one is
-        PROVISIONED, and the agent's OWN space is left intact (no
-        self-deprovision)."""
+        a newly added subagent's space is PROVISIONED, and the agent's OWN
+        space is left intact (no self-deprovision).
+
+        Rebase semantics (origin/main PR #47): inline sub-agents are
+        MATERIALIZED into real persisted agents named after themselves — the
+        REMOVED sub-agent's space is therefore NOT deprovisioned: the real
+        materialized agent survives the topological removal and keeps owning
+        its space (the cascade ownership guard protects every real agent's
+        space; review F-1/C-2b parity)."""
         unique = uuid.uuid4().hex[:8]
         agent = f"agent-{unique}"
         kept_sub = f"sub-kept-{unique}"
@@ -357,26 +407,36 @@ class TestUpdateDiffsSubagentSpaces:
 
         await _poll_for(_provisioned, "the initial subagent spaces must be provisioned before the update")
 
-        await update_agent_ok(client, users["a"]["headers"], lifecycle_yaml(agent, [kept_sub, added_sub]), agent)
+        # Rebase semantics: the update declares NO inline top-level
+        # model/system_prompt (they are MATERIALIZED references after the
+        # import; the resource-only policy refuses inline values on update).
+        await update_agent_ok(client, users["a"]["headers"], lifecycle_update_yaml(agent, [kept_sub, added_sub]), agent)
 
         async def _diffed():
-            deletes = [call for call in raganything_stub.app.space_calls() if call["method"] == "DELETE"]
             posts = [call for call in raganything_stub.app.space_calls() if call["method"] == "POST"]
-            deprovisioned = removed_sub in raganything_stub.app.call_slugs("DELETE")
             provisioned = added_sub in {call["agent_slug"] for call in posts}
-            return deprovisioned and provisioned, {"deletes": deletes, "posts": posts}
+            return provisioned, {"posts": posts}
 
-        observed = await _poll_for(
-            _diffed, "the update must deprovision the removed subagent space and provision the added one"
-        )
+        observed = await _poll_for(_diffed, "the update must provision the added subagent space")
+        assert observed["posts"] is not None
 
-        # The removed subagent's space record is gone; the agent's own space STAYS.
-        assert removed_sub not in raganything_stub.app.spaces, (
-            f"the removed subagent's space must be deprovisioned: {observed!r}"
-        )
+        # The agent's own space STAYS; the added subagent's space arrives.
         assert agent in raganything_stub.app.spaces, "the agent's own space must NEVER be deprovisioned by an update"
         assert kept_sub in raganything_stub.app.spaces, "a kept subagent's space must be left untouched"
         assert added_sub in raganything_stub.app.spaces, "the added subagent's space must be provisioned"
+
+        # The REMOVED sub-agent's space is NOT deprovisioned: its real
+        # materialized agent survives and keeps owning it (F-1/C-2b parity).
+        async def _removed_not_deprovisioned():
+            return removed_sub not in raganything_stub.app.call_slugs("DELETE"), None
+
+        await _poll_for(
+            _removed_not_deprovisioned,
+            "the removed sub-agent's space must be protected (its real materialized agent survives)",
+        )
+        assert removed_sub in raganything_stub.app.spaces, (
+            "the removed subagent's space must survive (its real materialized agent still owns it)"
+        )
 
 
 class TestSpaceOwnershipGuard:
@@ -407,57 +467,71 @@ class TestSpaceOwnershipGuard:
         )
 
     async def test_delete_guard_spares_toplevel_owned_slug(self, client, users, raganything_stub):
-        """C-2 option (a), cascade layer (legacy-data case): agent B declares
-        subagent S, and a top-level agent S is created AFTERWARDS (only the
-        subagent-vs-existing-agent direction is validate-able at creation
-        time). Deleting B must deprovision/purge B's OWN space but SKIP the
-        S slug — the top-level agent S keeps its space and its memories."""
+        """C-2 option (a): a slug owned by ANOTHER persisted agent is never
+        cascade-destroyed. Rebase semantics (origin/main PR #47): inline
+        sub-agents are MATERIALIZED into real agents named after themselves,
+        so the "top-level agent named S" case is now structurally ENFORCED by
+        name availability: creating a top-level agent with a name already
+        held by another agent's materialized sub-agent is REFUSED
+        (AgentConfigAlreadyExistsError), and the holder keeps its space and
+        memories."""
         agent = f"agent-{uuid.uuid4().hex[:8]}"
         shared = f"shared-{uuid.uuid4().hex[:8]}"
 
         await create_agent_ok(client, users["a"]["headers"], lifecycle_yaml(agent, [shared]), agent)
-        await create_agent_ok(client, users["a"]["headers"], lifecycle_yaml(shared, []), shared)
 
         marker = f"SHARED-KEEP-{uuid.uuid4().hex[:6]}"
         seeded = await store_put(client, users["a"]["headers"], f"/memories/{shared}/keep.md", marker)
         assert seeded.status_code == 200, seeded.text
 
-        deleted = await delete_agent(client, users["a"]["headers"], agent)
-        assert deleted.status_code == 204, deleted.text
-
-        async def _own_space_gone():
-            owned = raganything_stub.app.call_slugs("DELETE")
-            return agent in owned, owned
-
-        await _poll_for(_own_space_gone, "the deleted agent's OWN space must be deprovisioned")
-        assert shared not in raganything_stub.app.call_slugs("DELETE"), (
-            "a slug owned by the top-level agent 'shared' must never be deprovisioned by another agent's deletion"
+        refusal = await client.post(
+            "/api/v1/agents",
+            headers=users["a"]["headers"],
+            data={"agent_name": shared},
+            files={"file": ("agent.yaml", lifecycle_yaml(shared, []).encode(), "text/yaml")},
         )
-        assert shared in raganything_stub.app.spaces, "the top-level agent's space record must survive"
+        assert refusal.status_code == 409, f"the name is held by the materialized sub-agent: {refusal.text}"
+        assert shared in raganything_stub.app.spaces, (
+            "the materialized sub-agent's space record must survive the refused creation"
+        )
         kept = await store_get(client, users["a"]["headers"], f"/memories/{shared}/keep.md")
         assert kept.status_code == 200 and kept.json()["content"] == marker, (
-            "the top-level agent's memories must survive another agent's deletion (C-2)"
+            "the materialized sub-agent's memories must survive the refused creation (C-2)"
         )
 
     async def test_delete_spares_a_subagent_slug_shared_with_another_agent(self, client, users, raganything_stub):
-        """Review C-2b (residual): two agents may each declare their own
-        subagent named ``shared`` (creation-time validation deliberately
-        accepts it — documented residual). Deleting ONE of them must not
-        deprovision ``DELETE /api/v1/spaces/{shared}`` nor purge
-        ``/memories/{shared}/`` — the peer agent claims the same slug
-        through its own declared subagent, and the ownership guard covers
-        declared-subagent slugs as well as top-level names."""
+        """Review C-2b (residual): a subagent slug shared with ANOTHER agent's
+        subagent. Rebase semantics (origin/main PR #47): the FIRST import
+        MATERIALIZES the inline sub-agent into a real persisted agent named
+        after it — the second topology re-declaring that same sub-agent name
+        is now refused AT CREATION (by the import's name-availability and by
+        this use case's RAG-space ownership validation), a STRONGER
+        guarantee than the delete-time guard: the shared slug cannot be
+        double-claimed, so it can never be destroyed while its owner lives."""
         writer = f"writer-{uuid.uuid4().hex[:8]}"
         editor = f"editor-{uuid.uuid4().hex[:8]}"
         shared_sub = f"researcher-{uuid.uuid4().hex[:8]}"
 
         await create_agent_ok(client, users["a"]["headers"], lifecycle_yaml(writer, [shared_sub]), writer)
-        await create_agent_ok(client, users["a"]["headers"], lifecycle_yaml(editor, [shared_sub]), editor)
 
         marker = f"PEER-KEEP-{uuid.uuid4().hex[:6]}"
         seeded = await store_put(client, users["a"]["headers"], f"/memories/{shared_sub}/keep.md", marker)
         assert seeded.status_code == 200, seeded.text
 
+        refused = await client.post(
+            "/api/v1/agents",
+            headers=users["a"]["headers"],
+            data={"agent_name": editor},
+            files={"file": ("agent.yaml", lifecycle_yaml(editor, [shared_sub]).encode(), "text/yaml")},
+        )
+        assert refused.status_code in (400, 409), (
+            f"the peer-claimed subagent slug must be refused at creation: {refused.text}"
+        )
+        fetched = await client.get(f"/api/v1/agents/{editor}", headers=users["a"]["headers"])
+        assert fetched.status_code == 404, "the refused editor topology must not be persisted"
+
+        # The writer keeps its own space AND its materialized sub-agent's
+        # space + memories.
         deleted = await delete_agent(client, users["a"]["headers"], writer)
         assert deleted.status_code == 204, deleted.text
 
@@ -466,14 +540,15 @@ class TestSpaceOwnershipGuard:
 
         await _poll_for(_own_space_gone, "the deleted agent's OWN space must be deprovisioned")
 
-        # The peer-claimed subagent slug is NEVER deprovisioned (skip + warn).
+        # The materialized sub-agent is a REAL persisted agent: its space is
+        # never cascade-deleted by the parent's deletion (F-1/C-2b parity).
         assert shared_sub not in raganything_stub.app.call_slugs("DELETE"), (
-            "a subagent slug claimed by another persisted agent must never be deprovisioned"
+            "the materialized sub-agent's space must never be deprovisioned by the parent's deletion"
         )
-        assert shared_sub in raganything_stub.app.spaces, "the peer-claimed subagent space must survive"
+        assert shared_sub in raganything_stub.app.spaces, "the materialized sub-agent space must survive"
         kept = await store_get(client, users["a"]["headers"], f"/memories/{shared_sub}/keep.md")
         assert kept.status_code == 200 and kept.json()["content"] == marker, (
-            "the peer agent's memories under the shared subagent slug must survive the deletion"
+            "the materialized sub-agent's memories must survive the parent's deletion (C-2)"
         )
 
 

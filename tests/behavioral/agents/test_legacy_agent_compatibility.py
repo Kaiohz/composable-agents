@@ -27,11 +27,7 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 def legacy_yaml(name: str) -> str:
     return (
-        f"name: {name}\n"
-        "model: legacy-runner-model\n"
-        'system_prompt: "Legacy legacy prompt."\n'
-        "tools: []\n"
-        "debug: false\n"
+        f'name: {name}\nmodel: legacy-runner-model\nsystem_prompt: "Legacy legacy prompt."\ntools: []\ndebug: false\n'
     )
 
 
@@ -40,7 +36,9 @@ async def seed_legacy_agent(_stack: dict, user_id: str, name: str, yaml_text: st
     import src.dependencies as deps
 
     now = datetime.now(UTC)
-    metadata = AgentConfigMetadata(name=name, model="legacy-runner-model", minio_path=f"{name}.yaml", created_at=now, updated_at=now)
+    metadata = AgentConfigMetadata(
+        name=name, model="legacy-runner-model", minio_path=f"{name}.yaml", created_at=now, updated_at=now
+    )
     async with user_rls_context(user_id):
         await deps._root.pg_repository.save(metadata)
         await deps._root.rustfs_store.put(name, yaml_text)
@@ -63,9 +61,7 @@ class TestLegacyAgentRead:
 
 
 class TestLegacyAgentExecution:
-    async def test_legacy_agent_remains_executable_with_inline_model_and_prompt(
-        self, client, users, stack, stub_llm
-    ):
+    async def test_legacy_agent_remains_executable_with_inline_model_and_prompt(self, client, users, stack, stub_llm):
         """REQ-LEGACY-001: the runner still resolves the legacy model string and
         the inline prompt for an agent created before the resource-only rule."""
         name = f"legacy-{uuid.uuid4().hex[:8]}"

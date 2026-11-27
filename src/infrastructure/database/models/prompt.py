@@ -39,9 +39,7 @@ class PromptVersionModel(Base):
         Index("ix_prompt_versions_user_id", "user_id"),
     )
 
-    prompt_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("prompts.id", ondelete="CASCADE"), nullable=False
-    )
+    prompt_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("prompts.id", ondelete="CASCADE"), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     # Stored and returned verbatim, including whitespace; empty string allowed.
     content: Mapped[str] = mapped_column(Text, nullable=False)

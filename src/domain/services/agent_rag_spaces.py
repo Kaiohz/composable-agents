@@ -226,6 +226,7 @@ class AgentRagSpaces:
         own = agent_scope_slug(agent_name)
         mapped_subs = _mapped_topology_slugs(agent_name, subagent_names)
 
+        own_subagent_slugs = {agent_scope_slug(name) for name in subagent_names}
         try:
             metadata = await self._config_repository.list_all()
         except Exception as exc:  # noqa: BLE001
@@ -235,6 +236,10 @@ class AgentRagSpaces:
         existing: dict[str, str] = {}
         for entry in metadata:
             if entry.name == agent_name:
+                continue
+            # Rebase semantics: this topology's OWN materialized sub-agents
+            # (real top-level rows named after our sub-agents) are not peers.
+            if agent_scope_slug(entry.name) in own_subagent_slugs:
                 continue
             existing.setdefault(agent_scope_slug(entry.name), entry.name)
 
@@ -360,7 +365,9 @@ class AgentRagSpaces:
         await self._purge_slugs(cascadable)
 
     # ------------------------------------------------------------------
-    async def _owned_space_slugs(self, agent_name: str) -> set[str] | None:
+    async def _owned_space_slugs(
+        self, agent_name: str, exclude_own_subagent_slugs: set[str] | None = None
+    ) -> set[str] | None:
         """Resolve the scope slugs owned by OTHER persisted agents (C-2b).
 
         The set covers every persisted agent's TOP-LEVEL slug AND the slugs
@@ -392,8 +399,15 @@ class AgentRagSpaces:
             # The caller fails safe below: an unresolvable owned set narrows the cascade to the own slug.
             logger.warning(LogMessage.RAG_SPACE_OWNERSHIP_UNRESOLVED, agent_name, safe_reason(exc))
             return None
+        excluded = exclude_own_subagent_slugs or set()
         peers = [entry.name for entry in metadata if entry.name != agent_name]
-        owned = {agent_scope_slug(name) for name in peers}
+        # Rebase semantics: inline sub-agents are MATERIALIZED into real
+        # agents named after themselves (origin/main PR #47) — a topology
+        # re-declaring its OWN subagents (create/update revalidation) must
+        # not be refused by the top-level row its own earlier import
+        # created. The CASCade guard calls this WITHOUT the exclusion so
+        # every real agent's space stays protected (F-1/C-2b parity).
+        owned = {agent_scope_slug(name) for name in peers} - excluded
         if self._topologies is None or not peers:
             return owned
         if (declared := await self._collect_declared_subagent_slugs(self._topologies, peers)) is None:
@@ -463,7 +477,7 @@ class AgentRagSpaces:
         own = agent_scope_slug(agent_name)
         others: set[str] | None = None
         if self._config_repository is not None:
-            owned = await self._owned_space_slugs(agent_name)
+            owned = await self._owned_space_slugs(agent_name, None)
             if owned is not None:
                 others = owned - {own}
         cascadable: list[str] = []

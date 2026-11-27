@@ -121,6 +121,7 @@ class TestFailureIsolation:
         """REQ-040 on the SELECTED refs (REQ-BUILTIN-003): a failing registry
         resolution degrades the selected source — never raises, never bricks
         the build; with NO selection nothing is resolved at all."""
+
         class _BrokenRegistry:
             async def get_execution_config(self, name):
                 raise McpRegistryRequestError(ErrorMessage.MCP_REGISTRY_UNAVAILABLE)
@@ -129,9 +130,7 @@ class TestFailureIsolation:
                 return None
 
         loader = _LoaderStub({})
-        tools, degraded = await _resolver(loader, _BrokenRegistry()).resolve_dynamic_tools(
-            selected_refs=["alpha"]
-        )
+        tools, degraded = await _resolver(loader, _BrokenRegistry()).resolve_dynamic_tools(selected_refs=["alpha"])
         assert [t.name for t in tools] == ["create_pdf"]
         assert degraded == [{"name": "alpha", "reason": ErrorMessage.MCP_REGISTRY_UNAVAILABLE}]
 

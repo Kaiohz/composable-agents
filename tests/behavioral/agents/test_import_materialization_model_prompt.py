@@ -163,9 +163,7 @@ class TestPromptMaterialization:
         assert len(created) == 1, f"a Prompt resource named '{agent}-prompt' must be materialized: {created}"
         assert created[0]["latest_version"] == 1
 
-        version = await client.get(
-            f"/api/v1/prompts/{created[0]['id']}/versions/1", headers=users["a"]["headers"]
-        )
+        version = await client.get(f"/api/v1/prompts/{created[0]['id']}/versions/1", headers=users["a"]["headers"])
         assert version.status_code == 200, version.text
         assert version.json()["content"] == text, "version 1 must hold the exact verbatim content"
 
@@ -189,9 +187,7 @@ class TestPromptMaterialization:
 
         created = await prompts_named(client, users["a"]["headers"], f"{agent}-prompt")
         assert len(created) == 1, created
-        version = await client.get(
-            f"/api/v1/prompts/{created[0]['id']}/versions/1", headers=users["a"]["headers"]
-        )
+        version = await client.get(f"/api/v1/prompts/{created[0]['id']}/versions/1", headers=users["a"]["headers"])
         assert version.json()["content"] == ""
 
 

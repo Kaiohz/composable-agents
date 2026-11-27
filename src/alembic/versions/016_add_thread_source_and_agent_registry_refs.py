@@ -45,9 +45,7 @@ def upgrade() -> None:
     op.execute("CREATE INDEX IF NOT EXISTS ix_threads_source ON threads (source);")
     # The global trace aggregate joins threads → trace_events by thread_id;
     # foreign keys are not auto-indexed in PostgreSQL.
-    op.execute(
-        "CREATE INDEX IF NOT EXISTS ix_trace_events_thread_id ON trace_events (thread_id, timestamp);"
-    )
+    op.execute("CREATE INDEX IF NOT EXISTS ix_trace_events_thread_id ON trace_events (thread_id, timestamp);")
 
     op.execute("ALTER TABLE agent_configs ADD COLUMN IF NOT EXISTS prompt_ref UUID NULL;")
     op.execute("ALTER TABLE agent_configs ADD COLUMN IF NOT EXISTS model_ref UUID NULL;")

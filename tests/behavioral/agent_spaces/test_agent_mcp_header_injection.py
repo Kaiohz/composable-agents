@@ -34,7 +34,6 @@ import uuid
 import pytest
 
 from tests.behavioral.agent_spaces.conftest import (
-    SUBAGENT_MODEL_YAML,
     assistant_text,
     assistant_tool_call,
     call_mcp_tool,
@@ -71,7 +70,9 @@ async def _register_stub_server(mcp_base_url, users, name: str, url: str) -> Non
 
 
 class TestTopLevelAgentHeaderInjection:
-    async def test_tool_load_connection_carries_agent_header(self, mcp_base_url, client, users, stub_llm, hdr_mcp):
+    async def test_tool_load_connection_carries_agent_header(
+        self, mcp_base_url, client, users, stub_llm, hdr_mcp, raganything_stub
+    ):
         """REQ-016: the tool-LOAD phase of a top-level agent's outbound HTTP
         MCP connection carries ``X-Composable-Agent: <agent_name>``.
 
@@ -96,7 +97,9 @@ class TestTopLevelAgentHeaderInjection:
             f"unexpected agent header values observed: {hdr_mcp.recorder.agent_header_values()!r}"
         )
 
-    async def test_tool_execution_connection_carries_agent_header(self, mcp_base_url, client, users, stub_llm, hdr_mcp):
+    async def test_tool_execution_connection_carries_agent_header(
+        self, mcp_base_url, client, users, stub_llm, hdr_mcp, raganything_stub
+    ):
         """REQ-016: the tool-CALL phase (a real tool execution over a fresh
         streamable-HTTP session) carries the same injected header."""
         agent = f"hdr-call-{uuid.uuid4().hex[:8]}"
@@ -122,7 +125,9 @@ class TestTopLevelAgentHeaderInjection:
             f"{agent!r}; observed agent headers: {hdr_mcp.recorder.agent_header_values()!r}"
         )
 
-    async def test_platform_tool_agent_injects_header_too(self, mcp_base_url, client, users, stub_llm, hdr_mcp):
+    async def test_platform_tool_agent_injects_header_too(
+        self, mcp_base_url, client, users, stub_llm, hdr_mcp, raganything_stub
+    ):
         """REQ-016: the injection applies to EVERY top-level agent build —
         including platform-tool agents (``tools: ["mcp"]``)."""
         agent = f"hdr-plat-{uuid.uuid4().hex[:8]}"
@@ -172,7 +177,9 @@ class TestScopeSlugHeaderMapping:
 
 
 class TestSubagentHeaderInjection:
-    async def test_subagent_connection_carries_subagent_header(self, mcp_base_url, client, users, stub_llm, hdr_mcp):
+    async def test_subagent_connection_carries_subagent_header(
+        self, mcp_base_url, client, users, stub_llm, hdr_mcp, raganything_stub
+    ):
         """REQ-016: top-level agent and its subagent inject DIFFERENT header
         values on their respective outbound MCP connections (per-subagent
         space): the agent's own servers see the agent name, the subagent's
@@ -198,7 +205,9 @@ class TestSubagentHeaderInjection:
             f"{hdr_mcp.recorder.agent_header_values()!r}"
         )
 
-    async def test_agent_ref_subagent_binds_subagent_space(self, mcp_base_url, client, users, stub_llm, hdr_mcp):
+    async def test_agent_ref_subagent_binds_subagent_space(
+        self, mcp_base_url, client, users, stub_llm, hdr_mcp, raganything_stub
+    ):
         """REQ-016 (per-subagent space): a subagent referencing another agent
         (``agent_ref``) loads the REFERENCED agent's servers under the
         SUBAGENT's space — every connection of that subagent carries the
@@ -224,7 +233,6 @@ class TestSubagentHeaderInjection:
             "subagents:\n"
             f"  - name: {sub}\n"
             f'    description: "Reuses {ref_agent} as a scoped sub-agent."\n'
-            f"    model: {SUBAGENT_MODEL_YAML}\n"
             f"    agent_ref: {ref_agent}\n"
         )
         result = await _run_with_stub(mcp_base_url, client, users, stub_llm, yaml_text, top)
@@ -244,7 +252,7 @@ class TestSubagentHeaderInjection:
 
 class TestAgentNamePlaceholder:
     async def test_agent_name_placeholder_resolves_to_agent_name(
-        self, mcp_base_url, client, users, stub_llm, hdr_mcp, monkeypatch
+        self, mcp_base_url, client, users, stub_llm, hdr_mcp, monkeypatch, raganything_stub
     ):
         """REQ-017: an agent YAML MCP header value containing
         ``${AGENT_NAME}`` resolves to the running agent's name (env_utils
@@ -263,7 +271,7 @@ class TestAgentNamePlaceholder:
         )
 
     async def test_agent_name_placeholder_wins_over_os_environ(
-        self, mcp_base_url, client, users, stub_llm, hdr_mcp, monkeypatch
+        self, mcp_base_url, client, users, stub_llm, hdr_mcp, monkeypatch, raganything_stub
     ):
         """Review I-6(c) / iter-5 I-9: ``${AGENT_NAME}`` resolves to the
         running agent's slug EVEN WHEN an ``AGENT_NAME`` variable is present
@@ -289,7 +297,9 @@ class TestAgentNamePlaceholder:
 
 
 class TestInjectedHeaderWinsCollision:
-    async def test_yaml_configured_collision_is_overridden(self, mcp_base_url, client, users, stub_llm, hdr_mcp):
+    async def test_yaml_configured_collision_is_overridden(
+        self, mcp_base_url, client, users, stub_llm, hdr_mcp, raganything_stub
+    ):
         """REQ-017: a YAML-configured ``x-composable-agent`` (lowercase name,
         same header case-insensitively) is overridden by the automatically
         injected header — the injected value WINS (``_merge_headers``
@@ -318,9 +328,32 @@ class TestBuiltinAssistantPersonalScope:
     ):
         """REQ-019: the built-in assistant runs under the PERSONAL scope —
         its outbound MCP connections carry NO ``X-Composable-Agent`` header
-        and no spaces provisioning is ever triggered for it."""
+        and no spaces provisioning is ever triggered for it.
+
+        Rebase semantics (main PR #46, editable built-in): user-registered
+        MCP servers are mounted for the built-in ONLY when the per-user
+        customization SELECTS them (``mcp_refs``) — the test selects the
+        registered server in the customization before the one-shot."""
         await configure_llm_credentials(client, users["a"]["headers"])
         await _register_stub_server(mcp_base_url, users, "hdr-builtin-stub", hdr_mcp.url)
+
+        # PR #46: SELECT the registered server in the built-in customization.
+        customization = (
+            "name: composable-ai-assistant\n"
+            'description: "Personalized built-in assistant."\n'
+            "tools: []\n"
+            "debug: false\n"
+            "mcp_refs:\n"
+            '  - "hdr-builtin-stub"\n'
+        )
+        customized = await client.put(
+            f"/api/v1/agents/{BUILTIN_NAME}",
+            headers=users["a"]["headers"],
+            files={"file": ("builtin.yaml", customization.encode(), "text/yaml")},
+        )
+        assert customized.status_code == 200, (
+            f"the built-in customization with the mcp_refs selection must be accepted: {customized.text}"
+        )
 
         stub_llm.script(
             assistant_tool_call("ping", {}),
@@ -329,7 +362,7 @@ class TestBuiltinAssistantPersonalScope:
         result = await one_shot_run(mcp_base_url, users["a"]["headers"], BUILTIN_NAME)
         assert result["ok"], f"the builtin assistant run must succeed: {result}"
         assert "pong" in str(result["result"]), (
-            f"the builtin must resolve and execute the user-registered server's tool: {result['result']}"
+            f"the builtin must resolve and execute the SELECTED user-registered server's tool: {result['result']}"
         )
 
         assert hdr_mcp.recorder.requests_with(header="x-composable-agent") == [], (

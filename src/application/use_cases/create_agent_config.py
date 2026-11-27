@@ -22,6 +22,7 @@ from src.domain.services.agent_registry_refs import (
 
 logger = logging.getLogger(__name__)
 
+
 class CreateAgentConfigUseCase:
     """Create a new agent configuration in persistent storage.
 
@@ -96,9 +97,7 @@ class CreateAgentConfigUseCase:
             # REQ-018 + review C-3: fire-and-forget background provisioning
             # (the task captures the caller's contextvars — credential and
             # store namespace remain the originating user's).
-            self._rag_spaces.schedule_provision_for_agent(
-                config.name, [subagent.name for subagent in config.subagents]
-            )
+            self._rag_spaces.schedule_provision_for_agent(config.name, [subagent.name for subagent in config.subagents])
 
         logger.info(LogMessage.AGENT_CONFIG_CREATED_UC, name)
         return config

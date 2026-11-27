@@ -266,9 +266,7 @@ class LogMessage(StrEnum):
     AGENT_MCP_REFS_RESOLVED = "Resolved %d MCP registry configs (%d refs requested)"
 
     # --- Builtin selective MCP mounting (REQ-BUILTIN-003) ---
-    BUILTIN_MCP_SELECTION_APPLIED = (
-        "Built-in assistant mounts %d selected user MCP server(s) (user=%s)"
-    )
+    BUILTIN_MCP_SELECTION_APPLIED = "Built-in assistant mounts %d selected user MCP server(s) (user=%s)"
 
     # --- Agent import (create-time YAML materialization, spec agent-resource-import) ---
     AGENT_IMPORT_PREVALIDATION_FAILED = "Agent import prevalidation failed (agent=%s): %s"

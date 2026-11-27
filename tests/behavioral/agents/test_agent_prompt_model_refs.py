@@ -77,9 +77,7 @@ class TestPromptRefAccepted:
         got = await client.get(f"/api/v1/agents/{name}", headers=users["a"]["headers"])
         assert got.json()["prompt_ref"]["version"] == 1
 
-    async def test_updating_to_inline_prompt_is_refused_and_stored_config_untouched(
-        self, client, users
-    ):
+    async def test_updating_to_inline_prompt_is_refused_and_stored_config_untouched(self, client, users):
         """REQ-LEGACY-003: materialization applies to CREATION only — an update
         YAML carrying a NEW inline prompt definition is refused with an explicit
         error and the stored configuration stays untouched."""

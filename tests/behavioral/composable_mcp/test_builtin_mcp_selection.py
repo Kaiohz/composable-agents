@@ -134,9 +134,7 @@ class TestBuiltinSelectionPersistence:
         customization referencing an unknown server is refused and not persisted."""
         stub_registry.reset(seed={})
 
-        resp = await put_builtin(
-            client, users["a"]["headers"], builtin_yaml_with_refs(refs=["ghost-server"])
-        )
+        resp = await put_builtin(client, users["a"]["headers"], builtin_yaml_with_refs(refs=["ghost-server"]))
         assert resp.status_code in UNAVAILABLE_CODES, resp.text
 
         got = await client.get(f"/api/v1/agents/{BUILTIN_NAME}", headers=users["a"]["headers"])
@@ -180,9 +178,7 @@ class TestSelectiveMounting:
             }
             stub_registry.reset(seed=seed)
 
-            resp = await put_builtin(
-                client, users["a"]["headers"], builtin_yaml_with_refs(refs=["selected"])
-            )
+            resp = await put_builtin(client, users["a"]["headers"], builtin_yaml_with_refs(refs=["selected"]))
             assert resp.status_code == 200, resp.text
 
             await configure_llm_credentials(client, users["a"]["headers"])

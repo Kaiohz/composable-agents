@@ -128,10 +128,17 @@ class TestValidateSpaceOwnership:
         await spaces.validate_space_ownership("My_Agent", [])  # no raise
         assert _logged(caplog, LogMessage.RAG_SPACE_SLUG_COLLISION_LEGACY)
 
-    async def test_subagent_slug_colliding_with_existing_agent_is_rejected(self):
+    async def test_subagent_slug_matching_own_materialized_agent_is_excluded(self, caplog):
+        """Rebase semantics (origin/main PR #47): inline sub-agents are
+        MATERIALIZED into real agents named after themselves — a topology
+        RE-DECLARING its own materialized subagent (update/create
+        revalidation) must not be refused by the top-level row its own
+        earlier import created. The collision class is instead refused by
+        the import's name-availability boundary BEFORE anything persists
+        (asserted behaviorally: ``test_create_rejects_subagent_colliding_
+        with_existing_agent``)."""
         spaces = AgentRagSpaces(RecordingProvisioner(), config_repository=_repo(["Coll.X"]))
-        with pytest.raises(ConfigError, match="already claimed by 'Coll.X'"):
-            await spaces.validate_space_ownership("top-agent", ["coll-x"])
+        await spaces.validate_space_ownership("top-agent", ["coll-x"])  # no raise
 
     async def test_the_updated_agent_itself_is_ignored(self):
         # The updating agent's own row must not collide against itself.

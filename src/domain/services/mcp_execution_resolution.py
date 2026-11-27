@@ -39,10 +39,7 @@ def build_mcp_refs_resolver(registry_client: McpRegistryClient | None) -> McpRef
         """Resolve once in declaration order after deduplicating identities."""
         if not refs:
             return []
-        configs = [
-            await registry_client.get_execution_config(ref)
-            for ref in dict.fromkeys(refs)
-        ]
+        configs = [await registry_client.get_execution_config(ref) for ref in dict.fromkeys(refs)]
         logger.info(LogMessage.AGENT_MCP_REFS_RESOLVED, len(configs), len(refs))
         return configs
 

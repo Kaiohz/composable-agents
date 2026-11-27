@@ -395,11 +395,56 @@ def scoped_agent_yaml(
             f"  - name: {subagent_name}",
             '    description: "Scoped sub-agent."',
             f"    model: {SUBAGENT_MODEL_YAML}",
+            f'    instructions: "Scoped sub-agent instructions for {subagent_name}."',
             "    mcp_servers:",
             "      - name: sub-header-stub",
             "        transport: http",
             f"        url: {subagent_url}",
         ]
+    return "\n".join(lines) + "\n"
+
+
+def lifecycle_update_yaml(name: str, subagents: list[str]) -> str:
+    """Agent YAML for the UPDATE of an imported topology.
+
+    The resource-only write policy (main PR #47) refuses inline top-level
+    ``model``/``system_prompt``/``mcp_servers`` on every update once
+    ``model_ref``/``prompt_ref`` are materialized — the update declares its
+    sub-agents inline (name+description) and nothing else.
+    """
+    lines = [f"name: {name}", "debug: false"]
+    if subagents:
+        lines.append("subagents:")
+        for sub in subagents:
+            lines += [
+                f"  - name: {sub}",
+                f"    description: \"Lifecycle sub-agent '{sub}'.\"",
+            ]
+    return "\n".join(lines) + "\n"
+
+
+def lifecycle_yaml_refs(name: str, subagent_refs: list[str]) -> str:
+    """Agent YAML declaring sub-agents as ``agent_ref`` references.
+
+    Inline sub-agents are MATERIALIZED into real agents named after
+    themselves at creation (main PR #47) — a topology re-declaring its
+    sub-agents references those created agents instead of re-inlining them
+    (a re-inlined body collides with the materialized row's name).
+    """
+    lines = [
+        f"name: {name}",
+        "model: stub-model",
+        'system_prompt: "Scoped lifecycle test agent."',
+        "debug: false",
+    ]
+    if subagent_refs:
+        lines.append("subagents:")
+        for sub in subagent_refs:
+            lines += [
+                f"  - name: {sub}",
+                f"    description: \"Reference sub-agent '{sub}'.\"",
+                f"    agent_ref: {sub}",
+            ]
     return "\n".join(lines) + "\n"
 
 
@@ -426,5 +471,13 @@ def lifecycle_yaml(name: str, subagents: list[str]) -> str:
     if subagents:
         lines.append("subagents:")
         for sub in subagents:
-            lines += [f"  - name: {sub}", f"    description: \"Lifecycle sub-agent '{sub}'.\""]
+            # main PR #47: inline sub-agents are MATERIALIZED into real
+            # agents — they must declare a model source and instructions.
+            lines += [
+                f"  - name: {sub}",
+                f"    description: \"Lifecycle sub-agent '{sub}'.\"",
+                f"    model: {SUBAGENT_MODEL_YAML}",
+                f'    instructions: "Scoped lifecycle instructions for {sub}."',
+            ]
+
     return "\n".join(lines) + "\n"

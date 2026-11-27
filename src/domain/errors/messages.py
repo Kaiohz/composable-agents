@@ -113,9 +113,7 @@ class ErrorMessage(StrEnum):
         "MCP server '{name}' (mcp_servers) is already registered: the import never overwrites an existing "
         "registration. Rename the inline definition or reuse the registered one."
     )
-    AGENT_IMPORT_SUBAGENT_CYCLE = (
-        "Circular sub-agent reference (cycle) detected before any creation: {names}"
-    )
+    AGENT_IMPORT_SUBAGENT_CYCLE = "Circular sub-agent reference (cycle) detected before any creation: {names}"
     AGENT_IMPORT_SUBAGENT_SELF_REFERENCE = (
         "Sub-agent '{name}' references its own agent '{agent}' (self-reference is not allowed)."
     )

@@ -88,7 +88,15 @@ class TestSubagentMaterialization:
             users["a"]["headers"],
             import_yaml_(
                 agent,
-                subagents=[{"name": helper, "description": "Helper", "instructions": "Helper instructions.", "model": "gpt-helper", "tools": []}],
+                subagents=[
+                    {
+                        "name": helper,
+                        "description": "Helper",
+                        "instructions": "Helper instructions.",
+                        "model": "gpt-helper",
+                        "tools": [],
+                    }
+                ],
             ),
             agent,
         )
@@ -116,7 +124,15 @@ class TestSubagentMaterialization:
             users["a"]["headers"],
             import_yaml_(
                 agent,
-                subagents=[{"name": helper, "description": "Helper", "instructions": "Helper prompt text.", "model": "gpt-helper", "tools": []}],
+                subagents=[
+                    {
+                        "name": helper,
+                        "description": "Helper",
+                        "instructions": "Helper prompt text.",
+                        "model": "gpt-helper",
+                        "tools": [],
+                    }
+                ],
             ),
             agent,
         )
@@ -200,9 +216,7 @@ def http_server(name: str, url: str, *, token: str | None = None) -> dict:
 class TestSubagentMcpOwnership:
     """C1/C2 (review): MCP selections are owned, scoped and never leaked."""
 
-    async def test_subagent_owned_servers_stay_in_the_subagent_selection(
-        self, client, users, stub_registry
-    ):
+    async def test_subagent_owned_servers_stay_in_the_subagent_selection(self, client, users, stub_registry):
         """REQ-SUBAGENT-001 / REQ-MCP-003: a server declared INSIDE an inline
         sub-agent entry belongs to THAT sub-agent's ``mcp_refs`` selection —
         the parent keeps (and mounts) only its own identities and never the
@@ -222,9 +236,7 @@ class TestSubagentMcpOwnership:
                         "instructions": "Child instructions.",
                         "model": "gpt-helper",
                         "tools": [],
-                        "mcp_servers": [
-                            http_server("child-srv", "http://127.0.0.1:9502/mcp", token="sekrit-child")
-                        ],
+                        "mcp_servers": [http_server("child-srv", "http://127.0.0.1:9502/mcp", token="sekrit-child")],
                     }
                 ],
             ),
@@ -256,7 +268,10 @@ class TestSubagentMcpOwnership:
         unregistered, unvalidated configuration."""
         helper = _name("imp-existingref")
         first = await import_agent(
-            client, users["a"]["headers"], import_yaml_(helper, model="m-legacy", system_prompt="Shared prompt."), helper
+            client,
+            users["a"]["headers"],
+            import_yaml_(helper, model="m-legacy", system_prompt="Shared prompt."),
+            helper,
         )
         assert first.status_code == 201, first.text
         stub_registry.reset(seed={})
@@ -272,9 +287,7 @@ class TestSubagentMcpOwnership:
                         "name": "child",
                         "description": "Child",
                         "agent_ref": helper,
-                        "mcp_servers": [
-                            http_server("ghost-srv", "http://127.0.0.1:9599/mcp", token="sekrit-ref")
-                        ],
+                        "mcp_servers": [http_server("ghost-srv", "http://127.0.0.1:9599/mcp", token="sekrit-ref")],
                     }
                 ],
             ),
@@ -294,7 +307,10 @@ class TestSubagentMcpOwnership:
         unregistered fallback)."""
         helper = _name("imp-normalizedref")
         first = await import_agent(
-            client, users["a"]["headers"], import_yaml_(helper, model="m-legacy", system_prompt="Shared prompt."), helper
+            client,
+            users["a"]["headers"],
+            import_yaml_(helper, model="m-legacy", system_prompt="Shared prompt."),
+            helper,
         )
         assert first.status_code == 201, first.text
 
@@ -341,9 +357,7 @@ class TestInlineSkillsAndMemories:
         )
         assert resp.status_code == 201, resp.text
 
-        stored = await client.get(
-            "/api/v1/store/files/skills/imp-skill-dir/SKILL.md", headers=users["a"]["headers"]
-        )
+        stored = await client.get("/api/v1/store/files/skills/imp-skill-dir/SKILL.md", headers=users["a"]["headers"])
         assert stored.status_code == 200, f"the skill file must exist in the store: {stored.text}"
         assert stored.json()["content"] == content, "the content must be written without modification"
 
@@ -363,9 +377,7 @@ class TestInlineSkillsAndMemories:
         )
         assert resp.status_code == 201, resp.text
 
-        stored = await client.get(
-            "/api/v1/store/files/memories/imp-project.md", headers=users["a"]["headers"]
-        )
+        stored = await client.get("/api/v1/store/files/memories/imp-project.md", headers=users["a"]["headers"])
         assert stored.status_code == 200, stored.text
         assert stored.json()["content"] == content
 
@@ -391,9 +403,7 @@ class TestInlineSkillsAndMemories:
             agent,
         )
         assert resp.status_code in VALIDATION_CODES, resp.text
-        stored = await client.get(
-            "/api/v1/store/files/skills/imp-dupe-skill/SKILL.md", headers=users["a"]["headers"]
-        )
+        stored = await client.get("/api/v1/store/files/skills/imp-dupe-skill/SKILL.md", headers=users["a"]["headers"])
         assert stored.json()["content"] == original, "the existing file must remain unchanged"
 
     async def test_textual_skill_reference_to_unstored_path_fails_import(self, client, users):
@@ -445,9 +455,7 @@ class TestImportedFilesRuntimeEffect:
     Store — the runner looks it up where it was written and the imported
     resource becomes part of the agent's effective namespace at build time."""
 
-    async def test_imported_skill_is_copied_into_the_agent_namespace(
-        self, client, users, stub_llm
-    ):
+    async def test_imported_skill_is_copied_into_the_agent_namespace(self, client, users, stub_llm):
         agent = _name("imp-skilluse")
         skill_path = "skills/imp-use-skill/"
         content = "# Runtime skill\n\nUsed verbatim.\n"
@@ -474,9 +482,7 @@ class TestImportedFilesRuntimeEffect:
         )
         assert stored.json()["content"] == content
 
-    async def test_imported_memory_is_copied_into_the_agent_namespace(
-        self, client, users, stub_llm
-    ):
+    async def test_imported_memory_is_copied_into_the_agent_namespace(self, client, users, stub_llm):
         agent = _name("imp-memoryuse")
         content = "# Runtime memory\n\nContexte.\n"
         resp = await import_agent(

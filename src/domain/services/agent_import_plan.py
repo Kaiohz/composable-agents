@@ -277,7 +277,9 @@ def _plan_prompt(raw: dict, agent_name: str) -> tuple[PromptMaterialization | No
     raise ConfigError(ErrorMessage.AGENT_IMPORT_MISSING_PROMPT.format(name=agent_name))
 
 
-def _plan_mcp(raw: dict, agent_name: str, subagent_mcp: list[tuple[dict, str]]) -> tuple[list[McpMaterialization], list[str]]:
+def _plan_mcp(
+    raw: dict, agent_name: str, subagent_mcp: list[tuple[dict, str]]
+) -> tuple[list[McpMaterialization], list[str]]:
     """Collect inline MCP definitions and declared references (REQ-MCP-001..005).
 
     Root- and sub-agent-declared servers share one user-scoped name namespace:
@@ -416,9 +418,7 @@ def _validate_reference_subagent_entry(entry: dict, name: str) -> None:
     """
     for forbidden in ("mcp_servers", "model", "instructions", "skills"):
         if entry.get(forbidden) is not None and entry.get(forbidden) != []:
-            raise ConfigError(
-                ErrorMessage.AGENT_IMPORT_SUBAGENT_REF_FIELD_FORBIDDEN.format(name=name, field=forbidden)
-            )
+            raise ConfigError(ErrorMessage.AGENT_IMPORT_SUBAGENT_REF_FIELD_FORBIDDEN.format(name=name, field=forbidden))
 
 
 def _detect_reference_cycles(entries: list, agent_name: str, entry_names: set[str]) -> None:
@@ -549,9 +549,7 @@ def _reject_traversal(path: str, is_skill: bool) -> None:
     """Reject any path escaping its required prefix."""
     if ".." in path:
         invalid = (
-            ErrorMessage.AGENT_IMPORT_SKILL_PATH_INVALID
-            if is_skill
-            else ErrorMessage.AGENT_IMPORT_MEMORY_PATH_INVALID
+            ErrorMessage.AGENT_IMPORT_SKILL_PATH_INVALID if is_skill else ErrorMessage.AGENT_IMPORT_MEMORY_PATH_INVALID
         )
         raise ConfigError(invalid.format(path=path, reason="path traversal is forbidden"))
 
@@ -614,9 +612,7 @@ def _normalized_subagent_entry(entry: Any, created_name: str | None) -> dict:
 
 
 def _summarize_errors(e: ValidationError) -> str:
-    return "; ".join(
-        f"{'.'.join(str(loc) for loc in err.get('loc', []))}: {err.get('msg', '')}" for err in e.errors()
-    )
+    return "; ".join(f"{'.'.join(str(loc) for loc in err.get('loc', []))}: {err.get('msg', '')}" for err in e.errors())
 
 
 def _kind(is_skill: bool) -> str:

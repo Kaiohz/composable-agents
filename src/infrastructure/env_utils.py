@@ -115,6 +115,16 @@ def resolve_env_vars_in_dict(mapping: dict[str, Any]) -> dict[str, Any]:
     return resolved
 
 
+#: Agent-scoped placeholders that MUST survive header resolution when no
+#: agent scope is bound at the call site (registry-side execution-config
+#: reads are agent-agnostic): the runner's per-agent pass
+#: (:func:`resolve_headers_drop_empty` carrying ``extra_vars``) resolves
+#: them against the running agent's name. Resolving them via ``os.environ``
+#: here would silently substitute the AGENT_NAME environment variable for
+#: the platform-injected scope (review I-6(c) regression).
+_PROTECTED_AGENT_PLACEHOLDERS = frozenset({"AGENT_NAME"})
+
+
 def _resolve_header_entry(value: str, extra: dict[str, str]) -> str | None:
     """Resolve ONE header value's placeholders; ``None`` means DROP the entry.
 
@@ -122,9 +132,10 @@ def _resolve_header_entry(value: str, extra: dict[str, str]) -> str | None:
     :func:`resolve_headers_drop_empty` (extracted per Sonar S3776 — the
     function follows the shape of :func:`resolve_all_vars`): the
     user-credential placeholders first, then ``extra`` reserved placeholders
-    (e.g. ``AGENT_NAME``), then ``os.environ``; the entry is DROPPED when the
-    resolved value is empty or when a user-credential placeholder resolved
-    to empty.
+    (e.g. ``AGENT_NAME``), then ``os.environ``. An agent-scoped placeholder
+    with NO extra binding is kept LITERAL for the runner's per-agent pass.
+    The entry is DROPPED when the resolved value is empty or when a
+    user-credential placeholder resolved to empty.
     """
     user_placeholder_resolved_empty = False
 
@@ -138,9 +149,14 @@ def _resolve_header_entry(value: str, extra: dict[str, str]) -> str | None:
             return rv
         if name in extra:
             return extra[name]
+        if name in _PROTECTED_AGENT_PLACEHOLDERS:
+            # Registered-server headers transiting the execution-config path
+            # keep ${AGENT_NAME} literal; the loader (which knows the running
+            # agent) resolves it against the scope — never the environment.
+            return match.group(0)
         return os.environ.get(name, match.group(0))
 
-    rv = re.sub(r"\$\{(\w+)\}", _replace, value)
+    rv = re.sub(r"\${(\w+)}", _replace, value)
     if not rv or user_placeholder_resolved_empty:
         return None
     return rv

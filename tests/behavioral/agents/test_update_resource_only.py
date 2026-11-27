@@ -73,9 +73,7 @@ async def prompts_named(client, headers: dict[str, str], name: str) -> list[dict
 
 
 class TestUpdateRefusesNewInlineDefinitions:
-    async def test_update_with_new_inline_system_prompt_is_rejected_and_stored_config_untouched(
-        self, client, users
-    ):
+    async def test_update_with_new_inline_system_prompt_is_rejected_and_stored_config_untouched(self, client, users):
         """REQ-LEGACY-003: an update YAML containing a NEW inline prompt
         definition is refused until update-with-conversion exists; the stored
         configuration (and the prompt registry) is unchanged."""
@@ -84,7 +82,9 @@ class TestUpdateRefusesNewInlineDefinitions:
         _, created = await create_agent_yaml(
             client,
             users["a"]["headers"],
-            yaml_from({"name": agent, "tools": [], "debug": False, "model": "gpt-4o", "prompt_ref": {"id": prompt["id"]}}),
+            yaml_from(
+                {"name": agent, "tools": [], "debug": False, "model": "gpt-4o", "prompt_ref": {"id": prompt["id"]}}
+            ),
             agent,
         )
         assert created.status_code == 201, created.text
@@ -93,7 +93,15 @@ class TestUpdateRefusesNewInlineDefinitions:
             client,
             users["a"]["headers"],
             agent,
-            yaml_from({"name": agent, "model": "gpt-4o", "system_prompt": "Brand new inline prompt.", "tools": [], "debug": False}),
+            yaml_from(
+                {
+                    "name": agent,
+                    "model": "gpt-4o",
+                    "system_prompt": "Brand new inline prompt.",
+                    "tools": [],
+                    "debug": False,
+                }
+            ),
         )
         assert resp.status_code in VALIDATION_CODES, resp.text
 
@@ -112,7 +120,13 @@ class TestUpdateRefusesNewInlineDefinitions:
             client,
             users["a"]["headers"],
             yaml_from(
-                {"name": agent, "tools": [], "debug": False, "model_ref": model["id"], "system_prompt": "Existing prompt."}
+                {
+                    "name": agent,
+                    "tools": [],
+                    "debug": False,
+                    "model_ref": model["id"],
+                    "system_prompt": "Existing prompt.",
+                }
             ),
             agent,
         )
@@ -122,7 +136,15 @@ class TestUpdateRefusesNewInlineDefinitions:
             client,
             users["a"]["headers"],
             agent,
-            yaml_from({"name": agent, "model": "brand-new-inline-model", "system_prompt": "Existing prompt.", "tools": [], "debug": False}),
+            yaml_from(
+                {
+                    "name": agent,
+                    "model": "brand-new-inline-model",
+                    "system_prompt": "Existing prompt.",
+                    "tools": [],
+                    "debug": False,
+                }
+            ),
         )
         assert resp.status_code in VALIDATION_CODES, resp.text
 
@@ -135,9 +157,7 @@ class TestUpdateRefusesNewInlineDefinitions:
 
 
 class TestUpdateRefusesNestedInlineDefinitions:
-    async def test_nested_inline_mcp_servers_in_subagents_are_rejected_and_stored_config_untouched(
-        self, client, users
-    ):
+    async def test_nested_inline_mcp_servers_in_subagents_are_rejected_and_stored_config_untouched(self, client, users):
         """BUG-002: an inline MCP definition must never enter through the
         update boundary at ANY depth — a `subagents[i]` entry carrying
         `mcp_servers` (with its auth token) is refused before any write; the

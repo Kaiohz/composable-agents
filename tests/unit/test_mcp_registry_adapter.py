@@ -144,6 +144,7 @@ class TestGetExecutionConfig:
 
     async def test_registry_5xx_answer_is_safe_and_retryable(self):
         """REQ-TX-003: a registry 502/503/504 IS an availability signal."""
+
         def handler(request: httpx.Request) -> httpx.Response:  # noqa: ARG001 — transport contract
             return httpx.Response(503, json={"detail": "registry unavailable body"})
 
@@ -167,9 +168,7 @@ class TestGetExecutionConfig:
         client = _client_for(handler)
         try:
             with pytest.raises(McpRegistryConflictError) as exc_info:
-                await client.create_server(
-                    McpServerWrite(name="taken", transport="http", url="http://x/mcp")
-                )
+                await client.create_server(McpServerWrite(name="taken", transport="http", url="http://x/mcp"))
         finally:
             await client.aclose()
         assert "already registered" in str(exc_info.value.detail)

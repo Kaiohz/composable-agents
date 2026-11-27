@@ -31,12 +31,8 @@ class AgentConfigModel(Base):
     description: Mapped[str | None] = mapped_column(String(500), nullable=True)
     # Registry references projected from the agent YAML (None for legacy
     # agents without prompt_ref/model_ref — they remain valid untouched).
-    prompt_ref: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("prompts.id", ondelete="RESTRICT"), nullable=True
-    )
-    model_ref: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey("models.id", ondelete="RESTRICT"), nullable=True
-    )
+    prompt_ref: Mapped[UUID | None] = mapped_column(Uuid, ForeignKey("prompts.id", ondelete="RESTRICT"), nullable=True)
+    model_ref: Mapped[UUID | None] = mapped_column(Uuid, ForeignKey("models.id", ondelete="RESTRICT"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     # Owner of the configuration — NOT NULL with default '' (RLS plumbing).
