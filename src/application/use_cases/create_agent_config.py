@@ -83,32 +83,48 @@ class CreateAgentConfigUseCase:
             PromptNotFoundError / ModelNotFoundError: If prompt_ref/model_ref
                 cannot be resolved for the owner (§9).
         """
-        if self._rag_spaces is not None:
-            # C-2 (option a): reject a topology whose mapped slugs collide
-            # with another existing agent's slug — shared slugs mean shared
-            # RAG spaces. Fail-fast BEFORE any flow persists anything.
-            # The topology is read from the RAW mapping (NOT pydantic): the
-            # import's inline file-definitions only normalize INSIDE the
-            # import flow, so a preliminary pydantic load would reject valid
-            # imports (main PR #47's normalized-target contract).
-            topology = self._raw_topology(yaml_content)
-            if topology is not None:
-                yaml_name, subagent_names = topology
-                await self._rag_spaces.validate_space_ownership(
-                    yaml_name if isinstance(yaml_name, str) and yaml_name else name, subagent_names
-                )
-        if self._import_service is not None:
-            config = await self._import_service.import_agent(name, yaml_content)
-        else:
-            config = await self._legacy_create(name, yaml_content)
-        if self._rag_spaces is not None:
-            # REQ-018 + review C-3: fire-and-forget background provisioning
-            # (the task captures the caller's contextvars — credential and
-            # store namespace remain the originating user's).
-            self._rag_spaces.schedule_provision_for_agent(config.name, [subagent.name for subagent in config.subagents])
-
+        await self._validate_space_topology(name, yaml_content)
+        config = await self._materialize_or_legacy_create(name, yaml_content)
+        self._schedule_space_provisioning(config)
         logger.info(LogMessage.AGENT_CONFIG_CREATED_UC, name)
         return config
+
+    async def _validate_space_topology(self, name: str, yaml_content: str) -> None:
+        """Fail-fast C-2 ownership guard over the RAW import topology.
+
+        C-2 (option a): reject a topology whose mapped slugs collide with
+        another existing agent's slug — shared slugs mean shared RAG spaces.
+        Fail-fast BEFORE any flow persists anything. The topology is read
+        from the RAW mapping (NOT pydantic): the import's inline
+        file-definitions only normalize INSIDE the import flow, so a
+        preliminary pydantic load would reject valid imports (main PR #47's
+        normalized-target contract).
+        """
+        if self._rag_spaces is None:
+            return
+        topology = self._raw_topology(yaml_content)
+        if topology is not None:
+            yaml_name, subagent_names = topology
+            await self._rag_spaces.validate_space_ownership(
+                yaml_name if isinstance(yaml_name, str) and yaml_name else name, subagent_names
+            )
+
+    async def _materialize_or_legacy_create(self, name: str, yaml_content: str) -> AgentConfig:
+        """Route the creation through the wired flow (import or legacy)."""
+        if self._import_service is not None:
+            return await self._import_service.import_agent(name, yaml_content)
+        return await self._legacy_create(name, yaml_content)
+
+    def _schedule_space_provisioning(self, config: AgentConfig) -> None:
+        """Schedule the REQ-018 + review C-3 provisioning for ONE created agent.
+
+        Fire-and-forget background provisioning (the task captures the
+        caller's contextvars — credential and store namespace remain the
+        originating user's); only created AFTER the agent exists.
+        """
+        if self._rag_spaces is None:
+            return
+        self._rag_spaces.schedule_provision_for_agent(config.name, [subagent.name for subagent in config.subagents])
 
     def _raw_topology(self, yaml_content: str) -> tuple[object, list[str]] | None:
         """Best-effort raw read of one import yaml's topology for the guard.

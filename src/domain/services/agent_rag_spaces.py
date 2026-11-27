@@ -221,40 +221,70 @@ class AgentRagSpaces:
                 every change) — the destructive side stays protected by the
                 cascade ownership guard.
         """
-        if self._config_repository is None:
+        repository = self._config_repository
+        if repository is None:
             return
         own = agent_scope_slug(agent_name)
         mapped_subs = _mapped_topology_slugs(agent_name, subagent_names)
-
         own_subagent_slugs = {agent_scope_slug(name) for name in subagent_names}
-        try:
-            metadata = await self._config_repository.list_all()
-        except Exception as exc:  # noqa: BLE001
-            # Validation is best-effort: the cascade ownership guard stays fail-safe (the owned-set resolution below returns None).
-            logger.warning(LogMessage.RAG_SPACE_OWNERSHIP_UNRESOLVED, agent_name, safe_reason(exc))
+        peers = await self._peer_top_level_slugs(repository, agent_name, own_subagent_slugs)
+        if peers is None:
+            # Validation is best-effort: the cascade ownership guard stays fail-safe (the owned-set resolution inside _cascadable_slugs returns None).
             return
-        existing: dict[str, str] = {}
+        self._assert_no_collisions(agent_name, own, mapped_subs, peers)
+
+    async def _peer_top_level_slugs(
+        self, repository: AgentConfigRepository, agent_name: str, own_subagent_slugs: set[str]
+    ) -> dict[str, str] | None:
+        """Collect the OTHER persisted agents' top-level slug map (C-2).
+
+        Rebase semantics: this topology's OWN materialized sub-agents (real
+        top-level rows named after our sub-agents) are not peers. The
+        mapping keeps the FIRST agent per slug (``setdefault``).
+
+        Args:
+            agent_name: The agent whose ownership is being validated (its
+                own row is excluded, so an update never blocks on itself).
+            own_subagent_slugs: This topology's mapped subagent slugs (rows
+                named after them belong to this import, not to a peer).
+
+        Returns:
+            The slug → peer-agent-name map, or ``None`` when the metadata
+            listing cannot be read (repository outage — validation is
+            best-effort, the caller skips it).
+        """
+        try:
+            metadata = await repository.list_all()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(LogMessage.RAG_SPACE_OWNERSHIP_UNRESOLVED, agent_name, safe_reason(exc))
+            return None
+        peers: dict[str, str] = {}
         for entry in metadata:
             if entry.name == agent_name:
                 continue
-            # Rebase semantics: this topology's OWN materialized sub-agents
-            # (real top-level rows named after our sub-agents) are not peers.
             if agent_scope_slug(entry.name) in own_subagent_slugs:
                 continue
-            existing.setdefault(agent_scope_slug(entry.name), entry.name)
+            peers.setdefault(agent_scope_slug(entry.name), entry.name)
+        return peers
 
-        if own in existing:
-            # Review iter-5 I-3 / I-6(a): the agent's own name cannot change
-            # on update (rename = delete + re-create), so an own-slug mapping
-            # collision ALWAYS predates the update (a legacy pair created
-            # before the create-time validation existed). Warn instead of
-            # permanently locking the pair out of edits; NEW collisions
-            # created by the update itself (below) are still rejected.
-            logger.warning(LogMessage.RAG_SPACE_SLUG_COLLISION_LEGACY, agent_name, own, existing[own])
+    def _assert_no_collisions(
+        self, agent_name: str, own: str, mapped_subs: dict[str, str], peers: dict[str, str]
+    ) -> None:
+        """WARN on the agent's own legacy slug collision, RAISE on subagent ones.
+
+        Review iter-5 I-3 / I-6(a): the agent's own name cannot change on
+        update (rename = delete + re-create), so an own-slug mapping
+        collision ALWAYS predates the update (a legacy pair created before
+        the create-time validation existed) — the pair is only warned.
+        NEW collisions created by the update itself are rejected with a
+        ``ConfigError``.
+        """
+        if own in peers:
+            logger.warning(LogMessage.RAG_SPACE_SLUG_COLLISION_LEGACY, agent_name, own, peers[own])
         for slug, sub_name in mapped_subs.items():
-            if slug != own and slug in existing:
+            if slug != own and slug in peers:
                 raise ConfigError(
-                    ErrorMessage.AGENT_SPACE_SLUG_COLLISION.format(slug=slug, name=sub_name, other=existing[slug])
+                    ErrorMessage.AGENT_SPACE_SLUG_COLLISION.format(slug=slug, name=sub_name, other=peers[slug])
                 )
 
     # ------------------------------------------------------------------
@@ -376,15 +406,19 @@ class AgentRagSpaces:
         a peer through EITHER channel is never cascaded by this agent's
         lifecycle.
 
-        Review F-1 + I-3: the peer resolutions fan out CONCURRENTLY and
-        their outcomes are INSPECTED, never swallowed into a success — an
-        individually unresolvable peer topology (the adapter's sentinel) or
-        an UNEXPECTED peer failure invalidates the WHOLE owned set, so the
-        cascade fails safe to the agent's own slug.
-
         Args:
             agent_name: The agent whose cascade is being prepared (its own
                 row/topology is excluded).
+
+            exclude_own_subagent_slugs: This agent's own mapped subagent
+                slugs to EXCLUDE from the peer set (create/update
+                revalidation — rebase semantics: inline sub-agents are
+                MATERIALIZED into real agents named after themselves (origin/
+                main PR #47), so a topology re-declaring its OWN subagents
+                must not be refused by the top-level row its own earlier
+                import created). The CASCade guard calls this WITHOUT the
+                exclusion so every real agent's space stays protected
+                (F-1/C-2b parity).
 
         Returns:
             The owned-by-peers slug set, or ``None`` when the ownership set
@@ -393,21 +427,53 @@ class AgentRagSpaces:
         """
         if self._config_repository is None:
             return None
+        excluded = exclude_own_subagent_slugs or set()
+        peers = await self._peer_agent_names(self._config_repository, agent_name)
+        if peers is None:
+            return None
+        owned = {agent_scope_slug(name) for name in peers} - excluded
+        return await self._extend_with_declared_topology(peers, owned)
+
+    async def _peer_agent_names(self, repository: AgentConfigRepository, agent_name: str) -> list[str] | None:
+        """List every persisted agent's name except the cascade owner (C-2b).
+
+        Args:
+            repository: The owner-scoped metadata repository (validated
+                non-``None`` by the caller).
+            agent_name: The agent whose cascade is being prepared (its own
+                row is excluded).
+
+        Returns:
+            The peer names, or ``None`` when the metadata listing cannot be
+            read (the caller fails safe: an unresolvable owned set narrows
+            the cascade to the own slug).
+        """
         try:
-            metadata = await self._config_repository.list_all()
+            metadata = await repository.list_all()
         except Exception as exc:  # noqa: BLE001
-            # The caller fails safe below: an unresolvable owned set narrows the cascade to the own slug.
             logger.warning(LogMessage.RAG_SPACE_OWNERSHIP_UNRESOLVED, agent_name, safe_reason(exc))
             return None
-        excluded = exclude_own_subagent_slugs or set()
-        peers = [entry.name for entry in metadata if entry.name != agent_name]
-        # Rebase semantics: inline sub-agents are MATERIALIZED into real
-        # agents named after themselves (origin/main PR #47) — a topology
-        # re-declaring its OWN subagents (create/update revalidation) must
-        # not be refused by the top-level row its own earlier import
-        # created. The CASCade guard calls this WITHOUT the exclusion so
-        # every real agent's space stays protected (F-1/C-2b parity).
-        owned = {agent_scope_slug(name) for name in peers} - excluded
+        return [entry.name for entry in metadata if entry.name != agent_name]
+
+    async def _extend_with_declared_topology(self, peers: list[str], owned: set[str]) -> set[str] | None:
+        """Union the peer top-level slugs with the peers' DECLARED subagent slugs.
+
+        Inline sub-agents are MATERIALIZED into real agents named after
+        themselves (origin/main PR #47), so the stored YAML of each peer also
+        claims its subagent slugs (name-keyed store reads via the
+        :class:`AgentTopologyResolver` port); a slug claimed by a peer
+        through EITHER channel is never cascaded by this agent's lifecycle.
+
+        Review F-1 + I-3: the peer resolutions fan out CONCURRENTLY and
+        their outcomes are INSPECTED, never swallowed into a success — an
+        individually unresolvable peer topology (the adapter's sentinel) or
+        an UNEXPECTED peer failure invalidates the WHOLE owned set, so the
+        cascade fails safe to the agent's own slug.
+
+        Returns:
+            The extended owned set, or ``None`` when any peer topology is
+            unresolvable (caller fails safe to the own slug only).
+        """
         if self._topologies is None or not peers:
             return owned
         if (declared := await self._collect_declared_subagent_slugs(self._topologies, peers)) is None:
