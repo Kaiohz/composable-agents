@@ -747,6 +747,17 @@ def get_mcp_registry_client() -> McpRegistryClient:
         _mcp_registry_client = HttpMcpRegistryClient(
             base_url_provider=lambda: settings.mcp_registry_base_url,
             timeout=settings.mcp_tool_timeout,
+            # Server-side execution configs rewrite PUBLIC registered URLs
+            # onto the internal builtin base: pod egress to the public
+            # ingress is flaky (DNS/unreachable), the ClusterIP is not.
+            internal_rewrite_provider=(
+                (lambda: (
+                    settings.mcp_registry_public_host,
+                    settings.builtin_mcp_base_url,
+                ))
+                if settings.mcp_registry_public_host and settings.builtin_mcp_base_url
+                else None
+            ),
         )
     return _mcp_registry_client
 

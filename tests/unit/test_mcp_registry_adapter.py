@@ -44,13 +44,20 @@ _REVEALED_ENTRY = {
 }
 
 
-def _client_for(handler, base_url: str = "http://registry.test") -> HttpMcpRegistryClient:
+def _client_for(
+    handler,
+    base_url: str = "http://registry.test",
+    internal_rewrite_pair=None,
+) -> HttpMcpRegistryClient:
     """Build the adapter over a MockTransport with a static base URL."""
-    return HttpMcpRegistryClient(
-        base_url_provider=lambda: base_url,
-        timeout=5.0,
-        transport=httpx.MockTransport(handler),
-    )
+    kwargs = {
+        "base_url_provider": lambda: base_url,
+        "timeout": 5.0,
+        "transport": httpx.MockTransport(handler),
+    }
+    if internal_rewrite_pair is not None:
+        kwargs["internal_rewrite_provider"] = lambda: internal_rewrite_pair
+    return HttpMcpRegistryClient(**kwargs)
 
 
 def test_canonical_and_alias_candidates_in_order():
@@ -346,3 +353,44 @@ class TestProjectionHelpers:
                 await client.list_servers()
         finally:
             await client.aclose()
+
+
+class TestInternalUrlRewrite:
+    """Registered servers store PUBLIC urls; server-side execution configs
+    must ride the internal ClusterIP base (public-ingress pod egress — DNS /
+    network-flakiness — breaks the MCP mounts; the ClusterIP does not)."""
+
+    @staticmethod
+    def _entry(url: str) -> dict:
+        entry = dict(_REVEALED_ENTRY)
+        entry["url"] = url
+        return entry
+
+    async def test_public_origin_url_is_rewritten_to_internal(self):
+        client = _client_for(
+            _respond(self._entry("https://raganything.soludev.tech/memories/mcp")),
+            internal_rewrite_pair=("https://raganything.soludev.tech", "http://raganything.composables.svc:8000"),
+        )
+
+        config = await client.get_execution_config("alpha")
+
+        assert config.url == "http://raganything.composables.svc:8000/memories/mcp"
+
+    async def test_url_not_starting_with_the_public_origin_is_untouched(self):
+        client = _client_for(
+            _respond(self._entry("https://mcp.example.org/mcp")),
+            internal_rewrite_pair=("https://raganything.soludev.tech", "http://internal:8000"),
+        )
+
+        config = await client.get_execution_config("alpha")
+
+        assert config.url == "https://mcp.example.org/mcp"
+
+    async def test_no_rewrite_without_a_pair(self):
+        client = _client_for(
+            _respond(self._entry("https://raganything.soludev.tech/memories/mcp")),
+        )
+
+        config = await client.get_execution_config("alpha")
+
+        assert config.url == "https://raganything.soludev.tech/memories/mcp"
