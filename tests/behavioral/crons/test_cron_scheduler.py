@@ -211,7 +211,9 @@ class TestDisabledPolicy:
         # An occurrence that was due just before the cron got disabled:
         now = datetime.now(UTC).replace(second=0, microsecond=0)
         await set_cron_next_run(stack, cron_id, (now - timedelta(minutes=1)).isoformat())
-        disabled = await client.patch(f"/api/v1/crons/{cron_id}", headers=users["a"]["headers"], json={"enabled": False})
+        disabled = await client.patch(
+            f"/api/v1/crons/{cron_id}", headers=users["a"]["headers"], json={"enabled": False}
+        )
         assert disabled.status_code == 200
 
         await run_scheduler_tick()
@@ -332,9 +334,7 @@ class TestFailurePolicy:
         sensitive configuration."""
         stub_llm.reset(mode="fail")
         cron = await _scheduled_cron(client, users)
-        await set_cron_next_run(
-            stack, cron["id"], (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
-        )
+        await set_cron_next_run(stack, cron["id"], (datetime.now(UTC) - timedelta(minutes=1)).isoformat())
         await run_scheduler_tick()
 
         ok, _ = await poll_condition(
@@ -358,9 +358,7 @@ class TestOwnerRlsContext:
         cron = await _scheduled_cron(client, users)
         cron_id = cron["id"]
 
-        await set_cron_next_run(
-            stack, cron_id, (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
-        )
+        await set_cron_next_run(stack, cron_id, (datetime.now(UTC) - timedelta(minutes=1)).isoformat())
         await run_scheduler_tick()
 
         ok, runs = await poll_condition(

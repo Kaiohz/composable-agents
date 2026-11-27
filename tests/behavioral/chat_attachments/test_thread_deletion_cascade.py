@@ -137,7 +137,6 @@ class TestThreadDeletionCascade:
         assert deleted.status_code in {200, 204}, deleted.text
         listing = await client.get("/api/v1/threads", headers=headers)
         assert all(t["id"] != thread_id for t in listing.json()), "thread row must be deleted"
-        assert any(
-            record.levelno >= 30 and thread_id in record.getMessage()
-            for record in caplog.records
-        ), "the cascade failure must be explicitly logged (REQ-100)"
+        assert any(record.levelno >= 30 and thread_id in record.getMessage() for record in caplog.records), (
+            "the cascade failure must be explicitly logged (REQ-100)"
+        )

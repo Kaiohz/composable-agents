@@ -150,9 +150,7 @@ class TestSslContextSecurityProperties:
         assert ctx.verify_mode == ssl.CERT_REQUIRED
 
     async def test_prefer_insecure_opt_out_restores_legacy_no_check(self, captured_engine, patch_settings):
-        patch_settings(
-            DATABASE_URL="postgresql://user:pass@host:5432/db?sslmode=prefer", DATABASE_SSL_INSECURE="true"
-        )
+        patch_settings(DATABASE_URL="postgresql://user:pass@host:5432/db?sslmode=prefer", DATABASE_SSL_INSECURE="true")
 
         reset()
         await init_persistence()

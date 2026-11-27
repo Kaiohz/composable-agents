@@ -21,9 +21,7 @@ VALIDATION_CODES = {400, 422}
 
 
 async def _create_prompt(client, headers, name="Versions prompt", content="v1 content"):
-    resp = await client.post(
-        "/api/v1/prompts", headers=headers, json={"name": name, "content": content}
-    )
+    resp = await client.post("/api/v1/prompts", headers=headers, json={"name": name, "content": content})
     assert resp.status_code == 201
     return resp.json()
 
@@ -57,7 +55,9 @@ class TestVersionCreation:
             f"/api/v1/prompts/{pid}/versions", headers=users["a"]["headers"], json={"content": verbatim}
         )
         assert created.status_code == 201
-        got = await client.get(f"/api/v1/prompts/{pid}/versions/{created.json()['version']}", headers=users["a"]["headers"])
+        got = await client.get(
+            f"/api/v1/prompts/{pid}/versions/{created.json()['version']}", headers=users["a"]["headers"]
+        )
         assert got.status_code == 200
         assert got.json()["content"] == verbatim
 
@@ -112,7 +112,9 @@ class TestVersionRead:
     async def test_pinned_read_returns_exact_immutable_content(self, client, users):
         prompt = await _create_prompt(client, users["a"]["headers"], content="immutable v1")
         pid = prompt["id"]
-        await client.post(f"/api/v1/prompts/{pid}/versions", headers=users["a"]["headers"], json={"content": "mutable v2"})
+        await client.post(
+            f"/api/v1/prompts/{pid}/versions", headers=users["a"]["headers"], json={"content": "mutable v2"}
+        )
 
         v1 = await client.get(f"/api/v1/prompts/{pid}/versions/1", headers=users["a"]["headers"])
         assert v1.status_code == 200
@@ -178,6 +180,7 @@ class TestConcurrentVersionAllocation:
     async def test_concurrent_creates_never_overwrite_versions(self, client, client_factory, users):
         """Two concurrent creates with the same name each get their own
         prompt + version 1 (duplicate display names are permitted)."""
+
         async def create(index: int):
             ac = await client_factory()
             try:

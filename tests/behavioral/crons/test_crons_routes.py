@@ -146,7 +146,7 @@ class TestCreateCron:
             "    transport: http\n"
             "    url: http://127.0.0.1:59998/mcp\n"
             "    env:\n"
-            "      CREDENTIAL: \"${USER_JWT}\"\n"
+            '      CREDENTIAL: "${USER_JWT}"\n'
         )
         agent = await _agent(client, users["a"]["headers"], extra=placeholder_yaml_extra)
         resp = await _create_cron(client, users["a"]["headers"], agent)
@@ -159,7 +159,7 @@ class TestCreateCron:
             "    transport: http\n"
             "    url: http://127.0.0.1:59998/mcp\n"
             "    env:\n"
-            "      CREDENTIAL: \"${USER_API_KEY}\"\n"
+            '      CREDENTIAL: "${USER_API_KEY}"\n'
         )
         agent = await _agent(client, users["a"]["headers"], extra=placeholder_yaml_extra)
         resp = await _create_cron(client, users["a"]["headers"], agent)
@@ -216,9 +216,7 @@ class TestPatchCron:
         created = await _create_cron(client, users["a"]["headers"], agent)
         cron_id = created.json()["id"]
 
-        patched = await client.patch(
-            f"/api/v1/crons/{cron_id}", headers=users["a"]["headers"], json={"enabled": False}
-        )
+        patched = await client.patch(f"/api/v1/crons/{cron_id}", headers=users["a"]["headers"], json={"enabled": False})
         assert patched.status_code == 200
         body = patched.json()
         assert body["enabled"] is False
@@ -261,7 +259,9 @@ class TestPatchCron:
         assert resp.status_code in VALIDATION_CODES
 
     async def test_patch_unknown_404(self, client, users):
-        resp = await client.patch(f"/api/v1/crons/{uuid.uuid4()}", headers=users["a"]["headers"], json={"enabled": False})
+        resp = await client.patch(
+            f"/api/v1/crons/{uuid.uuid4()}", headers=users["a"]["headers"], json={"enabled": False}
+        )
         assert resp.status_code == 404
 
     async def test_patch_foreign_404(self, client, users):
@@ -303,13 +303,17 @@ class TestExplicitNullNonNullableBoundary:
     async def test_patch_null_name_is_a_client_error(self, client, users):
         agent = await _agent(client, users["a"]["headers"])
         cron = await _create_cron(client, users["a"]["headers"], agent)
-        resp = await client.patch(f"/api/v1/crons/{cron.json()['id']}", headers=users["a"]["headers"], json={"name": None})
+        resp = await client.patch(
+            f"/api/v1/crons/{cron.json()['id']}", headers=users["a"]["headers"], json={"name": None}
+        )
         assert resp.status_code in {400, 422}, f"null name must be 4xx, got {resp.status_code} {resp.text}"
 
     async def test_patch_null_message_is_a_client_error(self, client, users):
         agent = await _agent(client, users["a"]["headers"])
         cron = await _create_cron(client, users["a"]["headers"], agent)
-        resp = await client.patch(f"/api/v1/crons/{cron.json()['id']}", headers=users["a"]["headers"], json={"message": None})
+        resp = await client.patch(
+            f"/api/v1/crons/{cron.json()['id']}", headers=users["a"]["headers"], json={"message": None}
+        )
         assert resp.status_code in {400, 422}, f"null message must be 4xx, got {resp.status_code} {resp.text}"
 
     async def test_patch_null_cron_expression_is_a_client_error(self, client, users):
@@ -323,13 +327,17 @@ class TestExplicitNullNonNullableBoundary:
     async def test_patch_null_enabled_is_a_client_error(self, client, users):
         agent = await _agent(client, users["a"]["headers"])
         cron = await _create_cron(client, users["a"]["headers"], agent)
-        resp = await client.patch(f"/api/v1/crons/{cron.json()['id']}", headers=users["a"]["headers"], json={"enabled": None})
+        resp = await client.patch(
+            f"/api/v1/crons/{cron.json()['id']}", headers=users["a"]["headers"], json={"enabled": None}
+        )
         assert resp.status_code in {400, 422}, f"null enabled must be 4xx, got {resp.status_code} {resp.text}"
 
     async def test_patch_null_agent_name_is_a_validation_error_not_a_404_for_none(self, client, users):
         agent = await _agent(client, users["a"]["headers"])
         cron = await _create_cron(client, users["a"]["headers"], agent)
-        resp = await client.patch(f"/api/v1/crons/{cron.json()['id']}", headers=users["a"]["headers"], json={"agent_name": None})
+        resp = await client.patch(
+            f"/api/v1/crons/{cron.json()['id']}", headers=users["a"]["headers"], json={"agent_name": None}
+        )
         assert resp.status_code in {400, 422}, f"null agent_name must be 4xx, got {resp.status_code} {resp.text}"
         assert "None" not in resp.text, f"a Python repr leaked into the payload: {resp.text}"
         assert "not found" not in resp.text
@@ -337,7 +345,9 @@ class TestExplicitNullNonNullableBoundary:
     async def test_patch_null_timezone_still_a_clean_client_error(self, client, users):
         agent = await _agent(client, users["a"]["headers"])
         cron = await _create_cron(client, users["a"]["headers"], agent)
-        resp = await client.patch(f"/api/v1/crons/{cron.json()['id']}", headers=users["a"]["headers"], json={"timezone": None})
+        resp = await client.patch(
+            f"/api/v1/crons/{cron.json()['id']}", headers=users["a"]["headers"], json={"timezone": None}
+        )
         assert resp.status_code in {400, 422}
 
     async def test_null_patches_never_echo_internal_sql(self, client, users):

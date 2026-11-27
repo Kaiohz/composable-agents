@@ -24,13 +24,7 @@ def agent_yaml_with_prompt_ref(name: str, prompt_id: str, version: int | None = 
     ref = f"prompt_ref:\n  id: {prompt_id}\n"
     if version is not None:
         ref += f"  version: {version}\n"
-    return (
-        f"name: {name}\n"
-        "model: test-model\n"
-        "tools: []\n"
-        "debug: false\n"
-        f"{ref}"
-    )
+    return f"name: {name}\nmodel: test-model\ntools: []\ndebug: false\n{ref}"
 
 
 class TestDeletionConflict:

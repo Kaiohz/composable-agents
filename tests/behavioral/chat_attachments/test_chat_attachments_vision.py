@@ -36,9 +36,7 @@ async def _invoke_with_image(client, headers, thread_id, attachments, message="R
 class TestVisionContentBlocks:
     """AC-001 / REQ-012 / REQ-013: image + text reaches the LLM."""
 
-    async def test_image_and_text_reach_llm_as_multimodal_blocks(
-        self, client, users, stub_llm, mcp_files
-    ):
+    async def test_image_and_text_reach_llm_as_multimodal_blocks(self, client, users, stub_llm, mcp_files):
         thread_id = await agent_with_thread(client, users["a"]["headers"])
         resp = await _invoke_with_image(
             client,
