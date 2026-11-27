@@ -19,6 +19,7 @@ class CronNotFoundError(CronError):
 class CronValidationError(CronError):
     """Cron definition failed validation: bad expression, invalid timezone,
     missing/inaccessible agent, or unattended user-placeholder requirement."""
+
     status_code = ErrorCode.UNPROCESSABLE_ENTITY
 
 

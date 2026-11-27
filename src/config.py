@@ -159,6 +159,10 @@ class Settings(BaseSettings):
     mcp_tool_timeout: float = 60.0
     agent_stream_idle_timeout: float = 120.0
     agent_invoke_timeout: float = 120.0
+    # Dedicated, short timeout (seconds) for the best-effort RAG-space
+    # lifecycle client (REQ-018 + review C-3): a hung mcp-raganything must
+    # never hold agent CRUD for the (much longer) MCP tool timeout.
+    rag_space_timeout: float = 5.0
 
     minio_endpoint: str = "localhost:9040"
     minio_access_key: str = "minioadmin"

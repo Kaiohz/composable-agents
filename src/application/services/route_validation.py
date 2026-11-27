@@ -13,17 +13,19 @@ and the MCP error mapper already understand.
 import re
 from datetime import UTC, datetime
 
+from src.domain.constants import MAX_YAML_SIZE
 from src.domain.errors.config import ConfigError
 from src.domain.errors.messages import ErrorMessage
 from src.domain.errors.store_file import StoreFileNotFoundError
+from src.domain.services.agent_scope import MEMORIES_PREFIX, agent_memory_prefix, agent_scope_slug, is_valid_scope_slug
 
 #: REST agent-name pattern — shared verbatim with the MCP agent tools.
 AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,98}[a-zA-Z0-9]$")
-#: 1 MB YAML upload limit — shared verbatim with the MCP agent tools.
-MAX_YAML_SIZE = 1024 * 1024
+# ``MAX_YAML_SIZE`` (1 MB YAML upload limit) is imported from
+# :mod:`src.domain.constants` — the single owner shared with the read-side
+# agent-topology resolver (review NV-1).
 
 _SKILLS_PREFIX = "/skills/"
-_MEMORIES_PREFIX = "/memories/"
 
 
 def _reject_unsafe_component(component: str, invalid_message: str) -> str:
@@ -107,19 +109,104 @@ def skill_directory_path(skill_name: str) -> str:
     return normalize_store_path(f"{_SKILLS_PREFIX}{name}/")
 
 
-def memory_store_path(filename: str) -> str:
-    """Resolve the global ``/memories/<filename>`` path (REQ-013).
+def validate_agent_slug(slug: str) -> str:
+    """Validate one agent-slug segment (REQ-002/REQ-015 charset rule).
+
+    The single controlled nesting segment of an agent-scoped memory path:
+    lowercase alphanumerics and dashes, 1..100 characters (the pattern is
+    owned by :mod:`src.domain.services.agent_scope` — one rule, one owner).
+
+    Args:
+        slug: The candidate agent segment.
+
+    Returns:
+        The validated (unchanged) slug.
 
     Raises:
-        StoreFileNotFoundError: On any traversal/escape attempt.
+        StoreFileNotFoundError: When the segment violates the charset rule.
     """
+    if not is_valid_scope_slug(slug):
+        raise StoreFileNotFoundError(ErrorMessage.MCP_MEMORY_AGENT_SEGMENT_INVALID.format(slug=slug))
+    return slug
+
+
+def memory_store_path(filename: str, agent_scope: str | None = None) -> str:
+    """Resolve a ``/memories/<name>`` store path (REQ-013 + REQ-015 + REQ-020).
+
+    Two accepted shapes:
+
+    * ``agent_scope`` bound (REQ-020 closure, agent-facing platform tools):
+      ``filename`` must be a PLAIN component and the file resolves inside the
+      bound agent's space — ``/memories/{slug}/{filename}`` where ``slug`` is
+      the bound agent's canonical scope slug (C-1: platform-controlled, so
+      no agent/scope can be smuggled through the filename and the segment is
+      always slug-valid even for non-slug agent names).
+    * ``agent_scope`` unset (external MCP sessions, personal namespace):
+      ``filename`` is either the flat personal shape ``{name}`` (REQ-013,
+      unchanged) or the nested agent shape ``{agent_slug}/{name}`` with
+      EXACTLY one agent segment validated against :func:`validate_agent_slug`
+      (REQ-015 — provided segments are validated STRICTLY, never mapped).
+      Deeper nesting stays rejected.
+
+    Raises:
+        StoreFileNotFoundError: On any traversal/escape or invalid segment.
+    """
+    if agent_scope is not None:
+        name = _reject_unsafe_component(filename, ErrorMessage.MCP_MEMORY_NAME_INVALID.format(name=filename))
+        return normalize_store_path(f"{MEMORIES_PREFIX}{agent_scope_slug(agent_scope)}/{name}")
+
+    normalized = (filename or "").strip().strip("/")
+    if "/" in normalized:
+        agent_segment, _, nested_name = normalized.partition("/")
+        validate_agent_slug(agent_segment)
+        name = _reject_unsafe_component(nested_name, ErrorMessage.MCP_MEMORY_NAME_INVALID.format(name=filename))
+        return normalize_store_path(f"{MEMORIES_PREFIX}{agent_segment}/{name}")
     name = _reject_unsafe_component(filename, ErrorMessage.MCP_MEMORY_NAME_INVALID.format(name=filename))
-    return normalize_store_path(f"{_MEMORIES_PREFIX}{name}")
+    return normalize_store_path(f"{MEMORIES_PREFIX}{name}")
 
 
-def memories_prefix() -> str:
-    """Return the global memories store prefix."""
-    return _MEMORIES_PREFIX
+def memories_prefix(agent_scope: str | None = None) -> str:
+    """Return the memories store prefix, scoped to an agent when given.
+
+    Args:
+        agent_scope: When set, the caller's agent space prefix
+            ``/memories/{slug}/`` (the canonical scope slug of the bound
+            agent name, REQ-020 + C-1); ``None`` returns the flat global
+            personal prefix ``/memories/`` (REQ-019).
+    """
+    return agent_memory_prefix(agent_scope)
+
+
+def validate_memories_store_path(path: str) -> str:
+    """Validate one ``/memories/...`` store path for the REST store-file route.
+
+    Both boundaries of the same store MUST enforce REQ-015 identically: the
+    MCP memories tools validate the agent segment and the depth through
+    :func:`memory_store_path`, while the REST store-file route historically
+    accepted ANY ``/memories/...`` shape (QA BUG-005). The path must be
+    exactly the flat personal shape ``/memories/{name}`` or the
+    single-segment agent shape ``/memories/{agent_slug}/{name}`` with an
+    ``agent_slug`` matching :func:`validate_agent_slug` (REQ-002 charset);
+    deeper nesting stays rejected. Paths OUTSIDE the ``/memories/`` prefix
+    (skills, agent namespaces) keep the general ``normalize_store_path``
+    contract unchanged.
+
+    Args:
+        path: The store path as captured by the route (leading slash added
+            and ``..`` traversal rejected first, unchanged behavior).
+
+    Returns:
+        The normalized, validated store path to use.
+
+    Raises:
+        StoreFileNotFoundError: On any traversal/escape, invalid agent
+            segment or deeper nesting — the same centralized error the
+            route already raises for traversal attempts (mapped to 404).
+    """
+    normalized = normalize_store_path(path)
+    if not normalized.startswith(MEMORIES_PREFIX):
+        return normalized
+    return memory_store_path(normalized[len(MEMORIES_PREFIX) :])
 
 
 def utc_bound(value):

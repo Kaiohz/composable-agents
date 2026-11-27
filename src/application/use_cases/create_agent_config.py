@@ -14,6 +14,7 @@ from src.domain.ports.agent_config_repository import AgentConfigRepository
 from src.domain.ports.agent_config_store import AgentConfigStore
 from src.domain.ports.model_repository import ModelRepository
 from src.domain.ports.prompt_repository import PromptRepository
+from src.domain.services.agent_rag_spaces import AgentRagSpaces
 from src.domain.services.agent_registry_refs import (
     registry_ref_metadata_fields,
     validate_registry_refs,
@@ -40,6 +41,7 @@ class CreateAgentConfigUseCase:
         prompt_repository: PromptRepository | None = None,
         model_repository: ModelRepository | None = None,
         import_service: AgentImportService | None = None,
+        rag_spaces: AgentRagSpaces | None = None,
     ) -> None:
         self._config_loader = config_loader
         self._config_store = config_store
@@ -47,9 +49,22 @@ class CreateAgentConfigUseCase:
         self._prompt_repository = prompt_repository
         self._model_repository = model_repository
         self._import_service = import_service
+        self._rag_spaces = rag_spaces
 
     async def execute(self, name: str, yaml_content: str) -> AgentConfig:
         """Parse YAML, validate, materialize declared resources and persist.
+
+        REQ-018: the agent's RAG space AND every subagent's space are
+        idempotently provisioned through the spaces API with the creating
+        user's credential — BEST-EFFORT: an unreachable or rejecting spaces
+        API only warns and never fails the creation (the space is created
+        lazily on first use inside mcp-raganything). The scoping hooks run at
+        this level so BOTH creation flows are covered: the imported
+        materialization (production wiring) and the legacy
+        parse/validate/persist flow (degraded wiring and unit seams) — a
+        topology that collides with another agent's space is rejected BEFORE
+        anything is persisted, and the provisioning is scheduled only after
+        the agent exists.
 
         Args:
             name: Agent name.
@@ -65,12 +80,35 @@ class CreateAgentConfigUseCase:
             PromptNotFoundError / ModelNotFoundError: If prompt_ref/model_ref
                 cannot be resolved for the owner (§9).
         """
+        if self._rag_spaces is not None:
+            # C-2 (option a): reject a topology whose mapped slugs collide
+            # with another existing agent's slug — shared slugs mean shared
+            # RAG spaces. Fail-fast BEFORE any flow persists anything.
+            pre_parsed = self._config_loader.load_from_string(yaml_content)
+            await self._rag_spaces.validate_space_ownership(
+                pre_parsed.name, [subagent.name for subagent in pre_parsed.subagents]
+            )
         if self._import_service is not None:
-            return await self._import_service.import_agent(name, yaml_content)
-        return await self._legacy_create(name, yaml_content)
+            config = await self._import_service.import_agent(name, yaml_content)
+        else:
+            config = await self._legacy_create(name, yaml_content)
+        if self._rag_spaces is not None:
+            # REQ-018 + review C-3: fire-and-forget background provisioning
+            # (the task captures the caller's contextvars — credential and
+            # store namespace remain the originating user's).
+            self._rag_spaces.schedule_provision_for_agent(
+                config.name, [subagent.name for subagent in config.subagents]
+            )
+
+        logger.info(LogMessage.AGENT_CONFIG_CREATED_UC, name)
+        return config
 
     async def _legacy_create(self, name: str, yaml_content: str) -> AgentConfig:
-        """Parse, validate then store the YAML as-is (pre-materialization flow)."""
+        """Parse, validate then store the YAML as-is (pre-materialization flow).
+
+        The RAG-space ownership validation and provisioning run at the
+        :meth:`execute` level (shared with the import flow).
+        """
         config = self._config_loader.load_from_string(yaml_content)
 
         if config.name != name:
@@ -95,6 +133,4 @@ class CreateAgentConfigUseCase:
             **registry_ref_metadata_fields(config),
         )
         await self._config_repository.save(metadata)
-
-        logger.info(LogMessage.AGENT_CONFIG_CREATED_UC, name)
         return config

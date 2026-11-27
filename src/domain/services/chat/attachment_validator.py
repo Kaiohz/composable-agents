@@ -112,12 +112,7 @@ DOCUMENT_EXTENSION_MIME_PREFIX: dict[str, str] = {
 
 def _has_traversal_sequence(filename: str) -> bool:
     """Return True when the filename carries a traversal/exploit/control sequence."""
-    return (
-        ".." in filename
-        or "\\" in filename
-        or filename.startswith("/")
-        or any(ord(char) < 32 for char in filename)
-    )
+    return ".." in filename or "\\" in filename or filename.startswith("/") or any(ord(char) < 32 for char in filename)
 
 
 def _refuse_unsafe_filename(filename: str) -> None:
@@ -170,9 +165,7 @@ def _strict_decode(filename: str, content_base64: str) -> bytes:
     try:
         return base64.b64decode(content_base64, validate=True)
     except binascii.Error as exc:
-        raise AttachmentValidationError(
-            ErrorMessage.ATTACHMENT_INVALID_BASE64.format(filename=filename)
-        ) from exc
+        raise AttachmentValidationError(ErrorMessage.ATTACHMENT_INVALID_BASE64.format(filename=filename)) from exc
 
 
 def _classify_and_validate(

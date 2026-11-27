@@ -12,6 +12,7 @@ from src.domain.errors.mcp import McpConnectionError, McpToolLoadError
 from src.domain.errors.messages import ErrorMessage
 from src.domain.logging.messages import LogMessage
 from src.domain.ports.mcp_tool_loader import McpToolLoader
+from src.domain.services.agent_scope import agent_scope_slug
 from src.domain.services.mcp_auth_mode import user_credential_headers
 from src.infrastructure.database.rls_context import current_auth_context
 from src.infrastructure.env_utils import resolve_all_vars, resolve_headers_drop_empty
@@ -47,6 +48,15 @@ def _merge_headers(base: dict[str, str], injected: dict[str, str]) -> dict[str, 
     return dict(merged.values())
 
 
+#: Automatically injected agent-scope header (REQ-016): every outbound HTTP
+#: MCP server connection of a scoped agent carries ``X-Composable-Agent:
+#: {scope_slug}`` (the canonical slug of the agent/subagent name — review
+#: C-1) so the receiving mcp-raganything server resolves the caller's space
+#: without ever seeing an illegal value. Platform-injected at tool-load
+#: time — NEVER an LLM-supplied parameter.
+AGENT_SCOPE_HEADER = "X-Composable-Agent"
+
+
 class LangchainMcpToolLoader(McpToolLoader):
     """Adapter MCP utilisant langchain-mcp-adapters pour charger des outils."""
 
@@ -62,7 +72,7 @@ class LangchainMcpToolLoader(McpToolLoader):
         # (retry/skip) instead of stalling or being killed.
         self._tool_timeout = tool_timeout
 
-    def _http_connection_spec(self, config: McpServerConfig) -> dict[str, Any]:
+    def _http_connection_spec(self, config: McpServerConfig, agent_scope: str | None = None) -> dict[str, Any]:
         """Build the ``streamable_http`` connection spec for one HTTP server.
 
         Credential precedence: REQ-005 (stored auth_token as
@@ -78,6 +88,20 @@ class LangchainMcpToolLoader(McpToolLoader):
         injected credential. One resolution pass resolves env/user
         placeholders and drops empty/credential-empty entries (never send a
         malformed ``Authorization: Bearer `` or empty ``X-API-Key``).
+
+        REQ-016/REQ-017 + review C-1: a scoped build additionally injects
+        ``X-Composable-Agent`` (the injected header WINS over a
+        case-insensitive YAML-configured collision, ``_merge_headers``
+        semantics) and resolves the ``${AGENT_NAME}`` placeholder of the
+        YAML-configured headers. BOTH values go through the canonical
+        name→slug mapping (:func:`agent_scope_slug` — the ONE owner shared
+        with the spaces API and the memories closure), so the receiver's
+        REQ-002 charset rule can never be violated and no illegal header
+        byte (CR/LF, control chars) can ever be emitted: a slug-valid name
+        passes through unchanged, any other name maps deterministically.
+        The injection is platform-side, at tool-load time — never an LLM
+        choice. ``agent_scope=None`` (built-in assistant, personal scope)
+        injects nothing.
         """
         injected: dict[str, str] = {}
         if config.auth_token:
@@ -85,17 +109,33 @@ class LangchainMcpToolLoader(McpToolLoader):
             if token:
                 injected["Authorization"] = f"Bearer {token}"
         injected.update(user_credential_headers(config.auth_mode, current_auth_context.get()))
+        # REQ-016 + C-1: the agent-scope header rides the injected (winning)
+        # layer, and its value is the canonical slug — never the raw name.
+        if agent_scope:
+            scope = agent_scope_slug(agent_scope)
+            injected[AGENT_SCOPE_HEADER] = scope
+            # REQ-017 + C-1: the YAML-configured headers resolve ${AGENT_NAME}
+            # against the SAME canonical slug (before os.environ).
+            extra_vars = {"AGENT_NAME": scope}
+        else:
+            extra_vars = None
         return {
             "transport": "streamable_http",
             "url": config.url,
-            "headers": resolve_headers_drop_empty(_merge_headers(dict(config.headers), injected)),
+            "headers": resolve_headers_drop_empty(
+                _merge_headers(dict(config.headers), injected), extra_vars=extra_vars
+            ),
         }
 
-    async def load_tools(self, configs: list[McpServerConfig]) -> list[Any]:
+    async def load_tools(self, configs: list[McpServerConfig], agent_scope: str | None = None) -> list[Any]:
         """Charge les outils depuis les serveurs MCP configures.
 
         Args:
             configs: Liste des configurations de serveurs MCP.
+            agent_scope: Nom de l'agent courant dont les connexions HTTP
+                sortantes relevent (mappé sur le slug canonique avant
+                injection — ``None`` pour le scope personal, aucun en-tete
+                ``X-Composable-Agent``).
 
         Returns:
             Liste des outils charges depuis les serveurs MCP.
@@ -115,7 +155,7 @@ class LangchainMcpToolLoader(McpToolLoader):
                     "env": resolve_headers_drop_empty(config.env),
                 }
             elif config.transport == McpTransportType.HTTP:
-                server_configs[config.name] = self._http_connection_spec(config)
+                server_configs[config.name] = self._http_connection_spec(config, agent_scope)
 
         try:
             # The client expects a mapping of validated connection TypedDicts.

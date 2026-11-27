@@ -68,6 +68,11 @@ class TestSkillDirectoryPath:
 
 
 class TestMemoryStorePath:
+    # REQ-015: ``a/b`` is NO LONGER unsafe for memories — it is the accepted
+    # nested agent shape (agent segment validated). The remaining traversal
+    # components stay refused for the personal namespace.
+    _UNSAFE_MEMORY_COMPONENTS = [c for c in _UNSAFE_COMPONENTS if c != "a/b"]
+
     @pytest.mark.parametrize(
         ("filename", "expected"),
         [("AGENTS.md", "/memories/AGENTS.md"), ("notes.md", "/memories/notes.md")],
@@ -75,10 +80,51 @@ class TestMemoryStorePath:
     def test_resolves_under_the_global_prefix(self, filename, expected):
         assert memory_store_path(filename) == expected
 
-    @pytest.mark.parametrize("filename", _UNSAFE_COMPONENTS)
+    @pytest.mark.parametrize("filename", _UNSAFE_MEMORY_COMPONENTS)
     def test_prefix_escape_is_refused(self, filename):
         with pytest.raises(StoreFileNotFoundError):
             memory_store_path(filename)
+
+    @pytest.mark.parametrize(
+        ("filename", "expected"),
+        [("agent-x/notes.md", "/memories/agent-x/notes.md"), ("a0/b.md", "/memories/a0/b.md")],
+    )
+    def test_nested_agent_shape_is_accepted(self, filename, expected):
+        """REQ-015: the nested shape ``{agent_slug}/{name}`` resolves to
+        ``/memories/{agent_slug}/{name}`` when the agent segment matches the
+        REQ-002 charset."""
+        assert memory_store_path(filename) == expected
+
+    @pytest.mark.parametrize(
+        "filename",
+        ["bad_agent/notes.md", "BadAgent/notes.md", "agent/deep/notes.md", "../escape-x/notes.md"],
+    )
+    def test_invalid_agent_segments_are_refused(self, filename):
+        """REQ-015: invalid agent segments and deeper nesting stay refused."""
+        with pytest.raises(StoreFileNotFoundError):
+            memory_store_path(filename)
+
+    def test_bound_scope_resolves_inside_the_agent_space(self):
+        """REQ-020: with a bound agent_scope the filename must be a plain
+        component and resolves inside ``/memories/{agent_scope}/``."""
+        assert memory_store_path("notes.md", agent_scope="agent-x") == "/memories/agent-x/notes.md"
+        with pytest.raises(StoreFileNotFoundError):
+            memory_store_path("a/b.md", agent_scope="agent-x")
+
+    def test_bound_scope_cannot_bind_the_reserved_personal_namespace(self):
+        """Review N-1 layer (d): a bound agent scope named 'personal' maps
+        onto its own distinct fallback slug — never the flat personal
+        namespace (which belongs to scope-less sessions)."""
+        from src.domain.services.agent_scope import agent_scope_slug
+
+        bound = agent_scope_slug("personal")
+        assert bound != "personal"
+        assert memory_store_path("notes.md", agent_scope="personal") == f"/memories/{bound}/notes.md"
+        assert (
+            memory_store_path("notes.md", agent_scope="Personal")
+            == f"/memories/{agent_scope_slug('Personal')}/notes.md"
+        )
+        assert memory_store_path("notes.md", agent_scope="personal") != "/memories/personal/notes.md"
 
 
 class TestNormalizeStorePath:

@@ -16,6 +16,11 @@ When the contextvars are unset (no auth context, e.g. tests), both
 placeholders resolve to empty strings — enabling MCP credential propagation
 to forward the current user's credential to remote MCP servers (raganything)
 instead of a static env-var key.
+
+``resolve_headers_drop_empty`` additionally accepts ``extra_vars``: extra
+reserved placeholders resolved BEFORE ``os.environ`` (e.g. ``AGENT_NAME`` →
+the running agent's name, supplied by the tool loader that knows the agent
+scope — REQ-017). An ``extra_vars`` name never leaks beyond the call.
 """
 
 import os
@@ -110,11 +115,48 @@ def resolve_env_vars_in_dict(mapping: dict[str, Any]) -> dict[str, Any]:
     return resolved
 
 
-def resolve_headers_drop_empty(mapping: dict[str, str]) -> dict[str, str]:
+def _resolve_header_entry(value: str, extra: dict[str, str]) -> str | None:
+    """Resolve ONE header value's placeholders; ``None`` means DROP the entry.
+
+    Same resolution order and drop rules as documented on
+    :func:`resolve_headers_drop_empty` (extracted per Sonar S3776 — the
+    function follows the shape of :func:`resolve_all_vars`): the
+    user-credential placeholders first, then ``extra`` reserved placeholders
+    (e.g. ``AGENT_NAME``), then ``os.environ``; the entry is DROPPED when the
+    resolved value is empty or when a user-credential placeholder resolved
+    to empty.
+    """
+    user_placeholder_resolved_empty = False
+
+    def _replace(match: re.Match[str]) -> str:
+        nonlocal user_placeholder_resolved_empty
+        name = match.group(1)
+        if name in _USER_PLACEHOLDERS:
+            rv = _resolve_user_placeholder(name)
+            if rv == "":
+                user_placeholder_resolved_empty = True
+            return rv
+        if name in extra:
+            return extra[name]
+        return os.environ.get(name, match.group(0))
+
+    rv = re.sub(r"\$\{(\w+)\}", _replace, value)
+    if not rv or user_placeholder_resolved_empty:
+        return None
+    return rv
+
+
+def resolve_headers_drop_empty(
+    mapping: dict[str, str],
+    extra_vars: dict[str, str] | None = None,
+) -> dict[str, str]:
     """Resolve placeholders in HTTP headers and drop empty/credential-empty entries.
 
     Resolves both environment variables and user-credential placeholders
-    (see :func:`resolve_all_vars`). A header entry is DROPPED when:
+    (see :func:`resolve_all_vars`). ``extra_vars`` (REQ-017) maps ADDITIONAL
+    reserved placeholders resolved before ``os.environ`` (e.g.
+    ``{"AGENT_NAME": "<agent name>"}`` — the tool loader resolves the running
+    agent's scope). A header entry is DROPPED when:
 
     * the resolved value is an empty string (e.g. ``X-API-Key: ""``), OR
     * the header contained a user-credential placeholder
@@ -128,30 +170,20 @@ def resolve_headers_drop_empty(mapping: dict[str, str]) -> dict[str, str]:
 
     Args:
         mapping: The input header mapping (e.g. ``{"Authorization": "Bearer ${USER_JWT}"}``).
+        extra_vars: Optional extra reserved placeholders resolved before
+            ``os.environ`` (never read from the environment).
 
     Returns:
         A new dict with resolved values; entries dropped per the rules above.
     """
     resolved: dict[str, str] = {}
+    extra = extra_vars or {}
     for key, value in mapping.items():
         if not isinstance(value, str):
             resolved[key] = value
             continue
-
-        user_placeholder_resolved_empty = False
-
-        def _replace(match: re.Match[str]) -> str:
-            nonlocal user_placeholder_resolved_empty
-            name = match.group(1)
-            if name in _USER_PLACEHOLDERS:
-                rv = _resolve_user_placeholder(name)
-                if rv == "":
-                    user_placeholder_resolved_empty = True
-                return rv
-            return os.environ.get(name, match.group(0))
-
-        rv = re.sub(r"\$\{(\w+)\}", _replace, value)
-        if not rv or user_placeholder_resolved_empty:
+        entry = _resolve_header_entry(value, extra)
+        if entry is None:
             continue
-        resolved[key] = rv
+        resolved[key] = entry
     return resolved

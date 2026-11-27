@@ -118,6 +118,59 @@ Any MCP-over-streamable-HTTP client can connect with the same credential used by
 
 Use the same `Authorization: Bearer <jwt>` header for JWT-based clients. An invalid presented JWT does not silently fall back to an API key.
 
+### Scoping an external MCP client to an agent space (REQ-025)
+
+Every outbound MCP server connection of a platform agent automatically carries
+`X-Composable-Agent: <scope-slug>` (injected by the platform at tool-load time — never an
+LLM-supplied parameter): the top-level agent reports its own name's slug, each subagent its own.
+The slug is the deterministic, documented mapping of the agent name (lowercase, non
+`[a-z0-9-]` characters → `-`, collapsed, truncated to 100); a name that is already slug-valid
+(e.g. `sub-1`) is forwarded unchanged.
+
+External coding agents (OpenCode, Claude Code…) select their workspace the same way: set the
+header on the MCP server entries of the TARGET mcp-raganything servers. The value must match
+`^[a-z0-9][a-z0-9-]{0,99}$`; an absent header means the `personal` scope, and `personal` itself is
+reserved (requests without the header) — it can never be owned by an agent. A name that maps onto
+the reserved `personal` slug never takes it: such an agent gets its own deterministic slug
+(`personal-<8 hex chars>`, derived from the name), so it never shares — and its deletion never
+cascade-deletes — your personal space. Use one MCP server
+entry per scope — same URL, different header values:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "my-agent-space": {
+        "type": "remote",
+        "url": "https://composables-rag.soludev.tech/files/mcp",
+        "headers": { "X-API-Key": "cpk_...", "X-Composable-Agent": "my-agent" }
+      },
+      "my-coding-ide-space": {
+        "type": "remote",
+        "url": "https://composables-rag.soludev.tech/files/mcp",
+        "headers": { "X-API-Key": "cpk_...", "X-Composable-Agent": "opencode" }
+      }
+    }
+  }
+}
+```
+
+In a platform agent's YAML, the running agent's scope slug is available as the `${AGENT_NAME}`
+placeholder in MCP header values (resolved with the same mechanism as `${USER_JWT}` /
+`${USER_API_KEY}`, before `os.environ`); the automatically injected `X-Composable-Agent`
+overrides any YAML-configured `x-composable-agent` (case-insensitive merge). Agent creation
+also idempotently provisions a RAG space (`agent_slug`) for the agent and each of its
+subagents on mcp-raganything, and agent deletion deprovisions those spaces and purges
+`/memories/{slug}/`.
+
+Trust boundary of the header: it identifies the scope WITHIN your own account — any
+authenticated client may claim any agent slug, and the user id always comes from the
+credential, so cross-user access is impossible by construction. MCP servers registered through
+the registry carry user-configured scope headers verbatim on the built-in assistant's
+connections (no platform injection or re-mapping on that path); platform agents' own YAML
+servers always get the injected header.
+
 ### Native OAuth2 (MCP authorization spec, 2025-06-18 discovery)
 
 The MCP endpoint speaks the MCP OAuth2 discovery chain for code agents (`OpenCode`, `Claude Code`, …):
