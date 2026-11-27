@@ -1,9 +1,12 @@
-"""Behavioral tests — Model catalog reduced to model identity (spec §B
-MODEL-001…MODEL-009 of model-catalog-settings-only.md).
+"""Behavioral tests — Model catalog identity (spec §B MODEL-001…MODEL-009 of
+model-catalog-settings-only.md, with the serving provider RESTORED to the
+identity by the late model-catalog slice: the ancestor DB-002 drop of
+``models.provider`` is undone by migration 025).
 
-Target rule: **Settings owns the provider connection (provider, base_url,
-api_key); a Model resource owns ONLY its display name and the
-``provider_model`` identifier to execute.**
+Target rule: **Settings owns the provider connection (base_url, api_key); a
+Model resource owns its serving ``provider`` (catalog identity, platform
+default ``openai``), its display ``name`` and the ``provider_model``
+identifier to execute.**
 
 Routes under test (real HTTP entry points on the real app):
 * GET    /api/v1/models
@@ -13,15 +16,16 @@ Routes under test (real HTTP entry points on the real app):
 * DELETE /api/v1/models/{id}
 
 Contract under test (the Red target of this step):
-* MODEL-001: ``ModelMetadata`` exposes exactly ``id, name, provider_model,
-  created_at, updated_at`` — never ``provider`` nor ``base_url``.
-* MODEL-002: POST accepts exactly ``name`` and ``provider_model`` (both
-  required, non-empty after trim, existing length limits).
-* MODEL-003: create/read/update/list responses must not contain ``provider``
-  nor ``base_url``.
-* MODEL-004: PATCH accepts a non-empty subset of ``name``/``provider_model``.
-* MODEL-005: any request body containing ``provider``, ``base_url`` or any
-  other unknown field is rejected with HTTP 422 (``extra="forbid"``).
+* MODEL-001: ``ModelMetadata`` exposes exactly ``id, name, provider,
+  provider_model, created_at, updated_at`` — never ``base_url``.
+* MODEL-002: POST accepts ``name``, the optional ``provider`` (default
+  ``openai``) and ``provider_model`` (required, non-empty after trim).
+* MODEL-003: create/read/update/list responses expose the identity field set
+  including ``provider`` — never ``base_url``.
+* MODEL-004: PATCH accepts a non-empty subset of ``name``/``provider``/
+  ``provider_model``.
+* MODEL-005: any request body containing ``base_url`` or any other unknown
+  field is rejected with HTTP 422 (``extra="forbid"``).
 * MODEL-006: an empty PATCH ``{}`` stays rejected; omitted fields keep their
   values.
 * MODEL-008: ownership, non-enumeration and referenced-delete rules unchanged.
@@ -43,12 +47,13 @@ from tests.behavioral.conftest import create_agent_yaml
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 VALIDATION_CODE = 422
-# The exactly-allowed identity field set (MODEL-001) — the legacy connection
-# fields ``provider`` and ``base_url`` have been removed from the contract.
-MODEL_FIELDS = {"id", "name", "provider_model", "created_at", "updated_at"}
-# Fields removed from the Model contract (now owned exclusively by user LLM
+# The exactly-allowed identity field set (MODEL-001) — the restored serving
+# provider IS part of the identity; the legacy connection field ``base_url``
+# stays removed from the contract.
+MODEL_FIELDS = {"id", "name", "provider", "provider_model", "created_at", "updated_at"}
+# Fields removed from the Model contract (owned exclusively by user LLM
 # Settings) — no request may send them and no response may echo them.
-REMOVED_FIELDS = ("provider", "base_url")
+REMOVED_FIELDS = ("base_url",)
 
 
 def model_payload(name="Primary model", provider_model="gpt-x"):
@@ -72,8 +77,9 @@ def assert_identity_shape(body: dict) -> None:
 
 
 class TestCreateModel:
-    async def test_post_accepts_only_name_and_provider_model(self, client, users):
-        """MODEL-002: the new contract requires ONLY name + provider_model."""
+    async def test_post_defaults_the_provider_and_accepts_identity_fields(self, client, users):
+        """MODEL-002: the restored contract requires name + provider_model; an
+        omitted ``provider`` defaults to the OpenAI-compatible serving chain."""
         resp = await client.post(
             "/api/v1/models",
             headers=users["a"]["headers"],
@@ -84,21 +90,40 @@ class TestCreateModel:
         assert_identity_shape(body)
         uuid.UUID(body["id"])
         assert body["name"] == "GLM 5.3 Flash"
+        assert body["provider"] == "openai", "the omitted provider must default to the OpenAI-compatible chain"
         assert body["provider_model"] == "z-ai/glm-5.3-flash:nitro"
 
-    async def test_legacy_connection_fields_are_rejected(self, client, users):
-        """MODEL-005: ``provider`` and ``base_url`` no longer belong to a Model
-        resource — the boundary must reject them with HTTP 422."""
-        with_provider = model_payload() | {"provider": "openai"}
-        rejected_provider = await client.post("/api/v1/models", headers=users["a"]["headers"], json=with_provider)
-        assert rejected_provider.status_code == VALIDATION_CODE, rejected_provider.text
+    async def test_post_accepts_an_explicit_provider(self, client, users):
+        """MODEL-002: the serving provider is an identity field and round-trips."""
+        resp = await client.post(
+            "/api/v1/models",
+            headers=users["a"]["headers"],
+            json=model_payload(name="Claude catalog", provider_model="claude-3-7-sonnet") | {"provider": "anthropic"},
+        )
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert_identity_shape(body)
+        assert body["provider"] == "anthropic", "an explicit provider must be persisted and echoed"
+
+    async def test_base_url_is_rejected_while_the_provider_is_identity(self, client, users):
+        """MODEL-005: the Settings-owned ``base_url`` no longer belongs to a
+        Model resource — the boundary must reject it with HTTP 422 — while the
+        restored serving ``provider`` stays accepted as identity."""
+        accepted = await client.post(
+            "/api/v1/models",
+            headers=users["a"]["headers"],
+            json=model_payload(name="Identity provider") | {"provider": "openai"},
+        )
+        assert accepted.status_code == 201, accepted.text
 
         with_base_url = model_payload() | {"base_url": "https://api.example.com/v1"}
         rejected_base_url = await client.post("/api/v1/models", headers=users["a"]["headers"], json=with_base_url)
         assert rejected_base_url.status_code == VALIDATION_CODE, rejected_base_url.text
 
-        nothing_persisted = await client.get("/api/v1/models", headers=users["a"]["headers"])
-        assert _items(nothing_persisted) == []
+        listing = await client.get("/api/v1/models", headers=users["a"]["headers"])
+        assert [m["name"] for m in _items(listing)] == ["Identity provider"], (
+            "only the accepted create may persist; the rejected one persists nothing"
+        )
 
     async def test_required_fields_and_trim_rules(self, client, users):
         """MODEL-002: both values are required, non-empty after trim; values
@@ -199,13 +224,12 @@ class TestPatchModel:
         assert patched_name.json()["provider_model"] == "new-x"
 
     async def test_patch_rejects_removed_and_unknown_fields(self, client, users):
-        """MODEL-004/005: ``provider`` and ``base_url`` (and any other unknown
-        field) are rejected with HTTP 422, no subset applied."""
+        """MODEL-004/005: the Settings-owned ``base_url`` (and any other
+        unknown field) is rejected with HTTP 422, no subset applied; the
+        restored serving ``provider`` stays a valid editable identity field."""
         model = await _create_model(client, users["a"]["headers"], name="Stable", provider_model="stable-x")
         for payload in (
-            {"provider": "anthropic"},
             {"base_url": "https://api.example.com/v1"},
-            {"name": "Hijack", "provider": "openai"},
             {"unknown_field": "x"},
         ):
             resp = await client.patch(f"/api/v1/models/{model['id']}", headers=users["a"]["headers"], json=payload)
@@ -213,6 +237,16 @@ class TestPatchModel:
 
         got = await client.get(f"/api/v1/models/{model['id']}", headers=users["a"]["headers"])
         assert got.json()["name"] == "Stable"
+        assert got.json()["provider"] == "openai", "no invalid update may be applied"
+
+        provider_patch = await client.patch(
+            f"/api/v1/models/{model['id']}",
+            headers=users["a"]["headers"],
+            json={"provider": "anthropic"},
+        )
+        assert provider_patch.status_code == 200, provider_patch.text
+        assert provider_patch.json()["provider"] == "anthropic", "a provider-only PATCH is an identity edit"
+        assert provider_patch.json()["name"] == "Stable", "the omitted field keeps its value"
 
     async def test_patch_empty_object_rejected(self, client, users):
         """MODEL-006: an empty PATCH `{}` stays rejected."""
@@ -225,8 +259,10 @@ class TestPatchModel:
         model = await _create_model(client, users["a"]["headers"], name="Stable", provider_model="stable-x")
         for payload in (
             {"name": None},
+            {"provider": None},
             {"provider_model": None},
             {"name": ""},
+            {"provider": "  "},
             {"provider_model": "  "},
         ):
             resp = await client.patch(f"/api/v1/models/{model['id']}", headers=users["a"]["headers"], json=payload)

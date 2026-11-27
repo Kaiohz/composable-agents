@@ -26,10 +26,11 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 BUILTIN_NAME = "composable-ai-assistant"
 
-# MODEL-001 — the identity field set of a Model resource; the Settings-owned
-# connection fields ``provider``/``base_url`` are removed from the contract.
-MODEL_IDENTITY_FIELDS = {"id", "name", "provider_model", "created_at", "updated_at"}
-REMOVED_MODEL_FIELDS = ("provider", "base_url")
+# MODEL-001 — the identity field set of a Model resource; the serving
+# ``provider`` is RESTORED as identity (migration 025) while the Settings-owned
+# connection field ``base_url`` stays removed from the contract.
+MODEL_IDENTITY_FIELDS = {"id", "name", "provider", "provider_model", "created_at", "updated_at"}
+REMOVED_MODEL_FIELDS = ("base_url",)
 
 
 async def _select_builtin_refs(client, users, refs: list[str]) -> None:
@@ -319,10 +320,11 @@ class TestAssistantRunsAgents:
 
 class TestPlatformModelTools:
     """MODEL-007 through a REAL agent run (the agent-facing platform toolset):
-    the LLM-driven Model create/update tools follow the REST two-field contract
-    — same fields, removed (Settings-owned) fields rejected/exposed nowhere and
-    the same trim/non-empty rules (review C1: this is the surface that could
-    previously persist a blank ``name`` through ``model_copy``)."""
+    the LLM-driven Model create/update tools follow the REST identity contract
+    — same fields (including the restored serving ``provider``), the
+    Settings-owned ``base_url`` rejected/exposed nowhere and the same
+    trim/non-empty rules (review C1: this is the surface that could previously
+    persist a blank ``name`` through ``model_copy``)."""
 
     async def _create_model_via_mcp(
         self, mcp_base_url, users, name: str = "Toolset Base", provider_model: str = "toolset-base-x"
@@ -340,7 +342,7 @@ class TestPlatformModelTools:
         self, mcp_base_url, client, users, stub_llm, stub_registry
     ):
         """What the LLM actually receives: ``composable_models_update``'s bound
-        schema must carry the REST fields and never the removed ones."""
+        schema must carry the REST identity fields and never the removed ones."""
         await configure_llm_credentials(client, users["a"]["headers"])
         stub_llm.script(assistant_text("no tool"))
         run = await _run_assistant(mcp_base_url, users)
@@ -349,7 +351,9 @@ class TestPlatformModelTools:
         binding = next((t for t in tools if t.get("function", {}).get("name") == "composable_models_update"), None)
         assert binding is not None, "the platform toolset must expose composable_models_update to the assistant"
         props = set(binding["function"]["parameters"].get("properties", {}))
-        assert props == {"model_id", "name", "provider_model"}, f"bound update schema fields: {sorted(props)}"
+        assert props == {"model_id", "name", "provider", "provider_model"}, (
+            f"bound update schema fields: {sorted(props)}"
+        )
         for removed in REMOVED_MODEL_FIELDS:
             assert removed not in props, f"removed field '{removed}' is bound to the LLM-visible tool schema"
 
@@ -381,7 +385,7 @@ class TestPlatformModelTools:
         stub_llm.script(
             assistant_tool_call(
                 "composable_models_update",
-                {"model_id": model["id"], "name": "Hijack", "provider": "openai"},
+                {"model_id": model["id"], "name": "Hijack", "base_url": "https://api.example.com/v1"},
             ),
             assistant_text("self-corrected"),
         )
@@ -411,8 +415,9 @@ class TestPlatformModelTools:
         assert got.json()["provider_model"] == model["provider_model"], "the omitted field keeps its value"
 
     async def test_agent_facing_create_is_identity_only(self, mcp_base_url, client, users, stub_llm, stub_registry):
-        """A valid two-field create through the toolset persists an identity-only
-        resource; a removed field cannot join the payload."""
+        """A valid identity create through the toolset persists exactly the
+        identity field set (default ``openai`` provider); a removed field
+        cannot join the payload."""
         await configure_llm_credentials(client, users["a"]["headers"])
         stub_llm.script(
             assistant_tool_call(
@@ -431,6 +436,7 @@ class TestPlatformModelTools:
         for removed in REMOVED_MODEL_FIELDS:
             assert removed not in body, f"removed field '{removed}' must not be persisted by the tool surface"
         assert body["name"] == "Agent Tool" and body["provider_model"] == "agent-create-x"
+        assert body["provider"] == "openai", "the tool create must default the serving provider like REST"
 
     async def test_agent_facing_create_rejects_a_removed_field_argument(
         self, mcp_base_url, client, users, stub_llm, stub_registry
@@ -439,7 +445,8 @@ class TestPlatformModelTools:
         await configure_llm_credentials(client, users["a"]["headers"])
         stub_llm.script(
             assistant_tool_call(
-                "composable_models_create", {"name": "Smuggled", "provider_model": "smuggled-x", "provider": "openai"}
+                "composable_models_create",
+                {"name": "Smuggled", "provider_model": "smuggled-x", "base_url": "https://api.example.com/v1"},
             ),
             assistant_text("self-corrected"),
         )

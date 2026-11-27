@@ -1,10 +1,12 @@
-"""Identity-only model catalog HTTP routes (spec §B MODEL-001…006).
+"""Model catalog HTTP routes (spec §B MODEL-001…006, provider restored).
 
-Responses expose exactly the identity field set — a Model owns only its display
-name and ``provider_model`` identifier; the provider connection remains
-Settings-owned (MODEL-009; unknown body fields are rejected so no Settings or
-credential data can be smuggled in). Ownership derives from the authenticated
-request context; foreign ids are non-enumerating 404s.
+A Model identity owns its serving ``provider`` (catalog identity derived from
+the declared model string's prefix, platform default ``openai``), its display
+``name`` and the ``provider_model`` identifier; the provider CONNECTION
+(``base_url``/``api_key``) remains Settings-owned (MODEL-009; unknown body
+fields are rejected so no Settings or credential data can be smuggled in).
+Ownership derives from the authenticated request context; foreign ids are
+non-enumerating 404s.
 """
 
 import logging
@@ -51,7 +53,7 @@ async def create_model(
     """Create a model identity (connection fields are Settings-owned).
 
     Args:
-        body: ``{name, provider_model}``.
+        body: ``{name, provider? (default ``openai``), provider_model}``.
 
     Returns:
         The created model identity.
@@ -59,6 +61,7 @@ async def create_model(
     logger.info(LogMessage.MODEL_CREATING, body.name)
     return await use_case.execute(
         name=body.name,
+        provider=body.provider,
         provider_model=body.provider_model,
     )
 

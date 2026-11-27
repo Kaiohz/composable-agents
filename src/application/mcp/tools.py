@@ -550,7 +550,7 @@ def _register_prompts_family(mcp, safe_mcp_call) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Models family (MODEL-007: same two-field business contract as REST)
+# Models family (MODEL-007: same identity business contract as REST)
 # ---------------------------------------------------------------------------
 def _register_models_family(mcp, safe_mcp_call) -> None:
     @mcp.tool(name="composable_models_list", annotations=READONLY())
@@ -569,12 +569,13 @@ def _register_models_family(mcp, safe_mcp_call) -> None:
     @mcp.tool(name="composable_models_create", annotations=MUTATING())
     @safe_mcp_call
     async def composable_models_create(args: CreateModelRequest) -> ModelMetadata:
-        """Create a model identity (name + provider_model; nothing else accepted)."""
+        """Create a model identity (provider + name + provider_model)."""
         return (
             await _deps()
             .get_create_model_use_case()
             .execute(
                 name=args.name,
+                provider=args.provider,
                 provider_model=args.provider_model,
             )
         )

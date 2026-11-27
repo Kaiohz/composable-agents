@@ -636,14 +636,19 @@ class AgentPlatformToolsetBuilder:
             model = await deps_lazy().get_get_model_use_case().execute(model_id)
             return _json(_data(model))
 
-        async def composable_models_create(name: str, provider_model: str) -> str:
-            """Create a model identity (name + provider_model only)."""
-            model = await deps_lazy().get_create_model_use_case().execute(name=name, provider_model=provider_model)
+        async def composable_models_create(name: str, provider: str = "openai", provider_model: str = "") -> str:
+            """Create a model identity (serving provider + name + provider_model)."""
+            model = (
+                await deps_lazy()
+                .get_create_model_use_case()
+                .execute(name=name, provider=provider, provider_model=provider_model)
+            )
             return _json(_data(model))
 
         async def composable_models_update(
             model_id: str,
             name: str | None = None,
+            provider: str | None = None,
             provider_model: str | None = None,
         ) -> str:
             """Update model identity fields (REST-validated presence semantics)."""
@@ -654,6 +659,8 @@ class AgentPlatformToolsetBuilder:
             changes: dict[str, Any] = {}
             if name is not None:
                 changes["name"] = name
+            if provider is not None:
+                changes["provider"] = provider
             if provider_model is not None:
                 changes["provider_model"] = provider_model
             model = await deps_lazy().get_update_model_use_case().execute(model_id, changes)

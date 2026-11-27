@@ -333,7 +333,7 @@ class AgentImportService:
         if model is None:
             return None, None
         created = await self._model_repository.create(
-            ModelMetadata(name=model.resource_name, provider_model=model.provider_model)
+            ModelMetadata(name=model.resource_name, provider=model.provider, provider_model=model.provider_model)
         )
         ledger.record("model", model.resource_name, self._undo_model(created.id))
         logger.info(LogMessage.AGENT_IMPORT_RESOURCE_CREATED, "model", created.id, model.agent_name)

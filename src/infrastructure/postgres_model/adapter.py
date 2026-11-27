@@ -1,12 +1,12 @@
-"""PostgreSQL adapter for the identity-only model catalog (spec §B).
+"""PostgreSQL adapter for the model catalog (spec §B, provider restored).
 
 Ownership derives from the ``current_user_id`` contextvar (writes) plus
 Row-Level Security (reads), exactly like the other per-user repositories.
 Deletion (MODEL-008/SEC-002) checks the agent references AND the caller's
 built-in customization snapshots in the same transaction, with the
-``agent_configs.model_ref`` foreign key as the race backstop. The
-Settings-owned connection columns (``provider``, ``base_url``) are never read
-nor written here (DB-001).
+``agent_configs.model_ref`` foreign key as the race backstop. The Settings
+connection columns (``base_url``, ``api_key``) are never read nor written here
+(DB-001); the restored ``provider`` is an identity attribute only.
 """
 
 import logging
@@ -37,6 +37,7 @@ def _to_metadata(model: ModelConfigModel) -> ModelMetadata:
     return ModelMetadata(
         id=str(model.id),
         name=model.name,
+        provider=model.provider,
         provider_model=model.provider_model,
         created_at=model.created_at,
         updated_at=model.updated_at,
@@ -61,6 +62,7 @@ class PostgresModelRepository(ModelRepository):
                 row = ModelConfigModel(
                     id=UUID(model.id),
                     name=model.name,
+                    provider=model.provider,
                     provider_model=model.provider_model,
                     created_at=now,
                     updated_at=now,
@@ -104,6 +106,7 @@ class PostgresModelRepository(ModelRepository):
                 if row is None:
                     raise ModelNotFoundError(ErrorMessage.MODEL_NOT_FOUND.format(model_id=model.id))
                 row.name = model.name
+                row.provider = model.provider
                 row.provider_model = model.provider_model
                 row.updated_at = datetime.now(UTC)
                 await session.commit()
