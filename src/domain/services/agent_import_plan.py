@@ -185,7 +185,13 @@ def build_agent_import_plan(raw: dict, agent_name: str) -> AgentImportPlan:
     _check_agent_identity(raw, agent_name)
 
     model, model_ref = _plan_model(raw, agent_name)
-    prompt, prompt_ref = _plan_prompt(raw, agent_name)
+    # REQ-PROMPT-005 applies to MATERIALIZABLE imports (an inline model MUST
+    # be paired with a prompt, so both resources materialize in their
+    # registries). A REFERENCE-based agent (``model_ref``) may be prompt-less:
+    # the runtime applies the configuration default and the agent carries no
+    # prompt resource.
+    allowed_promptless = model_ref is not None
+    prompt, prompt_ref = _plan_prompt(raw, agent_name, allow_promptless=allowed_promptless)
     subagent_creations, subagent_entry_index, subagent_mcp, subagent_skill_refs = _plan_subagents(raw, agent_name)
     mcp_creations, mcp_refs = _plan_mcp(raw, agent_name, subagent_mcp)
     files, skill_refs, memory_refs, skill_targets, memory_targets = _plan_files(raw)
@@ -245,7 +251,9 @@ def _model_materialization(agent_name: str, model_value: Any) -> ModelMaterializ
     )
 
 
-def _plan_prompt(raw: dict, agent_name: str) -> tuple[PromptMaterialization | None, PromptRef | None]:
+def _plan_prompt(
+    raw: dict, agent_name: str, *, allow_promptless: bool = False
+) -> tuple[PromptMaterialization | None, PromptRef | None]:
     """Resolve the root's explicit prompt declaration (REQ-PROMPT-001..004)."""
     if raw.get("system_prompt_file"):
         # REQ-PROMPT-004: system_prompt_file stays forbidden in a YAML
@@ -273,6 +281,10 @@ def _plan_prompt(raw: dict, agent_name: str) -> tuple[PromptMaterialization | No
             )
         # REQ-PROMPT-002: an explicitly empty content stays valid.
         return PromptMaterialization(agent_name=agent_name, content=inline), None
+    if allow_promptless:
+        # Reference-based agent (``model_ref``): the runtime applies the
+        # configuration default and the agent carries no prompt resource.
+        return None, None
     # REQ-PROMPT-005: a new custom agent must declare a prompt.
     raise ConfigError(ErrorMessage.AGENT_IMPORT_MISSING_PROMPT.format(name=agent_name))
 
