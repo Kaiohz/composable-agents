@@ -115,3 +115,66 @@ class TestStreamTracing:
         config = _config_from_call(astream)
         assert "callbacks" in config
         assert mock_callback in config["callbacks"]
+
+
+class TestClassifyThinking:
+    """Thinking classification across provider chunk shapes.
+
+    OpenRouter normalizes reasoning-capable models (GLM 5.3, DeepSeek, R1…)
+    into ``delta.reasoning`` which langchain-openai surfaces as
+    ``additional_kwargs["reasoning"]``; DeepSeek sends the legacy
+    ``reasoning_content`` and Anthropic ``type == "thinking"``.
+    """
+
+    def test_openrouter_glm_reasoning_key_is_classified_thinking(self) -> None:
+        chunk = MagicMock()
+        chunk.content = ""
+
+        event, is_thinking = DeepAgentRunner._classify_thinking(
+            {"reasoning": "je compare les deux options"}, chunk
+        )
+
+        assert is_thinking is True
+        assert event[0] == TraceEventType.THINKING
+        assert event[2] == "je compare les deux options"
+
+    def test_deepseek_reasoning_content_is_still_classified_thinking(self) -> None:
+        chunk = MagicMock()
+        chunk.content = ""
+
+        event, is_thinking = DeepAgentRunner._classify_thinking(
+            {"reasoning_content": "deepseek thinks"}, chunk
+        )
+
+        assert is_thinking is True
+        assert event[2] == "deepseek thinks"
+
+    def test_blank_reasoning_content_falls_through_to_reasoning_key(self) -> None:
+        chunk = MagicMock()
+        chunk.content = ""
+
+        event, is_thinking = DeepAgentRunner._classify_thinking(
+            {"reasoning_content": "", "reasoning": "glm thinks"}, chunk
+        )
+
+        assert is_thinking is True
+        assert event[2] == "glm thinks"
+
+    def test_anthropic_type_thinking_uses_chunk_content(self) -> None:
+        chunk = MagicMock()
+        chunk.content = "thinking block"
+
+        event, is_thinking = DeepAgentRunner._classify_thinking(
+            {"type": "thinking"}, chunk
+        )
+
+        assert is_thinking is True
+        assert event[2] == "thinking block"
+
+    def test_no_reasoning_is_not_thinking(self) -> None:
+        chunk = MagicMock()
+        chunk.content = "normal"
+
+        event, is_thinking = DeepAgentRunner._classify_thinking({}, chunk)
+
+        assert (event, is_thinking) == (None, False)
