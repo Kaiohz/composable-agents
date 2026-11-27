@@ -59,8 +59,21 @@ class McpStreamableFilesClient(FilesMcpClient):
         self._tool_timeout = tool_timeout
 
     def _resolved_headers(self, server: McpServerConfig) -> dict[str, str]:
-        """Resolve the server's credential placeholders (reuse of the loader helper)."""
-        return resolve_headers_drop_empty(dict(server.headers))
+        """Resolve the server's credential headers (loader-equivalent).
+
+        SAME precedence as the agent tool loader (NFR-011): env/user
+        placeholders of the configured headers resolve first, then the
+        credential of the ORIGINATING request is injected for
+        ``auth_mode: "user_token"`` servers (feat-mcp-oauth2 REQ-004) and
+        wins over a colliding header name. Without the injected credential
+        the dual-auth guard of the Files MCP server denies every
+        initialize (401) — temporary uploads/cleanup degrade.
+        """
+        from src.domain.services.mcp_auth_mode import user_credential_headers
+        from src.infrastructure.database.rls_context import current_auth_context
+
+        injected = user_credential_headers(server.auth_mode, current_auth_context.get())
+        return resolve_headers_drop_empty({**dict(server.headers), **injected})
 
     async def temporary_upload(
         self,
