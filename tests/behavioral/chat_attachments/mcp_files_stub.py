@@ -73,19 +73,40 @@ class McpFilesStubServer:
     """Records every temporary upload/delete the backend performs."""
 
     def __init__(self) -> None:
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.fastmcp import Context, FastMCP
 
         self.upload_calls: list[dict[str, Any]] = []
         self.delete_calls: list[str] = []
+        #: Raw captured HTTP headers of the last delete call (list parallel to
+        #: ``delete_calls``) — pins the ``X-Composable-Agent`` cleanup
+        #: injection at the MCP-server network boundary.
+        self.delete_header_calls: list[dict[str, str]] = []
         self.fail_uploads = False
         self.fail_deletes = False
         self._lock = threading.Lock()
 
         mcp = FastMCP("Files", stateless_http=True)
 
+        def _incoming_headers(context) -> dict[str, str]:  # noqa: ANN001
+            """Best-effort capture of the HTTP request headers of the call."""
+            from collections.abc import Mapping
+
+            try:
+                request = getattr(getattr(context, "request_context", None), "request", None)
+                raw = getattr(request, "headers", None)
+                if raw and isinstance(raw, Mapping):
+                    return {str(key).lower(): str(value) for key, value in raw.items()}
+            except Exception:  # noqa: BLE001 — stub capture never fails a tool
+                pass
+            return {}
+
         @mcp.tool()
         async def temporary_upload_file(
-            file_name: str, content_base64: str, content_type: str, prefix: str
+            file_name: str,
+            content_base64: str,
+            content_type: str,
+            prefix: str,
+            ctx: Context,
         ) -> dict[str, Any]:
             with self._lock:
                 if self.fail_uploads:
@@ -97,6 +118,7 @@ class McpFilesStubServer:
                         "prefix": prefix,
                         "content_base64": content_base64,
                         "decoded_bytes": base64.b64decode(content_base64),
+                        "request_headers": _incoming_headers(ctx),
                     }
                 )
             object_name = f"{prefix.rstrip('/')}/{file_name}"
@@ -107,11 +129,14 @@ class McpFilesStubServer:
             }
 
         @mcp.tool()
-        async def temporary_delete_file(object_path: str) -> dict[str, Any]:
+        async def temporary_delete_file(
+            object_path: str, ctx: Context
+        ) -> dict[str, Any]:
             with self._lock:
                 if self.fail_deletes:
                     raise ValueError("stub MCP files server: delete failure")
                 self.delete_calls.append(object_path)
+                self.delete_header_calls.append(_incoming_headers(ctx))
             return {"deleted": object_path, "present": True}
 
         @mcp.tool()
@@ -134,6 +159,7 @@ class McpFilesStubServer:
     def reset(self, *, fail_uploads: bool = False, fail_deletes: bool = False) -> None:
         self.upload_calls = []
         self.delete_calls = []
+        self.delete_header_calls = []
         self.fail_uploads = fail_uploads
         self.fail_deletes = fail_deletes
 

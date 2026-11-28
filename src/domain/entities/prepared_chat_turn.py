@@ -1,13 +1,17 @@
 """Temporary RustFS document reference (chat PDF attachments spec §5.3/5.4).
 
-Temporary chat documents live under the user-isolated root prefix:
+Temporary chat documents live under the agent-scoped root prefix (user ×
+agent directive, chat_tmp Option 2):
 
 .. code-block:: text
 
-    chat_tmp/<user_id>/<thread_id>/<attachment_id>/<filename>
+    <user_id>/<agent_slug>/chat_tmp/<thread_id>/<attachment_id>/<filename>
 
-The object path is built and kept in memory by the backend during the turn;
-it is derivable for HITL-resume cleanup from the HUMAN_MESSAGE trace metadata
+The user × agent identity is composed SERVER-SIDE (mcp-raganything composes
+the REQUIRED agent scope from the ``X-Composable-Agent`` header); the
+backend-relative object path therefore carries NO user segment. The object
+path is built and kept in memory by the backend during the turn; it is
+derivable for HITL-resume cleanup from the HUMAN_MESSAGE trace metadata
 (id + filename) using :func:`temporary_object_path` (REQ-043/REQ-044).
 """
 
@@ -39,51 +43,50 @@ def is_safe_segment(value: str) -> bool:
     return not any(ord(char) < 32 for char in value)
 
 
-def temporary_object_path(user_id: str, thread_id: str, attachment_id: str, filename: str) -> str:
-    """Build the temporary RustFS object path for a chat attachment.
+def temporary_object_path(thread_id: str, attachment_id: str, filename: str) -> str:
+    """Build the RELATIVE temporary object path for a chat attachment.
 
     Args:
-        user_id: Authenticated user id (NFR-007 user isolation).
         thread_id: Conversation thread identifier.
         attachment_id: Unique per-attachment identifier (EDG-006).
         filename: Attachment basename.
 
     Returns:
-        The ``chat_tmp/<user_id>/<thread_id>/<attachment_id>/<filename>`` path.
+        The ``chat_tmp/<thread_id>/<attachment_id>/<filename>`` RELATIVE path
+        (the user × agent identity is composed server-side — chat_tmp
+        Option 2).
 
     Raises:
         ValueError: When any segment is unsafe (path traversal guard, REQ-039).
     """
     for name, value in (
-        ("user_id", user_id),
         ("thread_id", thread_id),
         ("attachment_id", attachment_id),
         ("filename", filename),
     ):
         if not is_safe_segment(value):
             raise ValueError(f"Unsafe temporary path segment for {name}")
-    return f"{TEMP_ROOT_PREFIX}/{user_id}/{thread_id}/{attachment_id}/{filename}"
+    return f"{TEMP_ROOT_PREFIX}/{thread_id}/{attachment_id}/{filename}"
 
 
-def temporary_prefix(user_id: str, thread_id: str, attachment_id: str) -> str:
-    """Build the temporary prefix WITHOUT the trailing filename segment.
+def temporary_prefix(thread_id: str, attachment_id: str) -> str:
+    """Build the RELATIVE temporary prefix WITHOUT the filename segment.
 
     Args:
-        user_id: Authenticated user id.
         thread_id: Conversation thread identifier.
         attachment_id: Unique per-attachment identifier.
 
     Returns:
-        The ``chat_tmp/<user_id>/<thread_id>/<attachment_id>/`` prefix with a
-        trailing slash.
+        The ``chat_tmp/<thread_id>/<attachment_id>/`` prefix with a trailing
+        slash.
 
     Raises:
         ValueError: When any segment is unsafe (path traversal guard, REQ-039).
     """
-    for name, value in (("user_id", user_id), ("thread_id", thread_id), ("attachment_id", attachment_id)):
+    for name, value in (("thread_id", thread_id), ("attachment_id", attachment_id)):
         if not is_safe_segment(value):
             raise ValueError(f"Unsafe temporary path segment for {name}")
-    return f"{TEMP_ROOT_PREFIX}/{user_id}/{thread_id}/{attachment_id}/"
+    return f"{TEMP_ROOT_PREFIX}/{thread_id}/{attachment_id}/"
 
 
 class TemporaryDocumentRef(BaseModel, frozen=True):
