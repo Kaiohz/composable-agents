@@ -451,14 +451,14 @@ def _register_memories_family(mcp, safe_mcp_call) -> None:
     @mcp.tool(name="composable_memories_list", annotations=READONLY())
     @safe_mcp_call
     async def composable_memories_list() -> McpNamesList:
-        """List the current user's global memory file paths."""
+        """List the current user's global memory file paths (all agents)."""
         files = await _deps().get_list_store_files_use_case().execute(prefix=memories_prefix())
         return McpNamesList(items=files)
 
     @mcp.tool(name="composable_memories_get", annotations=READONLY())
     @safe_mcp_call
     async def composable_memories_get(filename: str) -> McpStoreFile:
-        """Read one global memory file."""
+        """Read one memory file (agent-scoped shape '<agent_slug>/<filename>')."""
         path = memory_store_path(filename)
         content = await _deps().get_get_store_file_use_case().execute(path=path)
         if content is None:
@@ -470,7 +470,7 @@ def _register_memories_family(mcp, safe_mcp_call) -> None:
     @mcp.tool(name="composable_memories_upsert", annotations=MUTATING())
     @safe_mcp_call
     async def composable_memories_upsert(filename: str, content: str) -> McpUpsertResult:
-        """Create or replace /memories/{filename} (prefix-escape-safe)."""
+        """Create or replace /memories/{agent_slug}/{filename} (prefix-escape-safe, agent-scoped)."""
         path = memory_store_path(filename)
         await _deps().get_put_store_file_use_case().execute(path=path, content=content)
         return McpUpsertResult(path=path)
@@ -478,7 +478,7 @@ def _register_memories_family(mcp, safe_mcp_call) -> None:
     @mcp.tool(name="composable_memories_delete", annotations=DESTRUCTIVE())
     @safe_mcp_call
     async def composable_memories_delete(filename: str) -> McpDeleteResult:
-        """Delete one global memory file (destructive)."""
+        """Delete one agent-scoped memory file (destructive, '<agent_slug>/<filename>')."""
         path = memory_store_path(filename)
         await _deps().get_delete_store_file_use_case().execute(path=path)
         return McpDeleteResult(deleted=path)

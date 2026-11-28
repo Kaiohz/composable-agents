@@ -141,15 +141,17 @@ def memory_store_path(filename: str, agent_scope: str | None = None) -> str:
       the bound agent's canonical scope slug (C-1: platform-controlled, so
       no agent/scope can be smuggled through the filename and the segment is
       always slug-valid even for non-slug agent names).
-    * ``agent_scope`` unset (external MCP sessions, personal namespace):
-      ``filename`` is either the flat personal shape ``{name}`` (REQ-013,
-      unchanged) or the nested agent shape ``{agent_slug}/{name}`` with
-      EXACTLY one agent segment validated against :func:`validate_agent_slug`
-      (REQ-015 — provided segments are validated STRICTLY, never mapped).
-      Deeper nesting stays rejected.
+    * ``agent_scope`` unset (external MCP sessions): ``filename`` MUST be the
+      nested agent shape ``{agent_slug}/{name}`` with EXACTLY one agent
+      segment validated against :func:`validate_agent_slug` (REQ-015 —
+      provided segments are validated STRICTLY, never mapped). The FLAT
+      ``{name}`` personal shape is REFUSED — memories are scoped user × agent
+      (user directive): the personal namespace is a system-internal fallback
+      and is not reachable from callers. Deeper nesting stays rejected.
 
     Raises:
-        StoreFileNotFoundError: On any traversal/escape or invalid segment.
+        StoreFileNotFoundError: On any traversal/escape, invalid segment or a
+            flat (non-agent-scoped) filename.
     """
     if agent_scope is not None:
         name = _reject_unsafe_component(filename, ErrorMessage.MCP_MEMORY_NAME_INVALID.format(name=filename))
@@ -161,8 +163,12 @@ def memory_store_path(filename: str, agent_scope: str | None = None) -> str:
         validate_agent_slug(agent_segment)
         name = _reject_unsafe_component(nested_name, ErrorMessage.MCP_MEMORY_NAME_INVALID.format(name=filename))
         return normalize_store_path(f"{MEMORIES_PREFIX}{agent_segment}/{name}")
-    name = _reject_unsafe_component(filename, ErrorMessage.MCP_MEMORY_NAME_INVALID.format(name=filename))
-    return normalize_store_path(f"{MEMORIES_PREFIX}{name}")
+    # User × agent directive: a FLAT (no '/') filename never resolves into the
+    # personal namespace — memories are scoped user × agent; scope-less
+    # sessions must carry the '{agent_slug}/{name}' shape.
+    raise StoreFileNotFoundError(
+        ErrorMessage.MCP_MEMORY_AGENT_REQUIRED.format(name=filename)
+    )
 
 
 def memories_prefix(agent_scope: str | None = None) -> str:

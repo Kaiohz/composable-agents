@@ -217,6 +217,10 @@ class ErrorMessage(StrEnum):
     MCP_MEMORY_AGENT_SEGMENT_INVALID = (
         "Invalid agent memory segment {slug!r}: must match ^[a-z0-9][a-z0-9-]{{0,99}}$ (exactly one agent segment)."
     )
+    MCP_MEMORY_AGENT_REQUIRED = (
+        "Memories are scoped user × agent: filename must be the '<agent_slug>/{name}' shape "
+        "(a bare '{name}' resolves inside the personal namespace, which is a system-internal fallback)."
+    )
     AGENT_SPACE_SLUG_COLLISION = (
         "RAG space slug '{slug}' (from '{name}') is already claimed by '{other}' — names mapping to the "
         "same scope slug would share one RAG space. Rename one of the agents or adjust the topology "

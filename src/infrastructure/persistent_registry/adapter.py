@@ -319,9 +319,11 @@ class PersistentAgentRegistry(AgentRegistry):
         # Platform tools are built FIRST so their names are reserved BEFORE
         # the dynamic MCP resolution: a registered server advertising a
         # composable_* tool name is namespaced instead of shadowing it (I3).
-        # REQ-019: the built-in assistant keeps the PERSONAL memories scope —
-        # no agent closure is bound on its platform tools.
-        platform_tools = self._platform_toolset.build(include_run=True)
+        # User × agent directive: the built-in assistant is a platform agent
+        # like any other — its memories tools bind to ITS canonical slug
+        # scope (``/memories/composable-ai-assistant/...``); the personal
+        # namespace is a system-internal fallback.
+        platform_tools = self._platform_toolset.build(include_run=True, agent_scope=config.name)
         reserved = frozenset(tool.name for tool in platform_tools)
 
         dynamic_tools: list = []

@@ -366,23 +366,26 @@ class TestInlineSkillsAndMemories:
 
     async def test_inline_memory_definition_writes_memory_file_and_keeps_only_the_path(self, client, users):
         """REQ-MEMORY-001: a `{path, content}` memory definition is written
-        verbatim to the Store File API and the agent keeps only the path."""
+        verbatim to the Store File API and the agent keeps only the path.
+        User × agent directive: the declared path is the imported agent's
+        SCOPED memories namespace (the flat personal shape is refused)."""
         agent = _name("imp-memory")
+        memory_path = f"memories/{agent}/imp-project.md"
         content = "# Project memory\n\nContexte immuable.\n"
         resp = await import_agent(
             client,
             users["a"]["headers"],
-            import_yaml_(agent, memory=[{"path": "memories/imp-project.md", "content": content}]),
+            import_yaml_(agent, memory=[{"path": memory_path, "content": content}]),
             agent,
         )
         assert resp.status_code == 201, resp.text
 
-        stored = await client.get("/api/v1/store/files/memories/imp-project.md", headers=users["a"]["headers"])
+        stored = await client.get(f"/api/v1/store/files/{memory_path}", headers=users["a"]["headers"])
         assert stored.status_code == 200, stored.text
         assert stored.json()["content"] == content
 
         got = (await get_agent(client, users["a"]["headers"], agent)).json()
-        assert got["memory"] == ["memories/imp-project.md"]
+        assert got["memory"] == [memory_path]
 
     async def test_existing_skill_store_file_is_never_overwritten(self, client, users):
         """REQ-SKILL-001: importing a `{path, content}` skill whose file already

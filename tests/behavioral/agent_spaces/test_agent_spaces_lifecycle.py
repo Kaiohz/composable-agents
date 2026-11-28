@@ -251,8 +251,8 @@ class TestDeleteCascadesSpacesAndMemories:
         ):
             seeded = await store_put(client, headers_a, path, content)
             assert seeded.status_code == 200, seeded.text
-        personal_path = f"/memories/personal-keep-{unique}.md"
-        seeded_personal = await store_put(client, headers_a, personal_path, "PERSONAL KEEP")
+        personal_path = f"/memories/agent-keep-{unique}/keep.md"
+        seeded_personal = await store_put(client, headers_a, personal_path, "OTHER SPACE KEEP")
         assert seeded_personal.status_code == 200, seeded_personal.text
         foreign = await store_put(client, headers_b, f"/memories/{agent}/b-notes.md", "B KEEP")
         assert foreign.status_code == 200, foreign.text
@@ -276,7 +276,7 @@ class TestDeleteCascadesSpacesAndMemories:
 
         await _poll_for(_purged, "the agent's /memories/{agent}/ namespace must be purged on agent deletion")
         kept = await store_get(client, headers_a, personal_path)
-        assert kept.status_code == 200, "the user's personal memories must survive the agent purge"
+        assert kept.status_code == 200, "memories OUTSIDE the purged agent's namespace must survive"
         foreign_kept = await store_get(client, headers_b, f"/memories/{agent}/b-notes.md")
         assert foreign_kept.status_code == 200, (
             "another user's same-named /memories/{agent}/ namespace must never be purged"
