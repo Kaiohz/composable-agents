@@ -137,9 +137,9 @@ class TestNestedAgentMemoryPathValidation:
             )
             assert not result["ok"], f"invalid agent segment must be rejected: {filename!r} → {result}"
 
-    async def test_flat_personal_shape_still_supported(self, mcp_base_url, client, users):
-        """REQ-015: the flat personal shape ``/memories/{name}.md`` keeps
-        working unchanged."""
+    async def test_flat_personal_shape_is_rejected(self, mcp_base_url, client, users):
+        """User × agent directive: a FLAT (personal) ``{name}.md`` filename is
+        REFUSED on the composable memories tools — no store side effect."""
         name = f"personal-{uuid.uuid4().hex[:8]}.md"
         result = await call_mcp_tool(
             mcp_base_url,
@@ -147,54 +147,58 @@ class TestNestedAgentMemoryPathValidation:
             "composable_memories_upsert",
             {"filename": name, "content": "PERSONAL"},
         )
-        assert result["ok"], f"the flat personal shape must keep working: {result['result']}"
-        assert result["result"].get("path") == f"/memories/{name}", f"unexpected path: {result['result']}"
+        assert not result["ok"], f"the flat personal shape must be refused: {result['result']}"
+        assert "agent_slug" in json.dumps(result["result"]), result["result"]
         stored = await store_get(client, users["a"]["headers"], f"/memories/{name}")
-        assert stored.status_code == 200, stored.text
+        assert stored.status_code == 404, "a refused memory path must never have been stored"
 
-    async def test_personal_and_agent_scope_names_coexist(self, mcp_base_url, client, users):
-        """Spec edge: a memory name valid in personal space AND the same name
-        in an agent's space coexist independently."""
-        slug = f"agent-{uuid.uuid4().hex[:8]}"
+    async def test_agent_scopes_coexist_independently(self, mcp_base_url, client, users):
+        """Spec edge: the same memory basename in TWO agent scopes coexist
+        independently (the personal namespace is no longer one of them)."""
+        slug_a = f"agent-{uuid.uuid4().hex[:8]}"
+        slug_b = f"agent-{uuid.uuid4().hex[:8]}"
         name = f"prefs-{uuid.uuid4().hex[:6]}.md"
 
-        personal = await call_mcp_tool(
+        first = await call_mcp_tool(
             mcp_base_url,
             users["a"]["headers"],
             "composable_memories_upsert",
-            {"filename": name, "content": "PERSONAL VERSION"},
+            {"filename": f"{slug_a}/{name}", "content": "AGENT-A VERSION"},
         )
-        assert personal["ok"], f"the flat personal upsert must succeed: {personal}"
+        assert first["ok"], f"the first agent scope upsert must succeed: {first}"
 
-        scoped = await call_mcp_tool(
+        second = await call_mcp_tool(
             mcp_base_url,
             users["a"]["headers"],
             "composable_memories_upsert",
-            {"filename": f"{slug}/{name}", "content": "AGENT VERSION"},
+            {"filename": f"{slug_b}/{name}", "content": "AGENT-B VERSION"},
         )
-        assert scoped["ok"], f"the scoped upsert must be accepted (REQ-015): {scoped}"
+        assert second["ok"], f"the second agent scope upsert must be accepted (REQ-015): {second}"
 
-        personal_content = await store_get(client, users["a"]["headers"], f"/memories/{name}")
-        assert personal_content.status_code == 200 and personal_content.json()["content"] == "PERSONAL VERSION", (
-            personal_content.text
+        first_content = await store_get(client, users["a"]["headers"], f"/memories/{slug_a}/{name}")
+        assert first_content.status_code == 200 and first_content.json()["content"] == "AGENT-A VERSION", (
+            first_content.text
         )
-        scoped_content = await store_get(client, users["a"]["headers"], f"/memories/{slug}/{name}")
-        assert scoped_content.status_code == 200 and scoped_content.json()["content"] == "AGENT VERSION", (
-            scoped_content.text
+        second_content = await store_get(client, users["a"]["headers"], f"/memories/{slug_b}/{name}")
+        assert second_content.status_code == 200 and second_content.json()["content"] == "AGENT-B VERSION", (
+            second_content.text
         )
         listed = await store_list(client, users["a"]["headers"], "/memories/")
-        assert f"/memories/{name}" in listed and f"/memories/{slug}/{name}" in listed, (
-            f"both independently-named spaces must coexist in the listing: {listed}"
+        assert f"/memories/{slug_a}/{name}" in listed and f"/memories/{slug_b}/{name}" in listed, (
+            f"both independently-named agent spaces must coexist in the listing: {listed}"
         )
 
 
 class TestRestStoreRouteMemoryShapeParity:
-    """QA BUG-005: the REST store-file route enforces REQ-015 exactly like
-    the MCP memories boundary — the agent segment is charset-validated and
-    exactly one nesting segment is allowed (deeper nesting rejected). The
-    validation is wired through ``route_validation.validate_memories_store_path``
-    on the GET/PUT/DELETE ``/api/v1/store/files/{path}`` routes; flat and
-    single-segment agent shapes stay accepted on BOTH boundaries."""
+    """QA BUG-005 + user × agent directive: the REST store-file route enforces
+    REQ-015 exactly like the MCP memories boundary — the agent segment is
+    charset-validated and exactly one nesting segment is allowed (deeper
+    nesting rejected). The validation is wired through
+    ``route_validation.validate_memories_store_path`` on the GET/PUT/DELETE
+    ``/api/v1/store/files/{path}`` routes; the single-segment agent shape
+    stays accepted on BOTH boundaries and the FLAT personal shape is refused
+    on BOTH (memories are scoped user × agent — the personal namespace is a
+    system-internal fallback)."""
 
     async def test_rest_rejects_invalid_agent_segment(self, client, users):
         slug = f"Bad_Slug!-{uuid.uuid4().hex[:8]}"
@@ -224,17 +228,18 @@ class TestRestStoreRouteMemoryShapeParity:
         listed = await store_list(client, headers, f"/memories/{slug}/deeper/")
         assert listed == [], "a too-deep memory path must never have been stored"
 
-    async def test_rest_accepts_flat_and_single_segment_agent_shapes(self, client, users):
-        """REQ-015 parity: the two accepted shapes keep working on BOTH
-        boundaries (flat personal + single-segment agent)."""
+    async def test_rest_refuses_flat_and_accepts_single_segment_agent_shapes(self, client, users):
+        """User × agent directive parity: the ONLY accepted shape on BOTH
+        boundaries is the single-segment agent shape — the flat personal
+        shape is refused (no store side effect)."""
         headers = users["a"]["headers"]
         name = f"rest-{uuid.uuid4().hex[:8]}.md"
         slug = f"agent-{uuid.uuid4().hex[:8]}"
 
         flat = await client.put(f"/api/v1/store/files/memories/{name}", headers=headers, json={"content": "FLAT"})
-        assert flat.status_code == 200, flat.text
+        assert flat.status_code == 404, f"the flat personal shape must be refused on REST too: {flat.text}"
         flat_read = await store_get(client, headers, f"/memories/{name}")
-        assert flat_read.status_code == 200 and flat_read.json()["content"] == "FLAT", flat_read.text
+        assert flat_read.status_code == 404, "a refused memory path must never have been stored"
 
         nested = await client.put(
             f"/api/v1/store/files/memories/{slug}/{name}", headers=headers, json={"content": "NESTED"}
@@ -302,13 +307,13 @@ class TestAgentFacingMemoriesClosure:
 
     async def test_agent_delete_targets_agent_scope_not_personal(self, mcp_base_url, client, users, stub_llm):
         slug = f"agent-{uuid.uuid4().hex[:8]}"
-        decoy_name = f"decoy-{uuid.uuid4().hex[:8]}.md"
-        seeded = await store_put(client, users["a"]["headers"], f"/memories/{slug}/obsolete.md", "OBSOLETE")
-        assert seeded.status_code == 200, seeded.text
-        personal_seeded = await store_put(
-            client, users["a"]["headers"], f"/memories/{decoy_name}", "PERSONAL DECOY KEEP"
+        seed_a = await store_put(client, users["a"]["headers"], f"/memories/{slug}/obsolete.md", "OBSOLETE")
+        assert seed_a.status_code == 200, seed_a.text
+        decoy_slug = f"agent-{uuid.uuid4().hex[:8]}"
+        decoy_seeded = await store_put(
+            client, users["a"]["headers"], f"/memories/{decoy_slug}/decoy.md", "DECOY KEEP"
         )
-        assert personal_seeded.status_code == 200, personal_seeded.text
+        assert decoy_seeded.status_code == 200, decoy_seeded.text
 
         await create_agent_ok(client, users["a"]["headers"], platform_tools_yaml(slug), slug)
         await configure_llm_credentials(client, users["a"]["headers"])
@@ -324,8 +329,8 @@ class TestAgentFacingMemoriesClosure:
             f"the agent's memories_delete MUST target its own /memories/{slug}/ scope (REQ-020 closure): "
             f"{scoped_gone.text}"
         )
-        decoy = await store_get(client, users["a"]["headers"], f"/memories/{decoy_name}")
-        assert decoy.status_code == 200, "the personal decoy memory must never be touched by an agent-scoped delete"
+        decoy = await store_get(client, users["a"]["headers"], f"/memories/{decoy_slug}/decoy.md")
+        assert decoy.status_code == 200, "another agent's memory must never be touched by an agent-scoped delete"
 
 
 class TestMemoryToolsExposeNoScopeParameter:
@@ -345,28 +350,43 @@ class TestMemoryToolsExposeNoScopeParameter:
 
 
 class TestExternalSessionsDefaultToPersonalScope:
-    async def test_mcp_session_without_agent_context_uses_personal_store(self, mcp_base_url, client, users):
-        """REQ-020: an external MCP session (no agent context) operates on the
-        PERSONAL flat namespace via the store API directly."""
+    async def test_mcp_session_without_agent_context_cannot_touch_the_personal_namespace(
+        self, mcp_base_url, client, users
+    ):
+        """User × agent directive: an external MCP session (no agent context)
+        MUST use the agent-scoped shape — a bare filename is REFUSED (the
+        personal namespace is a system-internal fallback), the nested shape
+        works exactly as validated."""
         name = f"external-{uuid.uuid4().hex[:8]}.md"
-        result = await call_mcp_tool(
+        slug = f"agent-{uuid.uuid4().hex[:8]}"
+
+        flat = await call_mcp_tool(
             mcp_base_url,
             users["a"]["headers"],
             "composable_memories_upsert",
             {"filename": name, "content": "EXTERNAL SESSION"},
         )
-        assert result["ok"], f"the external session upsert must succeed: {result}"
-        assert result["result"].get("path") == f"/memories/{name}", f"unexpected path: {result['result']}"
-
+        assert not flat["ok"], f"the flat personal shape must be refused: {flat['result']}"
         personal = await store_get(client, users["a"]["headers"], f"/memories/{name}")
-        assert personal.status_code == 200, "the external session must land in the user's personal namespace"
-        scoped = await store_get(client, users["a"]["headers"], f"/memories/{name}/x.md")
-        assert scoped.status_code == 404, "no unexpected agent-scoped side effects for an agentless session"
+        assert personal.status_code == 404, "no personal-namespace side effect for a scope-less session"
 
-    async def test_builtin_assistant_memories_stay_personal(self, mcp_base_url, client, users, stub_llm):
-        """REQ-019: the built-in assistant is a platform agent whose memories
-        stay in the PERSONAL namespace — never under a
-        ``/memories/composable-ai-assistant/`` scope."""
+        scoped = await call_mcp_tool(
+            mcp_base_url,
+            users["a"]["headers"],
+            "composable_memories_upsert",
+            {"filename": f"{slug}/{name}", "content": "EXTERNAL SESSION"},
+        )
+        assert scoped["ok"], f"the agent-scoped shape must be accepted: {scoped['result']}"
+        landed = await store_get(client, users["a"]["headers"], f"/memories/{slug}/{name}")
+        assert landed.status_code == 200, "the scoped shape lands exactly under its agent namespace"
+
+    async def test_builtin_assistant_memories_bind_to_its_agent_scope(
+        self, mcp_base_url, client, users, stub_llm
+    ):
+        """User × agent directive: the built-in assistant is a platform agent
+        like any other — its memories tools bind to ITS canonical slug scope
+        (``/memories/composable-ai-assistant/``), never the personal
+        namespace."""
         await configure_llm_credentials(client, users["a"]["headers"])
         stub_llm.script(
             assistant_tool_call("composable_memories_upsert", {"filename": "assistant-note.md", "content": "BUILTIN"}),
@@ -375,11 +395,9 @@ class TestExternalSessionsDefaultToPersonalScope:
         result = await one_shot_run(mcp_base_url, users["a"]["headers"], BUILTIN_NAME)
         assert result["ok"], f"the builtin assistant run must succeed: {result}"
 
-        personal = await store_get(client, users["a"]["headers"], "/memories/assistant-note.md")
-        assert personal.status_code == 200, (
-            f"the built-in assistant's memories stay PERSONAL (flat personal namespace): {personal.text}"
+        scoped = await store_get(client, users["a"]["headers"], f"/memories/{BUILTIN_NAME}/assistant-note.md")
+        assert scoped.status_code == 200 and scoped.json()["content"] == "BUILTIN", (
+            f"the built-in assistant's memories bind to its agent scope: {scoped.text}"
         )
-        builtin_scoped = await store_get(client, users["a"]["headers"], f"/memories/{BUILTIN_NAME}/assistant-note.md")
-        assert builtin_scoped.status_code == 404, (
-            "the built-in assistant must NOT get its own memories scope (REQ-019 personal)"
-        )
+        flat = await store_get(client, users["a"]["headers"], "/memories/assistant-note.md")
+        assert flat.status_code == 404, "the personal namespace stays unreachable (system-internal fallback)"

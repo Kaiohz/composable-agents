@@ -74,11 +74,15 @@ class TestMemoryStorePath:
     _UNSAFE_MEMORY_COMPONENTS = [c for c in _UNSAFE_COMPONENTS if c != "a/b"]
 
     @pytest.mark.parametrize(
-        ("filename", "expected"),
-        [("AGENTS.md", "/memories/AGENTS.md"), ("notes.md", "/memories/notes.md")],
+        "filename",
+        ["AGENTS.md", "notes.md"],
     )
-    def test_resolves_under_the_global_prefix(self, filename, expected):
-        assert memory_store_path(filename) == expected
+    def test_flat_personal_shape_is_refused(self, filename):
+        """User × agent directive: a FLAT (no agent segment) memory filename
+        never resolves into the personal namespace — the REQ-015 nested
+        shape ``{agent_slug}/{name}`` is the only scope-less form."""
+        with pytest.raises(StoreFileNotFoundError, match="user × agent"):
+            memory_store_path(filename)
 
     @pytest.mark.parametrize("filename", _UNSAFE_MEMORY_COMPONENTS)
     def test_prefix_escape_is_refused(self, filename):

@@ -387,20 +387,22 @@ class TestMemoriesPathShapeValidation:
         assert resp.status_code == 404
         mock_delete_use_case.execute.assert_not_awaited()
 
-    async def test_put_accepts_flat_and_single_segment_agent_shapes(
+    async def test_put_refuses_flat_and_accepts_single_segment_agent_shapes(
         self, client: AsyncClient, mock_put_use_case: AsyncMock
     ) -> None:
         # Arrange
         mock_put_use_case.execute = AsyncMock(return_value="x")
 
-        # Act + Assert — the two REQ-015 shapes stay accepted
-        for path, expected in (
-            ("memories/notes.md", "/memories/notes.md"),
-            ("memories/agent-x/notes.md", "/memories/agent-x/notes.md"),
-        ):
-            resp = await client.put(f"/api/v1/store/files/{path}", json={"content": "x"})
-            assert resp.status_code == 200, (path, resp.text)
-            assert resp.json()["path"] == expected
+        # Act + Assert — user × agent directive: the ONLY accepted memories
+        # shape is the single-segment agent one; the flat personal shape is
+        # refused (no use-case call) on the REST boundary too.
+        resp = await client.put("/api/v1/store/files/memories/notes.md", json={"content": "x"})
+        assert resp.status_code == 404, (resp.status_code, resp.text)
+        mock_put_use_case.execute.assert_not_awaited()
+
+        resp = await client.put("/api/v1/store/files/memories/agent-x/notes.md", json={"content": "x"})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["path"] == "/memories/agent-x/notes.md"
 
     async def test_non_memories_prefixes_keep_the_general_contract(
         self, client: AsyncClient, mock_put_use_case: AsyncMock
