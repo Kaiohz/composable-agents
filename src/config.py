@@ -149,7 +149,7 @@ class Settings(BaseSettings):
     # the frontend config.json).
     mcp_registry_base_url: str = ""
     # Internal base URL of the built-in mcp-raganything MCP mounts
-    # (/files/mcp, /classical/mcp, /web/mcp, /memories/mcp) used server-side
+    # (/files/mcp, /classical/mcp, /web/mcp) used server-side
     # when assembling the built-in assistant's toolset (REQ-036).
     builtin_mcp_base_url: str = ""
     # PUBLIC origin stored inside registered MCP-server URLs

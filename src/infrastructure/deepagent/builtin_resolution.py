@@ -45,12 +45,13 @@ logger = logging.getLogger(__name__)
 
 #: Built-in MCP mount paths owned by mcp-raganything (spec Technical Notes) —
 #: resolved against the configured internal base URL, never the frontend's
-#: config.json.
+#: config.json. Memories are NOT mounted here: composable_agents owns the
+#: memories tools server-side (composable_memories_* on its own MCP) and the
+#: raganything /memories/mcp mount was removed (redundant).
 BUILTIN_MOUNTS: tuple[tuple[str, str], ...] = (
     ("files", "/files/mcp"),
     ("classical", "/classical/mcp"),
     ("web", "/web/mcp"),
-    ("memories", "/memories/mcp"),
 )
 
 #: Maximum concurrent optional MCP tool sources resolved per build. Each
