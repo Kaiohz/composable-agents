@@ -143,6 +143,10 @@ class McpStreamableFilesClient(FilesMcpClient):
             raise
         except Exception as exc:
             logger.error(LogMessage.CHAT_ATTACHMENTS_MCP_TOOL_FAILED, tool_name, server.name)
+            # Log the FULL exception (incl. anyio ExceptionGroup sub-exceptions)
+            # — without exc_info the outer "unhandled errors in a TaskGroup
+            # (1 sub-exception)" message hides the real transport/tool error.
+            logger.error("Files MCP %r: exception detail: %r", tool_name, exc, exc_info=exc)
             raise FilesMcpTemporaryError(
                 ErrorMessage.ATTACHMENT_MCP_UPLOAD_FAILED.format(filename=tool_name, error=exc)
             ) from exc
