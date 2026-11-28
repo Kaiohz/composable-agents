@@ -243,19 +243,20 @@ class SendMessageUseCase:
         except Exception:
             logger.exception(LogMessage.CHAT_TEMP_CLEANUP_FAILED, "(trace scan)", thread_id, "list_by_thread failed")
             return
-        refs = self._collect_pending_temporary_refs(events, thread_id, self._current_user_id())
+        refs = self._collect_pending_temporary_refs(events, thread_id)
         await run_temporary_document_cleanup(
             self._cleaner, agent_name, thread_id, _as_prepared(refs), awaiting_hitl=False
         )
 
-    def _collect_pending_temporary_refs(self, events, thread_id: str, current_user: str | None):  # noqa: ANN001, ANN202
+    def _collect_pending_temporary_refs(self, events, thread_id: str):  # noqa: ANN001, ANN202
         """Re-derive the ORIGINAL turn's document refs from the trace events.
 
-        The owner comes from the event (denormalized at insert time) and falls
-        back to the current request's user id; an unattributed event can never
-        yield a valid path segment, so it is skipped with a loud warning (I1).
-        Only ``kind: document`` entries are derived — images live in the
-        LangGraph Store (REQ-025) and are never deleted as temp docs.
+        chat_tmp Option 2: the relative object path carries NO user segment
+        (the identity is the server-side agent scope), so the derivation
+        needs ONLY the metadata id + filename — the trace owner is no longer
+        a path segment. Only ``kind: document`` entries are derived — images
+        live in the LangGraph Store (REQ-025) and are never deleted as temp
+        docs.
         """
         from src.domain.entities.attachment import AttachmentKind, project_attachment_entries
         from src.domain.entities.prepared_chat_turn import TemporaryDocumentRef, temporary_object_path
@@ -265,15 +266,6 @@ class SendMessageUseCase:
         for event in events:
             if event.type != TraceEventType.HUMAN_MESSAGE:
                 continue
-            owner = event.user_id or current_user
-            if not owner:
-                # I1: no owner means the path cannot be derived — a silent
-                # fallback would forge an invalid segment and silently skip
-                # the deletion; surface it explicitly instead.
-                logger.warning(
-                    LogMessage.CHAT_TEMP_CLEANUP_FAILED, "(no owner)", thread_id, "cannot derive the temp path"
-                )
-                continue
             for entry in project_attachment_entries((event.metadata or {}).get("attachments")):
                 if entry.get("kind") != AttachmentKind.DOCUMENT.value:
                     continue
@@ -281,15 +273,8 @@ class SendMessageUseCase:
                     refs[entry["id"]] = TemporaryDocumentRef(
                         attachment_id=entry["id"],
                         filename=entry["filename"],
-                        object_path=temporary_object_path(owner, thread_id, entry["id"], entry["filename"]),
+                        object_path=temporary_object_path(thread_id, entry["id"], entry["filename"]),
                     )
                 except (KeyError, ValueError) as exc:
                     logger.warning(LogMessage.CHAT_TEMP_CLEANUP_FAILED, "(derivation)", thread_id, exc)
         return list(refs.values())
-
-    @staticmethod
-    def _current_user_id() -> str | None:
-        """Return the current user id (reused to re-derive HITL temp paths)."""
-        from src.infrastructure.database.rls_context import current_user_id
-
-        return current_user_id.get()

@@ -12,8 +12,9 @@ Three-stage flow shared by :class:`SendMessageUseCase` and
    the use cases must clean up in their ``finally`` blocks (REQ-042).
 
 The service NEVER logs nor persists attachment base64 content (NFR-004) and
-always builds the temporary prefix from the ``current_user_id`` contextvar
-(NFR-007).
+always builds the RELATIVE temporary prefix from the thread id (chat_tmp
+Option 2 — the user × agent identity is composed server-side from the
+``X-Composable-Agent`` header of the thread's agent).
 """
 
 import logging
@@ -178,7 +179,7 @@ class ChatAttachmentsService:
             # `server` is guaranteed non-None for documents by the policy check
             # above (REQ-010 raises otherwise); the assert pins it for mypy.
             assert server is not None
-            ref = await self._upload_document(server, thread_id, att)
+            ref = await self._upload_document(server, thread_id, thread.agent_name, att)
             temp_docs.append(ref)
             metadata.append(
                 {
@@ -228,22 +229,26 @@ class ChatAttachmentsService:
         self,
         server: McpServerConfig,
         thread_id: str,
+        agent_name: str,
         att: ValidatedAttachment,
     ) -> TemporaryDocumentRef:
         """Upload a document through the Files MCP server (REQ-011/EDG-008).
 
-        The prefix is built by the backend from the authenticated user id
-        (REQ-038, NFR-007) and the attachment id is unique per attachment
-        (EDG-006/EDG-007).
+        The RELATIVE prefix is thread-scoped (chat_tmp Option 2): the user ×
+        agent identity is composed SERVER-SIDE from the required
+        ``X-Composable-Agent`` header (the agent of the thread). The
+        attachment id is unique per attachment (EDG-006/EDG-007).
         """
         user_id = current_user_id.get()
         if not user_id:
             # I9: an unauthenticated context must fail with a domain error,
             # never a raw ValueError → 500 (routes are auth-guarded; this is a
-            # defensive boundary).
+            # defensive boundary — the Files MCP server's dual-auth guard
+            # would deny the session anyway).
             logger.warning(LogMessage.CHAT_ATTACHMENTS_DOCUMENT_POLICY_FAILED, thread_id, "(no authenticated user)")
             raise AttachmentValidationError(ErrorMessage.ATTACHMENT_UNAVAILABLE)
-        prefix = temporary_prefix(user_id, thread_id, att.id)
+        prefix = temporary_prefix(thread_id, att.id)
+        object_root = f"{TEMP_ROOT_PREFIX}/{thread_id}/"
         logger.info(LogMessage.CHAT_ATTACHMENTS_DOCUMENT_UPLOADING, att.filename, server.url or "", thread_id)
         try:
             upload = await self._files_client.temporary_upload(
@@ -252,6 +257,7 @@ class ChatAttachmentsService:
                 content_base64=att.content_base64,
                 content_type=att.content_type,
                 prefix=prefix,
+                agent_name=agent_name,
             )
         except FilesMcpTemporaryError:
             raise
@@ -261,15 +267,16 @@ class ChatAttachmentsService:
                 ErrorMessage.ATTACHMENT_MCP_UPLOAD_FAILED.format(filename=att.filename, error=exc)
             ) from exc
         # I7 (NFR-008/NFR-009): the object path embedded in the prompt and used
-        # as the cleanup target MUST stay inside the user's own chat_tmp/
-        # namespace — derive locally and verify the server's answer against it.
-        user_root = f"{TEMP_ROOT_PREFIX}/{user_id}/"
-        object_path = upload.object_name or temporary_object_path(user_id, thread_id, att.id, att.filename)
-        if not object_path.startswith(user_root):
+        # as the cleanup target MUST stay inside the caller's scoped chat_tmp/
+        # namespace — derive locally and verify the server's RELATIVE answer
+        # against it (the user × agent identity is composed server-side, so
+        # the relative contract is ``chat_tmp/<thread_id>/...`` — Option 2).
+        object_path = upload.object_name or temporary_object_path(thread_id, att.id, att.filename)
+        if not object_path.startswith(object_root):
             logger.error(LogMessage.CHAT_ATTACHMENTS_MCP_UPLOAD_FAILED, att.filename, thread_id)
             raise FilesMcpTemporaryError(
                 ErrorMessage.ATTACHMENT_MCP_UPLOAD_FAILED.format(
-                    filename=att.filename, error="object outside the user temporary namespace"
+                    filename=att.filename, error="object outside the scoped temporary namespace"
                 )
             )
         return TemporaryDocumentRef(attachment_id=att.id, filename=att.filename, object_path=object_path)

@@ -614,53 +614,48 @@ class TestHitlResumeCleanup:
     async def test_hitl_resume_deletes_the_original_turn_documents(
         self, mock_agent_runner, thread_repo, trace_repo, cleaner
     ):
-        from src.infrastructure.database.rls_context import current_user_id
+        thread = await thread_repo.create("test-agent")
+        # The ORIGINAL human turn carried a temporary document; REQ-043
+        # kept it alive while the turn was awaiting HITL.
+        await trace_repo.add(
+            thread.id,
+            TraceEvent(
+                id=str(uuid4()),
+                thread_id=thread.id,
+                turn_id=str(uuid4()),
+                type=TraceEventType.HUMAN_MESSAGE,
+                content="Analyse",
+                metadata={
+                    "attachments": [
+                        {
+                            "id": "att-1",
+                            "filename": "rapport.pdf",
+                            "content_type": "application/pdf",
+                            "size_bytes": 22,
+                            "kind": "document",
+                            "source": "rustfs_temp",
+                        }
+                    ]
+                },
+                timestamp=datetime.now(UTC),
+                sequence=0,
+            ),
+        )
+        final_message = Message(role=MessageRole.AI, content="done", status=MessageStatus.COMPLETED)
+        mock_agent_runner.resume_hitl.return_value = (final_message, [])
 
-        token = current_user_id.set("user-a")
-        try:
-            thread = await thread_repo.create("test-agent")
-            # The ORIGINAL human turn carried a temporary document; REQ-043
-            # kept it alive while the turn was awaiting HITL.
-            await trace_repo.add(
-                thread.id,
-                TraceEvent(
-                    id=str(uuid4()),
-                    thread_id=thread.id,
-                    turn_id=str(uuid4()),
-                    type=TraceEventType.HUMAN_MESSAGE,
-                    content="Analyse",
-                    metadata={
-                        "attachments": [
-                            {
-                                "id": "att-1",
-                                "filename": "rapport.pdf",
-                                "content_type": "application/pdf",
-                                "size_bytes": 22,
-                                "kind": "document",
-                                "source": "rustfs_temp",
-                            }
-                        ]
-                    },
-                    timestamp=datetime.now(UTC),
-                    sequence=0,
-                ),
-            )
-            final_message = Message(role=MessageRole.AI, content="done", status=MessageStatus.COMPLETED)
-            mock_agent_runner.resume_hitl.return_value = (final_message, [])
-
-            use_case = SendMessageUseCase(
-                _FakeRegistry(mock_agent_runner), thread_repo, trace_repo, attachments=object(), cleaner=cleaner
-            )
-            await use_case.execute(thread.id, decisions=[HitlDecision(tool_call_id="tc-1", action="approve")])
-        finally:
-            current_user_id.reset(token)
+        use_case = SendMessageUseCase(
+            _FakeRegistry(mock_agent_runner), thread_repo, trace_repo, attachments=object(), cleaner=cleaner
+        )
+        await use_case.execute(thread.id, decisions=[HitlDecision(tool_call_id="tc-1", action="approve")])
 
         assert cleaner.calls, "the original turn's document must be deleted after the HITL terminal response"
         agent_name, paths = cleaner.calls[0]
-        # The derivation (owner + thread + attachment id + filename) matches
-        # the upload-time scheme chat_tmp/<user>/<thread>/<id>/<filename>.
+        # The derivation (thread + attachment id + filename) matches the
+        # upload-time RELATIVE scheme chat_tmp/<thread>/<id>/<filename> (the
+        # user × agent identity is composed server-side — chat_tmp Option 2).
         assert agent_name == "test-agent"
-        assert paths == (f"chat_tmp/user-a/{thread.id}/att-1/rapport.pdf",)
+        assert paths == (f"chat_tmp/{thread.id}/att-1/rapport.pdf",)
 
     def _doc_metadata(self) -> dict:
         """The attachment metadata of the ORIGINAL turn's temporary document."""
@@ -679,56 +674,20 @@ class TestHitlResumeCleanup:
 
     async def test_non_human_events_are_skipped(self, mock_agent_runner, thread_repo, trace_repo, cleaner):
         """Only HUMAN_MESSAGE metadata drives the derivation (other events skipped)."""
-        from src.infrastructure.database.rls_context import current_user_id
-
-        token = current_user_id.set("user-a")
-        try:
-            thread = await thread_repo.create("test-agent")
-            await trace_repo.add(
-                thread.id,
-                TraceEvent(
-                    id=str(uuid4()),
-                    thread_id=thread.id,
-                    turn_id=str(uuid4()),
-                    type=TraceEventType.AI_MESSAGE,
-                    content="intermediate",
-                    metadata={"attachments": [{"id": "x", "kind": "document"}]},
-                    timestamp=datetime.now(UTC),
-                    sequence=0,
-                ),
-            )
-            await trace_repo.add(
-                thread.id,
-                TraceEvent(
-                    id=str(uuid4()),
-                    thread_id=thread.id,
-                    turn_id=str(uuid4()),
-                    type=TraceEventType.HUMAN_MESSAGE,
-                    content="Analyse",
-                    metadata=self._doc_metadata(),
-                    timestamp=datetime.now(UTC),
-                    sequence=1,
-                ),
-            )
-            use_case = SendMessageUseCase(
-                _FakeRegistry(mock_agent_runner), thread_repo, trace_repo, attachments=object(), cleaner=cleaner
-            )
-            await use_case._cleanup_after_hitl_terminal(
-                thread.id, "test-agent", Message(role=MessageRole.AI, status=MessageStatus.COMPLETED)
-            )
-        finally:
-            current_user_id.reset(token)
-        assert cleaner.calls and cleaner.calls[0][1] == (f"chat_tmp/user-a/{thread.id}/att-1/rapport.pdf",)
-
-    async def test_no_owner_event_is_skipped_with_a_loud_warning(
-        self, mock_agent_runner, thread_repo, trace_repo, cleaner
-    ):
-        """I1: an owner-less event skips the derivation WITHOUT a silent fallback.
-
-        The thread (and therefore its trace events) carries NO user id and no
-        auth context exists — a fabricated path would be invalid.
-        """
         thread = await thread_repo.create("test-agent")
+        await trace_repo.add(
+            thread.id,
+            TraceEvent(
+                id=str(uuid4()),
+                thread_id=thread.id,
+                turn_id=str(uuid4()),
+                type=TraceEventType.AI_MESSAGE,
+                content="intermediate",
+                metadata={"attachments": [{"id": "x", "kind": "document"}]},
+                timestamp=datetime.now(UTC),
+                sequence=0,
+            ),
+        )
         await trace_repo.add(
             thread.id,
             TraceEvent(
@@ -739,6 +698,33 @@ class TestHitlResumeCleanup:
                 content="Analyse",
                 metadata=self._doc_metadata(),
                 timestamp=datetime.now(UTC),
+                sequence=1,
+            ),
+        )
+        use_case = SendMessageUseCase(
+            _FakeRegistry(mock_agent_runner), thread_repo, trace_repo, attachments=object(), cleaner=cleaner
+        )
+        await use_case._cleanup_after_hitl_terminal(
+            thread.id, "test-agent", Message(role=MessageRole.AI, status=MessageStatus.COMPLETED)
+        )
+        assert cleaner.calls and cleaner.calls[0][1] == (f"chat_tmp/{thread.id}/att-1/rapport.pdf",)
+
+    async def test_derivation_without_filename_is_skipped_safely(
+        self, mock_agent_runner, thread_repo, trace_repo, cleaner
+    ):
+        """An attachment entry without its metadata fields skips the derivation
+        (logged loudly) — a fabricated path can never be built."""
+        thread = await thread_repo.create("test-agent")
+        await trace_repo.add(
+            thread.id,
+            TraceEvent(
+                id=str(uuid4()),
+                thread_id=thread.id,
+                turn_id=str(uuid4()),
+                type=TraceEventType.HUMAN_MESSAGE,
+                content="Analyse",
+                metadata={"attachments": [{"id": "att-2", "kind": "document"}]},
+                timestamp=datetime.now(UTC),
                 sequence=0,
             ),
         )
@@ -748,7 +734,7 @@ class TestHitlResumeCleanup:
         await use_case._cleanup_after_hitl_terminal(
             thread.id, "test-agent", Message(role=MessageRole.AI, status=MessageStatus.COMPLETED)
         )
-        assert cleaner.calls == [], "an owner-less event must not be deleted under a fabricated path"
+        assert cleaner.calls == [], "a non-derivable entry must not be deleted under a fabricated path"
 
     async def test_non_document_entries_are_skipped(self, mock_agent_runner, thread_repo, trace_repo, cleaner):
         """Only ``kind: document`` entries are derived — images live in the store."""

@@ -84,9 +84,12 @@ class TestDocumentPolicyFrontier:
 class TestTemporaryDocumentUpload:
     """REQ-0011, REQ-031, REQ-038, REQ-015, REQ-016, NFR-007."""
 
-    async def test_upload_sent_to_mcp_with_user_isolated_prefix(self, client, users, stub_llm, mcp_files):
-        """REQ-038/NFR-007: prefix = chat_tmp/<user_id>/<thread_id>/..."""
-        thread_id = await agent_with_thread(client, users["a"]["headers"])
+    async def test_upload_sent_to_mcp_with_agent_scoped_prefix(self, client, users, stub_llm, mcp_files):
+        """chat_tmp Option 2 (user × agent directive): the RELATIVE prefix is
+        ``chat_tmp/<thread_id>/<attachment_id>/`` and the call CARRIES the
+        agent scope (``X-Composable-Agent`` — the server composes the user ×
+        agent namespace from it)."""
+        thread_id = await agent_with_thread(client, users["a"]["headers"], agent_name="att-scope-test")
         attachment = document_attachment(filename="rapport.pdf")
         resp = await _invoke_document(client, users["a"]["headers"], thread_id, attachment)
         assert resp.status_code == 200, resp.text
@@ -96,7 +99,17 @@ class TestTemporaryDocumentUpload:
         call = calls[0]
         assert call["file_name"] == "rapport.pdf"
         assert call["content_type"] == "application/pdf"
-        assert call["prefix"].startswith(f"chat_tmp/user-a/{thread_id}/"), call["prefix"]
+        assert call["prefix"], call
+        assert call["prefix"].startswith(f"chat_tmp/{thread_id}/"), (
+            call["prefix"],
+            thread_id,
+        )
+        # User × agent directive: the injected agent scope header IS the
+        # thread agent's canonical slug (``att-scope-test`` is already
+        # slug-valid → passes through unchanged).
+        assert call["request_headers"].get("x-composable-agent") == "att-scope-test", (
+            call["request_headers"]
+        )
         # decoded bytes match what the client sent (strict base64 handling)
         assert call["decoded_bytes"].startswith(b"%PDF")
 

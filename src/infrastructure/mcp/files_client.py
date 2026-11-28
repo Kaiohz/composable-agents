@@ -12,10 +12,14 @@ Two adapters share the MCP streamable-HTTP plumbing:
   deletes every ``chat_tmp/...`` ref, retries once on failure, logs ERROR on
   any failure and NEVER raises (REQ-045/046/047).
 
-Nothing here ever deletes outside ``chat_tmp/<user_id>/`` — the object paths
-are built exclusively by the attachments preparation service
-(:func:`domain.temporary_object_path`). The temporary tools are never loaded
-for the LLM: :mod:`src.infrastructure.mcp.adapter` filters them out (REQ-036).
+The temporary tools REQUIRE the agent scope (chat_tmp Option 2): both
+adapters inject ``X-Composable-Agent: {scope_slug}`` (the turn's agent) so
+the server composes the SAME user × agent namespace the upload did.
+Nothing here ever deletes outside the caller's scoped ``chat_tmp/`` — the
+RELATIVE object paths are built exclusively by the attachments preparation
+service (:func:`domain.temporary_object_path`). The temporary tools are
+never loaded for the LLM: :mod:`src.infrastructure.mcp.adapter` filters them
+out (REQ-036).
 """
 
 import asyncio
@@ -35,6 +39,7 @@ from src.domain.ports.agent_config_store import AgentConfigStore
 from src.domain.ports.files_mcp_client import FilesMcpClient, FilesMcpUpload
 from src.domain.ports.temporary_document_cleaner import TemporaryDocumentCleaner
 from src.infrastructure.env_utils import resolve_headers_drop_empty
+from src.infrastructure.mcp.adapter import AGENT_SCOPE_HEADER
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +63,7 @@ class McpStreamableFilesClient(FilesMcpClient):
         """
         self._tool_timeout = tool_timeout
 
-    def _resolved_headers(self, server: McpServerConfig) -> dict[str, str]:
+    def _resolved_headers(self, server: McpServerConfig, agent_name: str | None = None) -> dict[str, str]:
         """Resolve the server's credential headers (loader-equivalent).
 
         SAME precedence as the agent tool loader (NFR-011): env/user
@@ -68,12 +73,21 @@ class McpStreamableFilesClient(FilesMcpClient):
         wins over a colliding header name. Without the injected credential
         the dual-auth guard of the Files MCP server denies every
         initialize (401) — temporary uploads/cleanup degrade.
+
+        User × agent directive (chat_tmp Option 2): with an agent name, the
+        canonical ``X-Composable-Agent`` scope slug is injected on top (the
+        injected value WINS over a collision — the temporary tools REQUIRE
+        the scope server-side).
         """
+        from src.domain.services.agent_scope import agent_scope_slug
         from src.domain.services.mcp_auth_mode import user_credential_headers
         from src.infrastructure.database.rls_context import current_auth_context
 
         injected = user_credential_headers(server.auth_mode, current_auth_context.get())
-        return resolve_headers_drop_empty({**dict(server.headers), **injected})
+        merged = {**dict(server.headers), **injected}
+        if agent_name:
+            merged[AGENT_SCOPE_HEADER] = agent_scope_slug(agent_name)
+        return resolve_headers_drop_empty(merged)
 
     async def temporary_upload(
         self,
@@ -83,6 +97,7 @@ class McpStreamableFilesClient(FilesMcpClient):
         content_base64: str,
         content_type: str,
         prefix: str,
+        agent_name: str,
     ) -> FilesMcpUpload:
         """Upload a temporary document (see port contract, REQ-030..033)."""
         payload = await self._call_tool(
@@ -94,6 +109,7 @@ class McpStreamableFilesClient(FilesMcpClient):
                 "content_type": content_type,
                 "prefix": prefix,
             },
+            agent_name=agent_name,
         )
         try:
             return FilesMcpUpload(
@@ -107,11 +123,24 @@ class McpStreamableFilesClient(FilesMcpClient):
                 ErrorMessage.ATTACHMENT_MCP_UPLOAD_FAILED.format(filename=file_name, error=exc)
             ) from exc
 
-    async def temporary_delete(self, server: McpServerConfig, *, object_path: str) -> None:
+    async def temporary_delete(
+        self, server: McpServerConfig, *, object_path: str, agent_name: str
+    ) -> None:
         """Delete a temporary object (see port contract, REQ-034/035)."""
-        await self._call_tool(server, "temporary_delete_file", {"object_path": object_path})
+        await self._call_tool(
+            server,
+            "temporary_delete_file",
+            {"object_path": object_path},
+            agent_name=agent_name,
+        )
 
-    async def _call_tool(self, server: McpServerConfig, tool_name: str, arguments: dict[str, str]) -> dict[str, Any]:
+    async def _call_tool(
+        self,
+        server: McpServerConfig,
+        tool_name: str,
+        arguments: dict[str, str],
+        agent_name: str = "",
+    ) -> dict[str, Any]:
         """Open a session, invoke the tool and return its structured payload.
 
         The WHOLE call (connection + handshake + tool execution) is bounded by
@@ -121,6 +150,7 @@ class McpStreamableFilesClient(FilesMcpClient):
             server: The Files MCP server config.
             tool_name: ``temporary_upload_file`` or ``temporary_delete_file``.
             arguments: Tool arguments.
+            agent_name: The turn's agent (``X-Composable-Agent`` injection).
 
         Returns:
             The tool's structured JSON payload.
@@ -128,7 +158,7 @@ class McpStreamableFilesClient(FilesMcpClient):
         Raises:
             FilesMcpTemporaryError: On connection/timeout/tool errors.
         """
-        headers = self._resolved_headers(server)
+        headers = self._resolved_headers(server, agent_name=agent_name or None)
         try:
             return await asyncio.wait_for(
                 self._invoke(server.url or "", headers, tool_name, arguments),
@@ -233,11 +263,16 @@ class McpFilesTemporaryCleaner(TemporaryDocumentCleaner):
         REQ-046: each failure is logged ERROR and retried exactly once; the
         method never raises so an agent response already produced can never be
         masked by a cleanup failure. REQ-047: deletions target only the refs
-        supplied by the backend — all under ``chat_tmp/<user_id>/...``.
+        supplied by the backend — all under the caller's scoped
+        ``chat_tmp/...`` (the agent header is injected so the delete composes
+        the SAME user × agent scope the upload did — chat_tmp Option 2).
         """
         if not refs:
             return
-        thread_id = refs[0].object_path.split("/")[2] if len(refs[0].object_path.split("/")) > 2 else ""
+        # Log context: the thread segment of the RELATIVE contract
+        # ``chat_tmp/<thread_id>/<attachment_id>/<file>`` (chat_tmp Option 2).
+        parts = refs[0].object_path.split("/")
+        thread_id = parts[1] if len(parts) > 1 else ""
         logger.info(LogMessage.CHAT_TEMP_CLEANUP_STARTED, len(refs), thread_id)
         server = await self._resolve_files_server(agent_name)
         if server is None:
@@ -245,12 +280,12 @@ class McpFilesTemporaryCleaner(TemporaryDocumentCleaner):
             return
         deleted = 0
         for ref in refs:
-            if await self._delete_once(server, ref, thread_id):
+            if await self._delete_once(server, ref, thread_id, agent_name):
                 deleted += 1
         if deleted:
             logger.info(LogMessage.CHAT_TEMP_CLEANUP_SUCCEEDED, thread_id, deleted)
 
-    async def _delete_once(self, server: McpServerConfig, ref, thread_id: str) -> bool:  # noqa: ANN401
+    async def _delete_once(self, server: McpServerConfig, ref, thread_id: str, agent_name: str) -> bool:  # noqa: ANN401
         """Attempt one deletion with exactly one retry (REQ-046).
 
         Returns:
@@ -258,7 +293,9 @@ class McpFilesTemporaryCleaner(TemporaryDocumentCleaner):
         """
         for attempt in (1, 2):
             try:
-                await self._files_client.temporary_delete(server, object_path=ref.object_path)
+                await self._files_client.temporary_delete(
+                    server, object_path=ref.object_path, agent_name=agent_name
+                )
                 return True
             except Exception:  # noqa: BLE001 — cleanup NEVER masks the turn (REQ-046)
                 logger.exception(
